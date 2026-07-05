@@ -1,0 +1,14 @@
+{
+  "boards": {
+    "voicepe": {
+      "board": "voice-pe",
+      "label": "Voice PE",
+      "manifest": "prebuilt_firmware/native-voicepe-0.1.20.json",
+      "version": "native-voicepe-0.1.20"
+    }
+  },
+  "kind": "tater_native_satellite_firmware_latest",
+  "manifest": "prebuilt_firmware/native-voicepe-0.1.20.json",
+  "schema": 1,
+  "version": "native-voicepe-0.1.20"
+}

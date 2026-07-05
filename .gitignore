@@ -1,0 +1,10 @@
+.pio/
+build/
+release_assets/
+managed_components/
+sdkconfig
+sdkconfig.*
+!sdkconfig.defaults
+.DS_Store
+__pycache__/
+*.pyc

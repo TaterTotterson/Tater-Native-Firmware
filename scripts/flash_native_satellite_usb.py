@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+
+FIRMWARE_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_LATEST = FIRMWARE_ROOT / "prebuilt_firmware" / "latest.json"
+DEFAULT_LATEST_URL = "https://github.com/TaterTotterson/Tater-Native-Firmware/releases/latest/download/latest.json"
+CACHE_ROOT = Path.home() / ".taterassistant" / "native_firmware_cache"
+
+
+def text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_json_path(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def read_json_url(url: str) -> dict[str, Any]:
+    req = urllib.request.Request(url, headers={"User-Agent": "TaterNativeFlasher/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8", errors="replace"))
+
+
+def raw_url(path_or_url: str, latest_url: str) -> str:
+    if path_or_url.startswith(("http://", "https://")):
+        return path_or_url
+    if "raw.githubusercontent.com" in latest_url:
+        parts = latest_url.split("/")
+        try:
+            base = "/".join(parts[:7])
+            return f"{base}/{path_or_url.lstrip('/')}"
+        except Exception:
+            pass
+    return f"https://raw.githubusercontent.com/TaterTotterson/Tater-Native-Firmware/main/{path_or_url.lstrip('/')}"
+
+
+def local_repo_path(path_or_url: str) -> Path | None:
+    if path_or_url.startswith(("http://", "https://")):
+        return None
+    clean = path_or_url.lstrip("/")
+    if clean.startswith("firmware/native_satellite/"):
+        clean = clean[len("firmware/native_satellite/") :]
+    return FIRMWARE_ROOT / clean
+
+
+def load_manifest(latest_url: str) -> tuple[dict[str, Any], str]:
+    if LOCAL_LATEST.is_file():
+        latest = read_json_path(LOCAL_LATEST)
+        manifest_ref = text(latest.get("manifest"))
+        manifest_path = local_repo_path(manifest_ref)
+        if manifest_path and manifest_path.is_file():
+            return read_json_path(manifest_path), str(manifest_path)
+
+    latest = read_json_url(latest_url)
+    manifest_ref = text(latest.get("manifest"))
+    if not manifest_ref:
+        raise SystemExit("Native firmware latest.json is missing manifest.")
+    manifest_url = raw_url(manifest_ref, latest_url)
+    return read_json_url(manifest_url), manifest_url
+
+
+def find_factory_artifact(manifest: dict[str, Any], board: str) -> dict[str, Any]:
+    for row in manifest.get("devices") or []:
+        if not isinstance(row, dict):
+            continue
+        if text(row.get("key")).lower() != board.lower() and text(row.get("board")).lower() != board.lower().replace("voicepe", "voice-pe"):
+            continue
+        artifacts = row.get("artifacts") if isinstance(row.get("artifacts"), dict) else {}
+        factory = artifacts.get("factory") if isinstance(artifacts.get("factory"), dict) else None
+        if isinstance(factory, dict) and text(factory.get("path")):
+            return dict(factory)
+    raise SystemExit(f"No factory artifact found for board {board!r}.")
+
+
+def download_or_copy_artifact(artifact: dict[str, Any], manifest_source: str) -> Path:
+    path_ref = text(artifact.get("path"))
+    local_path = local_repo_path(path_ref)
+    if local_path and local_path.is_file():
+        path = local_path
+    else:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        target = CACHE_ROOT / Path(path_ref).name
+        url = raw_url(path_ref, manifest_source)
+        print(f"Downloading {url}")
+        req = urllib.request.Request(url, headers={"User-Agent": "TaterNativeFlasher/1.0"})
+        with urllib.request.urlopen(req, timeout=120) as response:
+            target.write_bytes(response.read())
+        path = target
+
+    expected_size = int(artifact.get("size_bytes") or 0)
+    if expected_size and path.stat().st_size != expected_size:
+        raise SystemExit(f"Size check failed for {path}: expected {expected_size}, got {path.stat().st_size}.")
+    expected_sha = text(artifact.get("sha256")).lower()
+    if expected_sha:
+        actual_sha = sha256(path).lower()
+        if actual_sha != expected_sha:
+            raise SystemExit(f"SHA-256 check failed for {path}: expected {expected_sha}, got {actual_sha}.")
+    return path
+
+
+def find_ports() -> list[str]:
+    candidates: list[str] = []
+    for pattern in ("/dev/cu.usbmodem*", "/dev/ttyACM*", "/dev/ttyUSB*", "/dev/cu.SLAB_USBtoUART*"):
+        candidates.extend(str(path) for path in sorted(Path("/").glob(pattern.lstrip("/"))))
+    return candidates
+
+
+def find_esptool_python() -> list[str]:
+    candidates = [
+        [sys.executable, "-m", "esptool"],
+        [str(Path.home() / ".platformio" / "penv" / "bin" / "python"), "-m", "esptool"],
+    ]
+    for command in candidates:
+        try:
+            subprocess.run(command + ["version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return command
+        except Exception:
+            continue
+    esptool = shutil.which("esptool.py") or shutil.which("esptool")
+    if esptool:
+        return [esptool]
+    raise SystemExit("Could not find esptool. Install PlatformIO or run: python3 -m pip install esptool")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Flash Tater Native satellite firmware over USB without a browser.")
+    parser.add_argument("port", nargs="?", help="Serial port, for example /dev/cu.usbmodem4101.")
+    parser.add_argument("--board", default="voicepe", help="Native board key. Default: voicepe.")
+    parser.add_argument("--image", help="Use a local factory image instead of the manifest artifact.")
+    parser.add_argument("--latest-url", default=os.getenv("TATER_NATIVE_FIRMWARE_LATEST_URL", DEFAULT_LATEST_URL))
+    parser.add_argument("--baud", default="921600")
+    parser.add_argument("--no-erase", action="store_true", help="Do not erase flash before writing the factory image.")
+    args = parser.parse_args()
+
+    port = text(args.port)
+    if not port:
+        ports = find_ports()
+        if len(ports) == 1:
+            port = ports[0]
+        elif ports:
+            print("Available serial ports:")
+            for candidate in ports:
+                print(f"  {candidate}")
+            raise SystemExit(
+                "Pass the port to flash, for example: "
+                "./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101"
+            )
+        else:
+            raise SystemExit("No USB serial ports found. Plug in the satellite and pass the port path.")
+
+    if args.image:
+        image = Path(args.image).expanduser().resolve()
+        if not image.is_file():
+            raise SystemExit(f"Image not found: {image}")
+        artifact = {"flash_size": "16MB", "flash_mode": "dio", "flash_freq": "40m"}
+    else:
+        manifest, manifest_source = load_manifest(text(args.latest_url) or DEFAULT_LATEST_URL)
+        artifact = find_factory_artifact(manifest, text(args.board) or "voicepe")
+        image = download_or_copy_artifact(artifact, manifest_source)
+
+    esptool_cmd = find_esptool_python()
+    flash_size = text(artifact.get("flash_size")) or "16MB"
+    flash_mode = text(artifact.get("flash_mode")) or "dio"
+    flash_freq = text(artifact.get("flash_freq")) or "40m"
+
+    if not args.no_erase:
+        print(f"Erasing flash on {port}...")
+        subprocess.run(esptool_cmd + ["--chip", "esp32s3", "--port", port, "--baud", text(args.baud), "erase_flash"], check=True)
+
+    print(f"Flashing {image} to {port}...")
+    subprocess.run(
+        esptool_cmd
+        + [
+            "--chip",
+            "esp32s3",
+            "--port",
+            port,
+            "--baud",
+            text(args.baud),
+            "--before",
+            "default_reset",
+            "--after",
+            "hard_reset",
+            "write_flash",
+            "-z",
+            "--flash_mode",
+            flash_mode,
+            "--flash_freq",
+            flash_freq,
+            "--flash_size",
+            flash_size,
+            "0x0",
+            str(image),
+        ],
+        check=True,
+    )
+    print("Done. After reboot, connect to Tater-Setup-XXXX and provision the satellite with an Add Satellite pairing code.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

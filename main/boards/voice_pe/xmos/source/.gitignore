@@ -1,0 +1,91 @@
+# Editor cruft
+**/.vscode/
+
+# Python cruft
+**/*.pyc
+**/__pycache__/*
+**/*.egg-info/*
+**/*.eggs/*
+**/.ipynb_checkpoints/*
+
+# Build & debug cruft
+**/.build*/*
+**/bin/*
+*.o
+*.so*
+*.dylib
+*.xe
+*.vcd
+*.s
+*.xi
+*.i
+*.xmt
+**/_build/
+**/build_*/
+**/dist*/
+**/dist_host*/
+!doc/tutorials/build_system/
+**/run_*.log
+**/_doxygen/*
+**/_templates/*
+**/pdf/*
+**/html/*
+**/.settings/*
+.metadata
+**/test_results.csv
+**/test_results.xml
+**/.venv/**
+.metadata
+*.gtkw
+*.swmem
+*.bin
+*.fs
+*.swp
+
+# Test cruft
+**/.pytest_cache/*
+**/*_junit.xml
+**/testing/*
+
+# waf build cruft
+.lock-waf_*
+.waf-*/
+build/
+
+# filesystem cruft
+**/fat.fs
+**/flash_bin_node0
+**/fw-*
+**/spanning-xn-*
+**/target-xn-*
+
+# wifi cruft
+**/networks.dat
+
+# systemview debug cruft
+*.SVDAT
+
+# macOS cruft
+.DS_Store
+
+# ai_tools
+tools/ai/ai_tools
+*xcore_sdk_venv/*
+examples/mic_aggregator/src/par_decimator
+
+# These are checked-in xmos_cmake_toolchain source fixtures, not generated
+# assembly output. On macOS, core.ignorecase can make *.s catch them.
+!xmos_cmake_toolchain/test/test_app/*.S
+
+# External XMOS dependency checkouts materialized by scripts/fetch_dependencies.sh.
+# Commit the pins in submodules.lock instead of vendoring these generated clones.
+modules/core/
+modules/io/
+modules/rtos/
+modules/sample_rate_conversion/lib_src/
+modules/voice/
+modules/xscope_fileio/xscope_fileio/
+modules/inferencing/lib_nn/
+modules/lib_qspi_fast_read/
+modules/inferencing/lib_tflite_micro/
+modules/xua/

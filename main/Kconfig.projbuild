@@ -1,0 +1,44 @@
+menu "Tater Native Satellite"
+
+config TATER_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+
+config TATER_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+
+config TATER_SERVER_URL
+    string "Tater server URL"
+    default "ws://tater.local:8501"
+    help
+        Base Tater server URL. The firmware appends /api/tater/satellite/v1/ws
+        unless the full native satellite WebSocket path is already present.
+
+config TATER_SATELLITE_TOKEN
+    string "Satellite token"
+    default ""
+    help
+        Used as X-Tater-Token when Tater API auth is enabled.
+
+config TATER_DEVICE_ID_PREFIX
+    string "Device ID prefix"
+    default "voicepe"
+
+config TATER_DEVICE_NAME
+    string "Device name"
+    default "Tater Voice PE"
+
+config TATER_ROOM
+    string "Room"
+    default ""
+
+config TATER_LOG_VERBOSE_AUDIO
+    bool "Verbose audio logging"
+    default n
+
+config TATER_PLAYBACK_MAX_BYTES
+    int "Maximum downloaded playback WAV bytes"
+    default 3145728
+
+endmenu
