@@ -45,7 +45,6 @@ constexpr int kFeatureSize = 40;
 constexpr int kWakeInputFeatureFrames = 2;
 constexpr int kWakeInputElements = kWakeInputFeatureFrames * kFeatureSize;
 constexpr int kMaxSlidingWindow = 10;
-constexpr int64_t kTriggerCooldownUs = 2500000;
 constexpr int64_t kCloseMissConfirmationDelayUs = 900000;
 constexpr int64_t kCloseMissUploadCooldownUs = 10000000;
 constexpr size_t kWakeArenaSize = 192 * 1024;
@@ -73,6 +72,13 @@ constexpr char kCaptureUploadPath[] = "/api/upload_captured_audio_raw";
 
 using WakeOpResolver = tflite::MicroMutableOpResolver<14>;
 
+enum class WakeEnvironment : uint8_t {
+    FAR_FIELD = 0,
+    BALANCED,
+    STRICT,
+    TV_NEARBY,
+};
+
 struct DownloadedWakeModel {
     uint8_t *data;
     size_t size;
@@ -93,10 +99,13 @@ struct CaptureUploadRequest {
     char source_device[64];
     char wake_word[32];
     char event_type[16];
+    char detection_profile[32];
     char probability_history[128];
     float max_probability;
     float average_probability;
     float probability_cutoff;
+    float peak_probability_cutoff;
+    float rise_score;
     uint8_t active_window_count;
     uint8_t min_active_windows;
 };
@@ -105,10 +114,13 @@ struct PendingCloseMiss {
     bool active;
     int64_t due_us;
     char wake_word[32];
+    char detection_profile[32];
     char probability_history[128];
     float max_probability;
     float average_probability;
     float probability_cutoff;
+    float peak_probability_cutoff;
+    float rise_score;
     uint8_t active_window_count;
     uint8_t min_active_windows;
 };
@@ -140,7 +152,14 @@ uint32_t s_detection_count = 0;
 size_t s_wake_arena_used = 0;
 float s_last_score = 0.0f;
 float s_last_average = 0.0f;
+float s_last_peak = 0.0f;
+float s_last_peak_threshold = 0.0f;
+float s_last_rise_score = 0.0f;
+uint8_t s_last_active_window_count = 0;
+uint8_t s_last_min_active_windows = 0;
 int32_t s_last_raw_score = 0;
+char s_last_detection_profile[32] = "balanced";
+char s_last_reject_reason[32] = "";
 char s_last_error[96] = "not initialized";
 bool s_ready = false;
 bool s_runtime_was_enabled = false;
@@ -261,7 +280,13 @@ void reset_buffers()
     s_score_window_index = 0;
     s_last_score = 0.0f;
     s_last_average = 0.0f;
+    s_last_peak = 0.0f;
+    s_last_peak_threshold = 0.0f;
+    s_last_rise_score = 0.0f;
+    s_last_active_window_count = 0;
+    s_last_min_active_windows = 0;
     s_last_raw_score = 0;
+    s_last_reject_reason[0] = '\0';
     std::memset(s_feature_history, 0, sizeof(s_feature_history));
     std::memset(s_score_window, 0, sizeof(s_score_window));
     if (s_frontend_ready) {
@@ -553,6 +578,157 @@ uint8_t score_to_raw(float score)
     return static_cast<uint8_t>((score * 255.0f) + 0.5f);
 }
 
+const char *wake_environment_name(WakeEnvironment environment)
+{
+    switch (environment) {
+        case WakeEnvironment::FAR_FIELD:
+            return "far_field";
+        case WakeEnvironment::STRICT:
+            return "strict";
+        case WakeEnvironment::TV_NEARBY:
+            return "tv_nearby";
+        case WakeEnvironment::BALANCED:
+        default:
+            return "balanced";
+    }
+}
+
+WakeEnvironment wake_environment_from_settings(const tater_live_settings_t *settings)
+{
+    const char *value = settings ? settings->wake_environment : "";
+    if (!value || !value[0]) {
+        return WakeEnvironment::BALANCED;
+    }
+    if (std::strcmp(value, "far_field") == 0 || std::strcmp(value, "quiet") == 0 ||
+        std::strcmp(value, "quiet_room") == 0 || std::strcmp(value, "very_sensitive") == 0) {
+        return WakeEnvironment::FAR_FIELD;
+    }
+    if (std::strcmp(value, "strict") == 0) {
+        return WakeEnvironment::STRICT;
+    }
+    if (std::strcmp(value, "tv_nearby") == 0 || std::strcmp(value, "tv") == 0 || std::strcmp(value, "near_tv") == 0) {
+        return WakeEnvironment::TV_NEARBY;
+    }
+    return WakeEnvironment::BALANCED;
+}
+
+float peak_threshold_for_environment(WakeEnvironment environment, float threshold)
+{
+    switch (environment) {
+        case WakeEnvironment::STRICT:
+            return std::max(threshold, 220.0f / 255.0f);
+        case WakeEnvironment::TV_NEARBY:
+            return std::max(threshold, 235.0f / 255.0f);
+        case WakeEnvironment::FAR_FIELD:
+        case WakeEnvironment::BALANCED:
+        default:
+            return threshold;
+    }
+}
+
+uint8_t minimum_active_windows_for_environment(WakeEnvironment environment, size_t window)
+{
+    if (window == 0) {
+        return 0;
+    }
+    size_t minimum = 1;
+    switch (environment) {
+        case WakeEnvironment::FAR_FIELD:
+            minimum = 1;
+            break;
+        case WakeEnvironment::STRICT:
+            minimum = std::max<size_t>(2, ((window * 2) + 2) / 3);
+            break;
+        case WakeEnvironment::TV_NEARBY:
+            minimum = std::max<size_t>(3, ((window * 3) + 3) / 4);
+            break;
+        case WakeEnvironment::BALANCED:
+        default:
+            minimum = std::max<size_t>(1, (window + 1) / 2);
+            break;
+    }
+    return static_cast<uint8_t>(std::min(minimum, window));
+}
+
+float minimum_rise_score_for_environment(WakeEnvironment environment)
+{
+    switch (environment) {
+        case WakeEnvironment::STRICT:
+            return -8.0f / 255.0f;
+        case WakeEnvironment::TV_NEARBY:
+            return 4.0f / 255.0f;
+        case WakeEnvironment::FAR_FIELD:
+        case WakeEnvironment::BALANCED:
+        default:
+            return -1.0f;
+    }
+}
+
+int64_t cooldown_us_for_environment(WakeEnvironment environment)
+{
+    switch (environment) {
+        case WakeEnvironment::FAR_FIELD:
+            return 800000;
+        case WakeEnvironment::STRICT:
+            return 1600000;
+        case WakeEnvironment::TV_NEARBY:
+            return 2400000;
+        case WakeEnvironment::BALANCED:
+        default:
+            return 1200000;
+    }
+}
+
+size_t normalized_score_window(const tater_live_settings_t *settings)
+{
+    size_t window = settings ? settings->wake_sliding_window : 5;
+    if (window < 1) {
+        return 1;
+    }
+    if (window > kMaxSlidingWindow) {
+        return kMaxSlidingWindow;
+    }
+    return window;
+}
+
+size_t score_window_count(size_t window)
+{
+    return std::min(s_score_window_count, window);
+}
+
+size_t score_window_oldest_index(size_t count, size_t window)
+{
+    return count >= window ? s_score_window_index : 0;
+}
+
+float score_window_value_at(size_t offset, size_t count, size_t window)
+{
+    if (count == 0 || window == 0) {
+        return 0.0f;
+    }
+    size_t oldest = score_window_oldest_index(count, window);
+    return s_score_window[(oldest + offset) % window];
+}
+
+float score_window_rise_score(size_t count, size_t window)
+{
+    if (count < window || window < 2) {
+        return 0.0f;
+    }
+    size_t edge_count = window / 2;
+    if (edge_count == 0) {
+        return 0.0f;
+    }
+
+    float early_sum = 0.0f;
+    float late_sum = 0.0f;
+    for (size_t i = 0; i < edge_count; i++) {
+        early_sum += score_window_value_at(i, count, window);
+        late_sum += score_window_value_at(window - edge_count + i, count, window);
+    }
+    return (late_sum / static_cast<float>(edge_count)) - (early_sum / static_cast<float>(edge_count));
+}
+
 void format_probability_history(char *out, size_t out_len)
 {
     if (!out || out_len == 0) {
@@ -588,12 +764,12 @@ void format_probability_history(char *out, size_t out_len)
     }
 }
 
-uint8_t active_windows_at_or_above(float cutoff)
+uint8_t active_windows_at_or_above(float cutoff, size_t window)
 {
     uint8_t active = 0;
-    size_t count = s_score_window_count > kMaxSlidingWindow ? kMaxSlidingWindow : s_score_window_count;
+    size_t count = score_window_count(window);
     for (size_t i = 0; i < count; i++) {
-        if (s_score_window[i] >= cutoff) {
+        if (score_window_value_at(i, count, window) >= cutoff) {
             active++;
         }
     }
@@ -761,6 +937,8 @@ void capture_upload_task(void *arg)
     char max_probability[24] = {0};
     char average_probability[24] = {0};
     char probability_cutoff[16] = {0};
+    char peak_probability_cutoff[16] = {0};
+    char rise_score[24] = {0};
     char active_windows[8] = {0};
     char min_active_windows[8] = {0};
     esp_err_t err = ESP_OK;
@@ -784,6 +962,8 @@ void capture_upload_task(void *arg)
     std::snprintf(max_probability, sizeof(max_probability), "%.6f", (double)request->max_probability);
     std::snprintf(average_probability, sizeof(average_probability), "%.6f", (double)request->average_probability);
     std::snprintf(probability_cutoff, sizeof(probability_cutoff), "%u", (unsigned)score_to_raw(request->probability_cutoff));
+    std::snprintf(peak_probability_cutoff, sizeof(peak_probability_cutoff), "%u", (unsigned)score_to_raw(request->peak_probability_cutoff));
+    std::snprintf(rise_score, sizeof(rise_score), "%.6f", (double)request->rise_score);
     std::snprintf(active_windows, sizeof(active_windows), "%u", (unsigned)request->active_window_count);
     std::snprintf(min_active_windows, sizeof(min_active_windows), "%u", (unsigned)request->min_active_windows);
 
@@ -798,10 +978,11 @@ void capture_upload_task(void *arg)
     esp_http_client_set_header(client, "X-Max-Probability", max_probability);
     esp_http_client_set_header(client, "X-Average-Probability", average_probability);
     esp_http_client_set_header(client, "X-Probability-Cutoff", probability_cutoff);
-    esp_http_client_set_header(client, "X-Peak-Probability-Cutoff", probability_cutoff);
+    esp_http_client_set_header(client, "X-Peak-Probability-Cutoff", peak_probability_cutoff);
     esp_http_client_set_header(client, "X-Active-Windows", active_windows);
     esp_http_client_set_header(client, "X-Min-Active-Windows", min_active_windows);
-    esp_http_client_set_header(client, "X-Detection-Profile", "native_micro_wake_word");
+    esp_http_client_set_header(client, "X-Detection-Profile", request->detection_profile);
+    esp_http_client_set_header(client, "X-Rise-Score", rise_score);
     esp_http_client_set_header(client, "X-Probability-History", request->probability_history);
     esp_http_client_set_header(client, "X-Notes", "tater native satellite");
 
@@ -872,6 +1053,9 @@ void queue_capture_upload(
     float probability_cutoff,
     uint8_t active_window_count,
     uint8_t min_active_windows,
+    const char *detection_profile,
+    float peak_probability_cutoff,
+    float rise_score,
     const char *probability_history
 )
 {
@@ -923,6 +1107,12 @@ void queue_capture_upload(
     std::snprintf(request->wake_word, sizeof(request->wake_word), "%s", wake_word && wake_word[0] ? wake_word : s_active_wake_word);
     std::snprintf(request->event_type, sizeof(request->event_type), "%s", event_type);
     std::snprintf(
+        request->detection_profile,
+        sizeof(request->detection_profile),
+        "%s",
+        detection_profile && detection_profile[0] ? detection_profile : s_last_detection_profile
+    );
+    std::snprintf(
         request->probability_history,
         sizeof(request->probability_history),
         "%s",
@@ -931,6 +1121,8 @@ void queue_capture_upload(
     request->max_probability = max_probability;
     request->average_probability = average_probability;
     request->probability_cutoff = probability_cutoff;
+    request->peak_probability_cutoff = peak_probability_cutoff > 0.0f ? peak_probability_cutoff : probability_cutoff;
+    request->rise_score = rise_score;
     request->active_window_count = active_window_count;
     request->min_active_windows = min_active_windows;
 
@@ -976,6 +1168,9 @@ void flush_pending_close_miss()
         event.probability_cutoff,
         event.active_window_count,
         event.min_active_windows,
+        event.detection_profile,
+        event.peak_probability_cutoff,
+        event.rise_score,
         event.probability_history
     );
 }
@@ -988,6 +1183,9 @@ void maybe_queue_close_miss(
     float probability_cutoff,
     uint8_t active_window_count,
     uint8_t min_active_windows,
+    const char *detection_profile,
+    float peak_probability_cutoff,
+    float rise_score,
     const char *probability_history
 )
 {
@@ -1007,6 +1205,12 @@ void maybe_queue_close_miss(
     }
     std::snprintf(s_pending_close_miss.wake_word, sizeof(s_pending_close_miss.wake_word), "%s", wake_word ? wake_word : "");
     std::snprintf(
+        s_pending_close_miss.detection_profile,
+        sizeof(s_pending_close_miss.detection_profile),
+        "%s",
+        detection_profile && detection_profile[0] ? detection_profile : s_last_detection_profile
+    );
+    std::snprintf(
         s_pending_close_miss.probability_history,
         sizeof(s_pending_close_miss.probability_history),
         "%s",
@@ -1015,6 +1219,8 @@ void maybe_queue_close_miss(
     s_pending_close_miss.max_probability = score;
     s_pending_close_miss.average_probability = average;
     s_pending_close_miss.probability_cutoff = probability_cutoff;
+    s_pending_close_miss.peak_probability_cutoff = peak_probability_cutoff;
+    s_pending_close_miss.rise_score = rise_score;
     s_pending_close_miss.active_window_count = active_window_count;
     s_pending_close_miss.min_active_windows = min_active_windows;
 }
@@ -1490,13 +1696,11 @@ float run_wake_model()
 bool score_window_triggered(float score)
 {
     const tater_live_settings_t *settings = tater_live_settings_get();
-    size_t window = settings ? settings->wake_sliding_window : 5;
-    if (window < 1) {
-        window = 1;
-    } else if (window > kMaxSlidingWindow) {
-        window = kMaxSlidingWindow;
-    }
+    size_t window = normalized_score_window(settings);
     float threshold = settings ? settings->wake_threshold : 0.97f;
+    WakeEnvironment environment = wake_environment_from_settings(settings);
+    const char *profile = wake_environment_name(environment);
+    std::snprintf(s_last_detection_profile, sizeof(s_last_detection_profile), "%s", profile);
 
     s_score_window[s_score_window_index] = score;
     s_score_window_index = (s_score_window_index + 1) % window;
@@ -1504,12 +1708,45 @@ bool score_window_triggered(float score)
         s_score_window_count++;
     }
 
+    size_t count = score_window_count(window);
     float sum = 0.0f;
-    for (size_t i = 0; i < s_score_window_count; i++) {
-        sum += s_score_window[i];
+    float peak = 0.0f;
+    for (size_t i = 0; i < count; i++) {
+        float value = score_window_value_at(i, count, window);
+        sum += value;
+        if (value > peak) {
+            peak = value;
+        }
     }
-    s_last_average = s_score_window_count > 0 ? sum / static_cast<float>(s_score_window_count) : 0.0f;
-    return s_score_window_count >= window && s_last_average >= threshold;
+    s_last_average = count > 0 ? sum / static_cast<float>(count) : 0.0f;
+    s_last_peak = peak;
+    s_last_peak_threshold = peak_threshold_for_environment(environment, threshold);
+    s_last_active_window_count = active_windows_at_or_above(threshold, window);
+    s_last_min_active_windows = minimum_active_windows_for_environment(environment, window);
+    s_last_rise_score = score_window_rise_score(count, window);
+
+    if (count < window) {
+        std::snprintf(s_last_reject_reason, sizeof(s_last_reject_reason), "%s", "warming_up");
+        return false;
+    }
+
+    bool average_detected = s_last_average >= threshold;
+    bool peak_detected = s_last_peak >= s_last_peak_threshold;
+    bool active_windows_detected = s_last_active_window_count >= s_last_min_active_windows;
+    bool shape_detected = s_last_rise_score >= minimum_rise_score_for_environment(environment);
+    bool detected = average_detected && peak_detected && active_windows_detected && shape_detected;
+    if (detected) {
+        s_last_reject_reason[0] = '\0';
+    } else if (!average_detected) {
+        std::snprintf(s_last_reject_reason, sizeof(s_last_reject_reason), "%s", "average");
+    } else if (!peak_detected) {
+        std::snprintf(s_last_reject_reason, sizeof(s_last_reject_reason), "%s", "peak");
+    } else if (!active_windows_detected) {
+        std::snprintf(s_last_reject_reason, sizeof(s_last_reject_reason), "%s", "active_windows");
+    } else {
+        std::snprintf(s_last_reject_reason, sizeof(s_last_reject_reason), "%s", "score_shape");
+    }
+    return detected;
 }
 
 void handle_feature_frame(const int8_t *feature)
@@ -1532,11 +1769,18 @@ void handle_feature_frame(const int8_t *feature)
         if ((now_us - s_last_debug_log_us) >= 500000 || s_last_score >= (threshold * 0.5f)) {
             ESP_LOGI(
                 TAG,
-                "wake score raw=%ld score=%.3f avg=%.3f threshold=%.3f rms=%.1f mean=%.1f peak=%ld feature_min=%ld feature_max=%ld feature_mean=%.1f chunks=%lu",
+                "wake score raw=%ld score=%.3f avg=%.3f peak=%.3f threshold=%.3f peak_threshold=%.3f profile=%s active=%u/%u rise=%.3f reject=%s rms=%.1f mean=%.1f audio_peak=%ld feature_min=%ld feature_max=%ld feature_mean=%.1f chunks=%lu",
                 (long)s_last_raw_score,
                 (double)s_last_score,
                 (double)s_last_average,
+                (double)s_last_peak,
                 (double)threshold,
+                (double)s_last_peak_threshold,
+                s_last_detection_profile,
+                (unsigned)s_last_active_window_count,
+                (unsigned)s_last_min_active_windows,
+                (double)s_last_rise_score,
+                s_last_reject_reason[0] ? s_last_reject_reason : "-",
                 (double)s_audio_last_rms,
                 (double)s_audio_last_abs_mean,
                 (long)s_audio_last_peak,
@@ -1559,8 +1803,11 @@ void handle_feature_frame(const int8_t *feature)
             s_last_score,
             s_last_average,
             threshold,
-            active_windows_at_or_above(settings ? settings->close_miss_threshold : 0.78f),
-            (uint8_t)(settings ? settings->wake_sliding_window : 5),
+            active_windows_at_or_above(settings ? settings->close_miss_threshold : 0.78f, normalized_score_window(settings)),
+            s_last_min_active_windows,
+            s_last_detection_profile,
+            s_last_peak_threshold,
+            s_last_rise_score,
             probability_history
         );
         return;
@@ -1572,8 +1819,19 @@ void handle_feature_frame(const int8_t *feature)
     format_probability_history(probability_history, sizeof(probability_history));
     clear_pending_close_miss();
     s_detection_count++;
-    s_cooldown_until_us = esp_timer_get_time() + kTriggerCooldownUs;
-    ESP_LOGI(TAG, "wake detected score=%.3f avg=%.3f threshold=%.3f", (double)s_last_score, (double)s_last_average, (double)(settings ? settings->wake_threshold : 0.97f));
+    s_cooldown_until_us = esp_timer_get_time() + cooldown_us_for_environment(wake_environment_from_settings(settings));
+    ESP_LOGI(
+        TAG,
+        "wake detected score=%.3f avg=%.3f peak=%.3f threshold=%.3f profile=%s active=%u/%u rise=%.3f",
+        (double)s_last_score,
+        (double)s_last_average,
+        (double)s_last_peak,
+        (double)(settings ? settings->wake_threshold : 0.97f),
+        s_last_detection_profile,
+        (unsigned)s_last_active_window_count,
+        (unsigned)s_last_min_active_windows,
+        (double)s_last_rise_score
+    );
     tater_protocol_send_log("info", "local wake word detected");
     queue_capture_upload(
         "wake_detected",
@@ -1581,8 +1839,11 @@ void handle_feature_frame(const int8_t *feature)
         s_last_score,
         s_last_average,
         threshold,
-        active_windows_at_or_above(threshold),
-        (uint8_t)(settings ? settings->wake_sliding_window : 5),
+        s_last_active_window_count,
+        s_last_min_active_windows,
+        s_last_detection_profile,
+        s_last_peak_threshold,
+        s_last_rise_score,
         probability_history
     );
     const tater_wake_sound_asset_t *wake_sound = settings && settings->wake_sound_enabled
@@ -1804,6 +2065,13 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     cJSON_AddNumberToObject(wake, "last_raw_score", s_last_raw_score);
     cJSON_AddNumberToObject(wake, "last_score", s_last_score);
     cJSON_AddNumberToObject(wake, "last_average", s_last_average);
+    cJSON_AddNumberToObject(wake, "last_peak", s_last_peak);
+    cJSON_AddNumberToObject(wake, "last_peak_threshold", s_last_peak_threshold);
+    cJSON_AddStringToObject(wake, "last_detection_profile", s_last_detection_profile);
+    cJSON_AddNumberToObject(wake, "last_active_windows", s_last_active_window_count);
+    cJSON_AddNumberToObject(wake, "last_min_active_windows", s_last_min_active_windows);
+    cJSON_AddNumberToObject(wake, "last_rise_score", s_last_rise_score);
+    cJSON_AddStringToObject(wake, "last_reject_reason", s_last_reject_reason);
     cJSON_AddStringToObject(wake, "last_error", s_last_error);
     cJSON_AddBoolToObject(wake, "runtime_enabled", s_runtime_was_enabled);
     cJSON *capture = cJSON_CreateObject();

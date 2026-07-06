@@ -83,6 +83,8 @@ void tater_live_settings_init_defaults(void)
     strlcpy_or_empty(s_settings.wake_engine, "micro_wake_word", sizeof(s_settings.wake_engine));
     strlcpy_or_empty(s_settings.wake_word, "hey_tater", sizeof(s_settings.wake_word));
     strlcpy_or_empty(s_settings.wake_word_url, "", sizeof(s_settings.wake_word_url));
+    strlcpy_or_empty(s_settings.wake_sensitivity, "normal", sizeof(s_settings.wake_sensitivity));
+    strlcpy_or_empty(s_settings.wake_environment, "balanced", sizeof(s_settings.wake_environment));
     s_settings.wake_threshold = 0.97f;
     s_settings.wake_sliding_window = 5;
     s_settings.capture_wake_audio = false;
@@ -118,6 +120,8 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *wake_engine = cJSON_GetObjectItem(payload, "wake_engine");
     const cJSON *wake_word = cJSON_GetObjectItem(payload, "wake_word");
     const cJSON *wake_word_url = cJSON_GetObjectItem(payload, "wake_word_url");
+    const cJSON *wake_sensitivity = cJSON_GetObjectItem(payload, "wake_sensitivity");
+    const cJSON *wake_environment = cJSON_GetObjectItem(payload, "wake_environment");
     const cJSON *wake_threshold = cJSON_GetObjectItem(payload, "wake_threshold");
     const cJSON *wake_sliding_window = cJSON_GetObjectItem(payload, "wake_sliding_window");
     const cJSON *capture_wake_audio = cJSON_GetObjectItem(payload, "capture_wake_audio");
@@ -145,6 +149,12 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     }
     if (cJSON_IsString(wake_word_url) && wake_word_url->valuestring) {
         strlcpy_or_empty(s_settings.wake_word_url, wake_word_url->valuestring, sizeof(s_settings.wake_word_url));
+    }
+    if (cJSON_IsString(wake_sensitivity) && wake_sensitivity->valuestring && wake_sensitivity->valuestring[0]) {
+        strlcpy_or_empty(s_settings.wake_sensitivity, wake_sensitivity->valuestring, sizeof(s_settings.wake_sensitivity));
+    }
+    if (cJSON_IsString(wake_environment) && wake_environment->valuestring && wake_environment->valuestring[0]) {
+        strlcpy_or_empty(s_settings.wake_environment, wake_environment->valuestring, sizeof(s_settings.wake_environment));
     }
     s_settings.wake_threshold = json_float_range(wake_threshold, s_settings.wake_threshold, 0.01f, 0.99f);
     s_settings.wake_sliding_window = json_u8_range(wake_sliding_window, s_settings.wake_sliding_window, 1, 10);
@@ -186,10 +196,12 @@ bool tater_live_settings_apply_json(const cJSON *payload)
 
     ESP_LOGI(
         TAG,
-        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f wake_sound=%d/%s continued_chat=%d volume=%u led=%u color=%s animations=%s/%s/%s/%s logging=%s",
+        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f wake_sound=%d/%s continued_chat=%d volume=%u led=%u color=%s animations=%s/%s/%s/%s logging=%s",
         s_settings.wake_engine,
         s_settings.wake_word,
         s_settings.wake_word_url,
+        s_settings.wake_sensitivity,
+        s_settings.wake_environment,
         (double)s_settings.wake_threshold,
         s_settings.wake_sliding_window,
         s_settings.capture_wake_audio,
@@ -219,6 +231,8 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddStringToObject(settings, "wake_engine", s_settings.wake_engine);
     cJSON_AddStringToObject(settings, "wake_word", s_settings.wake_word);
     cJSON_AddStringToObject(settings, "wake_word_url", s_settings.wake_word_url);
+    cJSON_AddStringToObject(settings, "wake_sensitivity", s_settings.wake_sensitivity);
+    cJSON_AddStringToObject(settings, "wake_environment", s_settings.wake_environment);
     cJSON_AddNumberToObject(settings, "wake_threshold", s_settings.wake_threshold);
     cJSON_AddNumberToObject(settings, "wake_sliding_window", s_settings.wake_sliding_window);
     cJSON_AddBoolToObject(settings, "capture_wake_audio", s_settings.capture_wake_audio);

@@ -9,6 +9,8 @@ typedef struct {
     char wake_engine[32];
     char wake_word[32];
     char wake_word_url[256];
+    char wake_sensitivity[24];
+    char wake_environment[32];
     float wake_threshold;
     uint8_t wake_sliding_window;
     bool capture_wake_audio;
