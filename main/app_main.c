@@ -1,6 +1,7 @@
 #include "audio_i2s.h"
 #include "board.h"
 #include "button.h"
+#include "cache_storage.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -90,6 +91,7 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(tater_cache_init());
 
     ESP_ERROR_CHECK(tater_config_load(&s_config));
     ESP_ERROR_CHECK(tater_leds_init());

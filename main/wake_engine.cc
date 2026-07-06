@@ -25,6 +25,7 @@
 #include "tensorflow/lite/schema/schema_generated.h"
 
 extern "C" {
+#include "cache_storage.h"
 #include "frontend.h"
 #include "frontend_util.h"
 #include "native_settings.h"
@@ -65,10 +66,15 @@ constexpr int32_t kFrontendValueScale = 256;
 constexpr int32_t kFrontendValueDiv = 666;
 constexpr size_t kWakeManifestMaxBytes = 16 * 1024;
 constexpr size_t kWakeDownloadedModelMaxBytes = 512 * 1024;
+constexpr size_t kWakeDownloadedSoundMaxBytes = 512 * 1024;
 constexpr size_t kCaptureBufferSamples = kAudioSampleRate * 3;
 constexpr size_t kCaptureUploadBufferSize = 2048;
 constexpr int kCaptureUploadTimeoutMs = 15000;
 constexpr char kCaptureUploadPath[] = "/api/upload_captured_audio_raw";
+constexpr char kWakeModelCacheMetaPath[] = "/spiffs/wake_model.json";
+constexpr char kWakeModelCacheDataPath[] = "/spiffs/wake_model.tflite";
+constexpr char kWakeSoundCacheMetaPath[] = "/spiffs/wake_sound.json";
+constexpr char kWakeSoundCacheDataPath[] = "/spiffs/wake_sound.wav";
 
 using WakeOpResolver = tflite::MicroMutableOpResolver<14>;
 
@@ -90,6 +96,10 @@ struct DownloadedWakeModel {
 
 struct WakeDownloadRequest {
     char url[256];
+};
+
+struct WakeSoundDownloadRequest {
+    char url[192];
 };
 
 struct CaptureUploadRequest {
@@ -171,11 +181,22 @@ char s_active_model_url[256] = "";
 uint8_t *s_active_custom_model_data = nullptr;
 size_t s_active_custom_model_size = 0;
 SemaphoreHandle_t s_custom_model_lock = nullptr;
+SemaphoreHandle_t s_wake_sound_lock = nullptr;
 DownloadedWakeModel s_pending_custom_model = {};
 char s_requested_custom_url[256] = "";
 char s_downloading_custom_url[256] = "";
 bool s_custom_download_running = false;
 uint32_t s_custom_download_failures = 0;
+uint32_t s_custom_cache_hits = 0;
+uint32_t s_custom_cache_writes = 0;
+uint32_t s_custom_cache_failures = 0;
+char s_requested_wake_sound_url[192] = "";
+char s_downloading_wake_sound_url[192] = "";
+bool s_wake_sound_download_running = false;
+uint32_t s_wake_sound_cache_hits = 0;
+uint32_t s_wake_sound_cache_writes = 0;
+uint32_t s_wake_sound_cache_failures = 0;
+uint32_t s_wake_sound_download_failures = 0;
 uint64_t s_audio_samples_seen = 0;
 uint32_t s_audio_chunks_seen = 0;
 uint32_t s_audio_nonzero_chunks = 0;
@@ -534,6 +555,99 @@ bool http_download_to_memory(const char *url, size_t max_bytes, bool null_termin
     *out_size = used;
     ESP_LOGI(TAG, "wake download complete url=%s bytes=%u", url, (unsigned)used);
     return true;
+}
+
+bool read_cache_file(const char *path, size_t max_bytes, bool null_terminate, uint8_t **out_data, size_t *out_size)
+{
+    if (out_data) {
+        *out_data = nullptr;
+    }
+    if (out_size) {
+        *out_size = 0;
+    }
+    if (!tater_cache_ready() || !path || !out_data || !out_size || max_bytes == 0) {
+        return false;
+    }
+
+    FILE *file = std::fopen(path, "rb");
+    if (!file) {
+        return false;
+    }
+    if (std::fseek(file, 0, SEEK_END) != 0) {
+        std::fclose(file);
+        return false;
+    }
+    long file_size = std::ftell(file);
+    if (file_size <= 0 || static_cast<size_t>(file_size) > max_bytes) {
+        std::fclose(file);
+        return false;
+    }
+    if (std::fseek(file, 0, SEEK_SET) != 0) {
+        std::fclose(file);
+        return false;
+    }
+
+    size_t alloc_size = static_cast<size_t>(file_size) + (null_terminate ? 1 : 0);
+    uint8_t *data = download_alloc(alloc_size);
+    if (!data) {
+        std::fclose(file);
+        return false;
+    }
+    size_t got = std::fread(data, 1, static_cast<size_t>(file_size), file);
+    std::fclose(file);
+    if (got != static_cast<size_t>(file_size)) {
+        heap_caps_free(data);
+        return false;
+    }
+    if (null_terminate) {
+        data[got] = 0;
+    }
+    *out_data = data;
+    *out_size = got;
+    return true;
+}
+
+bool write_cache_file_atomic(const char *path, const uint8_t *data, size_t size)
+{
+    if (!tater_cache_ready() || !path || !data || size == 0) {
+        return false;
+    }
+
+    char tmp_path[96];
+    std::snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    FILE *file = std::fopen(tmp_path, "wb");
+    if (!file) {
+        ESP_LOGW(TAG, "cache open failed path=%s", tmp_path);
+        return false;
+    }
+    size_t written = std::fwrite(data, 1, size, file);
+    bool close_ok = std::fclose(file) == 0;
+    if (written != size || !close_ok) {
+        std::remove(tmp_path);
+        ESP_LOGW(TAG, "cache write failed path=%s written=%u size=%u", tmp_path, (unsigned)written, (unsigned)size);
+        return false;
+    }
+    std::remove(path);
+    if (std::rename(tmp_path, path) != 0) {
+        std::remove(tmp_path);
+        ESP_LOGW(TAG, "cache rename failed path=%s", path);
+        return false;
+    }
+    return true;
+}
+
+bool write_cache_json_atomic(const char *path, cJSON *root)
+{
+    if (!root) {
+        return false;
+    }
+    char *json = cJSON_PrintUnformatted(root);
+    if (!json) {
+        return false;
+    }
+    bool ok = write_cache_file_atomic(path, reinterpret_cast<const uint8_t *>(json), std::strlen(json));
+    cJSON_free(json);
+    return ok;
 }
 
 void id_from_url(const char *url, char *out, size_t out_len)
@@ -1325,6 +1439,261 @@ bool parse_wake_model_json(const char *json_url, const uint8_t *json_data, size_
     return true;
 }
 
+bool save_cached_custom_wake_model(const DownloadedWakeModel *model)
+{
+    if (!model || !model->data || model->size == 0 || !model->source_url[0]) {
+        return false;
+    }
+    cJSON *meta = cJSON_CreateObject();
+    if (!meta) {
+        return false;
+    }
+    cJSON_AddStringToObject(meta, "source_url", model->source_url);
+    cJSON_AddStringToObject(meta, "model_url", model->model_url);
+    cJSON_AddStringToObject(meta, "id", model->id);
+    cJSON_AddStringToObject(meta, "label", model->label);
+    cJSON_AddNumberToObject(meta, "size", (double)model->size);
+
+    bool ok = write_cache_file_atomic(kWakeModelCacheDataPath, model->data, model->size) &&
+        write_cache_json_atomic(kWakeModelCacheMetaPath, meta);
+    cJSON_Delete(meta);
+    if (ok) {
+        s_custom_cache_writes++;
+        ESP_LOGI(TAG, "wake model cached source=%s bytes=%u", model->source_url, (unsigned)model->size);
+    } else {
+        s_custom_cache_failures++;
+        ESP_LOGW(TAG, "wake model cache write failed source=%s", model->source_url);
+    }
+    return ok;
+}
+
+bool load_cached_custom_wake_model(const char *url)
+{
+    if (!url || !url[0] || !tater_cache_ready()) {
+        return false;
+    }
+
+    uint8_t *meta_data = nullptr;
+    size_t meta_size = 0;
+    if (!read_cache_file(kWakeModelCacheMetaPath, 2048, true, &meta_data, &meta_size)) {
+        return false;
+    }
+
+    cJSON *meta = cJSON_ParseWithLength(reinterpret_cast<const char *>(meta_data), meta_size);
+    heap_caps_free(meta_data);
+    if (!meta) {
+        s_custom_cache_failures++;
+        return false;
+    }
+
+    const cJSON *source_url = cJSON_GetObjectItem(meta, "source_url");
+    const cJSON *id = cJSON_GetObjectItem(meta, "id");
+    const cJSON *label = cJSON_GetObjectItem(meta, "label");
+    if (!cJSON_IsString(source_url) || !source_url->valuestring || std::strcmp(source_url->valuestring, url) != 0) {
+        cJSON_Delete(meta);
+        return false;
+    }
+
+    char cached_id[32];
+    char cached_label[48];
+    std::snprintf(cached_id, sizeof(cached_id), "%s", cJSON_IsString(id) && id->valuestring && id->valuestring[0] ? id->valuestring : "custom_url");
+    std::snprintf(cached_label, sizeof(cached_label), "%s", cJSON_IsString(label) && label->valuestring && label->valuestring[0] ? label->valuestring : cached_id);
+    cJSON_Delete(meta);
+
+    uint8_t *model_data = nullptr;
+    size_t model_size = 0;
+    if (!read_cache_file(kWakeModelCacheDataPath, kWakeDownloadedModelMaxBytes, false, &model_data, &model_size)) {
+        s_custom_cache_failures++;
+        return false;
+    }
+    if (!tflite::GetModel(model_data) || tflite::GetModel(model_data)->version() != TFLITE_SCHEMA_VERSION) {
+        heap_caps_free(model_data);
+        s_custom_cache_failures++;
+        ESP_LOGW(TAG, "cached wake model schema mismatch source=%s", url);
+        return false;
+    }
+
+    if (!configure_wake_model_bytes(cached_id, cached_label, model_data, model_size, url)) {
+        heap_caps_free(model_data);
+        s_custom_cache_failures++;
+        return false;
+    }
+    s_custom_cache_hits++;
+    set_last_error("wake model cache loaded");
+    ESP_LOGI(TAG, "wake model cache loaded id=%s source=%s bytes=%u", cached_id, url, (unsigned)model_size);
+    return true;
+}
+
+bool cached_wake_sound_load(const char *url, uint8_t **out_data, size_t *out_size)
+{
+    if (out_data) {
+        *out_data = nullptr;
+    }
+    if (out_size) {
+        *out_size = 0;
+    }
+    if (!url || !url[0] || !out_data || !out_size || !tater_cache_ready()) {
+        return false;
+    }
+
+    uint8_t *meta_data = nullptr;
+    size_t meta_size = 0;
+    if (!read_cache_file(kWakeSoundCacheMetaPath, 1024, true, &meta_data, &meta_size)) {
+        return false;
+    }
+    cJSON *meta = cJSON_ParseWithLength(reinterpret_cast<const char *>(meta_data), meta_size);
+    heap_caps_free(meta_data);
+    if (!meta) {
+        s_wake_sound_cache_failures++;
+        return false;
+    }
+    const cJSON *source_url = cJSON_GetObjectItem(meta, "source_url");
+    bool matches = cJSON_IsString(source_url) && source_url->valuestring && std::strcmp(source_url->valuestring, url) == 0;
+    cJSON_Delete(meta);
+    if (!matches) {
+        return false;
+    }
+
+    if (!read_cache_file(kWakeSoundCacheDataPath, kWakeDownloadedSoundMaxBytes, false, out_data, out_size)) {
+        s_wake_sound_cache_failures++;
+        return false;
+    }
+    s_wake_sound_cache_hits++;
+    ESP_LOGI(TAG, "wake sound cache loaded source=%s bytes=%u", url, (unsigned)*out_size);
+    return true;
+}
+
+bool cached_wake_sound_save(const char *url, const uint8_t *data, size_t size)
+{
+    if (!url || !url[0] || !data || size == 0) {
+        return false;
+    }
+    cJSON *meta = cJSON_CreateObject();
+    if (!meta) {
+        return false;
+    }
+    cJSON_AddStringToObject(meta, "source_url", url);
+    cJSON_AddNumberToObject(meta, "size", (double)size);
+    bool ok = write_cache_file_atomic(kWakeSoundCacheDataPath, data, size) &&
+        write_cache_json_atomic(kWakeSoundCacheMetaPath, meta);
+    cJSON_Delete(meta);
+    if (ok) {
+        s_wake_sound_cache_writes++;
+        ESP_LOGI(TAG, "wake sound cached source=%s bytes=%u", url, (unsigned)size);
+    } else {
+        s_wake_sound_cache_failures++;
+        ESP_LOGW(TAG, "wake sound cache write failed source=%s", url);
+    }
+    return ok;
+}
+
+void set_wake_sound_download_running(bool running, const char *url)
+{
+    if (s_wake_sound_lock) {
+        xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+    }
+    s_wake_sound_download_running = running;
+    std::snprintf(s_downloading_wake_sound_url, sizeof(s_downloading_wake_sound_url), "%s", running && url ? url : "");
+    if (s_wake_sound_lock) {
+        xSemaphoreGive(s_wake_sound_lock);
+    }
+}
+
+void wake_sound_download_task(void *arg)
+{
+    WakeSoundDownloadRequest *request = static_cast<WakeSoundDownloadRequest *>(arg);
+    char requested_url[sizeof(request->url)] = {0};
+    if (request) {
+        std::snprintf(requested_url, sizeof(requested_url), "%s", request->url);
+        heap_caps_free(request);
+    }
+
+    uint8_t *data = nullptr;
+    size_t size = 0;
+    ESP_LOGI(TAG, "wake sound custom download starting url=%s", requested_url);
+    tater_protocol_send_log("info", "wake sound download starting");
+    bool ok = http_download_to_memory(requested_url, kWakeDownloadedSoundMaxBytes, false, &data, &size);
+    if (ok) {
+        ok = cached_wake_sound_save(requested_url, data, size);
+    }
+    if (ok) {
+        tater_protocol_send_log("info", "wake sound cached");
+    } else {
+        s_wake_sound_download_failures++;
+        if (s_wake_sound_lock) {
+            xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+        }
+        s_requested_wake_sound_url[0] = '\0';
+        if (s_wake_sound_lock) {
+            xSemaphoreGive(s_wake_sound_lock);
+        }
+        tater_protocol_send_log("warn", "wake sound download failed");
+        ESP_LOGW(TAG, "wake sound custom download failed url=%s", requested_url);
+    }
+    if (data) {
+        heap_caps_free(data);
+    }
+    set_wake_sound_download_running(false, "");
+    vTaskDelete(NULL);
+}
+
+bool start_wake_sound_download(const char *url)
+{
+    if (!url || !url[0]) {
+        return false;
+    }
+    if (s_wake_sound_lock) {
+        xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+    }
+    bool already_running = s_wake_sound_download_running;
+    bool already_requested = std::strcmp(s_requested_wake_sound_url, url) == 0;
+    if (already_running || already_requested) {
+        if (s_wake_sound_lock) {
+            xSemaphoreGive(s_wake_sound_lock);
+        }
+        return true;
+    }
+    std::snprintf(s_requested_wake_sound_url, sizeof(s_requested_wake_sound_url), "%s", url);
+    s_wake_sound_download_running = true;
+    std::snprintf(s_downloading_wake_sound_url, sizeof(s_downloading_wake_sound_url), "%s", url);
+    if (s_wake_sound_lock) {
+        xSemaphoreGive(s_wake_sound_lock);
+    }
+
+    WakeSoundDownloadRequest *request = static_cast<WakeSoundDownloadRequest *>(heap_caps_calloc(1, sizeof(WakeSoundDownloadRequest), MALLOC_CAP_8BIT));
+    if (!request) {
+        set_wake_sound_download_running(false, "");
+        return false;
+    }
+    std::snprintf(request->url, sizeof(request->url), "%s", url);
+    BaseType_t created = xTaskCreatePinnedToCore(wake_sound_download_task, "wake_sound_dl", 6144, request, 3, NULL, 1);
+    if (created != pdPASS) {
+        heap_caps_free(request);
+        set_wake_sound_download_running(false, "");
+        return false;
+    }
+    return true;
+}
+
+esp_err_t play_custom_wake_sound(const char *url)
+{
+    if (!url || !url[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t *data = nullptr;
+    size_t size = 0;
+    if (cached_wake_sound_load(url, &data, &size)) {
+        esp_err_t err = tater_playback_play_wav_data_owned_local(data, size, "custom_wake_sound");
+        if (err != ESP_OK) {
+            heap_caps_free(data);
+        }
+        return err;
+    }
+
+    (void)start_wake_sound_download(url);
+    return ESP_ERR_NOT_FOUND;
+}
+
 void set_custom_download_running(bool running, const char *url)
 {
     if (s_custom_model_lock) {
@@ -1399,6 +1768,7 @@ void wake_model_download_task(void *arg)
         ok = false;
         goto done;
     }
+    (void)save_cached_custom_wake_model(&model);
     queue_pending_custom_model(&model);
     set_last_error("wake model download ready");
     ESP_LOGI(TAG, "wake model custom download ready id=%s source=%s model=%s bytes=%u", model.id, model.source_url, model.model_url, (unsigned)model.size);
@@ -1456,6 +1826,16 @@ bool start_custom_wake_model_download(const char *url)
         return false;
     }
     if (s_ready && std::strcmp(s_active_model_source, "url") == 0 && std::strcmp(s_active_model_url, url) == 0) {
+        return true;
+    }
+    if (load_cached_custom_wake_model(url)) {
+        if (s_custom_model_lock) {
+            xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
+        }
+        std::snprintf(s_requested_custom_url, sizeof(s_requested_custom_url), "%s", url);
+        if (s_custom_model_lock) {
+            xSemaphoreGive(s_custom_model_lock);
+        }
         return true;
     }
     if (s_custom_model_lock) {
@@ -1530,9 +1910,13 @@ bool runtime_enabled()
     if (esp_timer_get_time() < s_cooldown_until_us) {
         return false;
     }
-    return tater_protocol_can_start_local_wake() &&
-        !tater_playback_is_playing() &&
-        !tater_ota_is_running();
+    if (tater_ota_is_running() || !tater_protocol_can_start_local_wake()) {
+        return false;
+    }
+    if (tater_playback_is_playing() && !settings->barge_in_enabled) {
+        return false;
+    }
+    return true;
 }
 
 bool debug_logging_enabled(const tater_live_settings_t *settings)
@@ -1846,10 +2230,16 @@ void handle_feature_frame(const int8_t *feature)
         s_last_rise_score,
         probability_history
     );
+    bool barge_in = settings && settings->barge_in_enabled && tater_playback_is_playing();
+    if (barge_in) {
+        ESP_LOGI(TAG, "barge-in stopping playback before voice start");
+        tater_protocol_send_log("info", "barge-in stopped playback");
+        tater_playback_stop();
+    }
     const tater_wake_sound_asset_t *wake_sound = settings && settings->wake_sound_enabled
         ? tater_wake_sound_asset_lookup(settings->wake_sound)
         : nullptr;
-    if (wake_sound) {
+    if (wake_sound && !barge_in) {
         esp_err_t sound_err = tater_playback_play_wav_data_local(
             wake_sound->data,
             (size_t)(wake_sound->end - wake_sound->data),
@@ -1858,7 +2248,16 @@ void handle_feature_frame(const int8_t *feature)
             ESP_LOGW(TAG, "wake sound start failed: %s", esp_err_to_name(sound_err));
             tater_protocol_send_log("warn", "wake sound start failed");
         }
-    } else if (settings && settings->wake_sound_enabled && std::strcmp(settings->wake_sound, "no_sound") != 0) {
+    } else if (!barge_in && settings && settings->wake_sound_enabled && std::strcmp(settings->wake_sound, "custom") == 0) {
+        esp_err_t sound_err = play_custom_wake_sound(settings->wake_sound_url);
+        if (sound_err == ESP_ERR_NOT_FOUND) {
+            ESP_LOGI(TAG, "custom wake sound caching for future wake url=%s", settings->wake_sound_url);
+            tater_protocol_send_log("info", "custom wake sound caching");
+        } else if (sound_err != ESP_OK) {
+            ESP_LOGW(TAG, "custom wake sound start failed: %s", esp_err_to_name(sound_err));
+            tater_protocol_send_log("warn", "custom wake sound start failed");
+        }
+    } else if (!barge_in && settings && settings->wake_sound_enabled && std::strcmp(settings->wake_sound, "no_sound") != 0) {
         ESP_LOGW(TAG, "wake sound asset not found: %s", settings->wake_sound);
         tater_protocol_send_log("warn", "wake sound asset not found");
     }
@@ -1901,6 +2300,9 @@ extern "C" esp_err_t tater_wake_engine_init(void)
     }
     if (!s_custom_model_lock) {
         s_custom_model_lock = xSemaphoreCreateMutex();
+    }
+    if (!s_wake_sound_lock) {
+        s_wake_sound_lock = xSemaphoreCreateMutex();
     }
 
     FrontendFillConfigWithDefaults(&s_frontend_config);
@@ -2054,6 +2456,25 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     cJSON_AddBoolToObject(wake, "custom_download_running", custom_download_running);
     cJSON_AddStringToObject(wake, "custom_download_url", custom_download_url);
     cJSON_AddNumberToObject(wake, "custom_download_failures", s_custom_download_failures);
+    cJSON_AddNumberToObject(wake, "custom_cache_hits", s_custom_cache_hits);
+    cJSON_AddNumberToObject(wake, "custom_cache_writes", s_custom_cache_writes);
+    cJSON_AddNumberToObject(wake, "custom_cache_failures", s_custom_cache_failures);
+    bool wake_sound_download_running = false;
+    char wake_sound_download_url[192] = {0};
+    if (s_wake_sound_lock) {
+        xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+    }
+    wake_sound_download_running = s_wake_sound_download_running;
+    std::snprintf(wake_sound_download_url, sizeof(wake_sound_download_url), "%s", s_downloading_wake_sound_url);
+    if (s_wake_sound_lock) {
+        xSemaphoreGive(s_wake_sound_lock);
+    }
+    cJSON_AddBoolToObject(wake, "wake_sound_download_running", wake_sound_download_running);
+    cJSON_AddStringToObject(wake, "wake_sound_download_url", wake_sound_download_url);
+    cJSON_AddNumberToObject(wake, "wake_sound_cache_hits", s_wake_sound_cache_hits);
+    cJSON_AddNumberToObject(wake, "wake_sound_cache_writes", s_wake_sound_cache_writes);
+    cJSON_AddNumberToObject(wake, "wake_sound_cache_failures", s_wake_sound_cache_failures);
+    cJSON_AddNumberToObject(wake, "wake_sound_download_failures", s_wake_sound_download_failures);
     cJSON_AddStringToObject(wake, "frontend", "tflm_microfrontend");
     cJSON_AddBoolToObject(wake, "frontend_ready", s_frontend_ready);
     cJSON_AddNumberToObject(wake, "feature_frames", s_feature_frames);

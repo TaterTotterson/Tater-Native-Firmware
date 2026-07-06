@@ -668,6 +668,7 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "live_settings", true);
     cJSON_AddBoolToObject(caps, "setup_mode", true);
     cJSON_AddBoolToObject(caps, "continued_chat_reopen", true);
+    cJSON_AddBoolToObject(caps, "barge_in", true);
     cJSON_AddBoolToObject(caps, "tool_call_mode", true);
     cJSON_AddBoolToObject(caps, "ota", true);
     cJSON_AddBoolToObject(caps, "xmos", true);
@@ -988,7 +989,14 @@ bool tater_protocol_voice_active(void)
 
 bool tater_protocol_can_start_local_wake(void)
 {
-    return websocket_ready() && !s_voice_active && s_current_state == TATER_STATE_IDLE;
+    if (!websocket_ready() || s_voice_active) {
+        return false;
+    }
+    if (s_current_state == TATER_STATE_IDLE) {
+        return true;
+    }
+    const tater_live_settings_t *settings = tater_live_settings_get();
+    return settings && settings->barge_in_enabled && tater_playback_is_playing();
 }
 
 const char *tater_protocol_device_id(void)

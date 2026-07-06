@@ -1,0 +1,46 @@
+{
+  "devices": [
+    {
+      "artifacts": {
+        "factory": {
+          "flash_freq": "40m",
+          "flash_mode": "dio",
+          "flash_size": "16MB",
+          "kind": "factory",
+          "path": "prebuilt_firmware/voicepe/native-voicepe-0.1.23/firmware.factory.bin",
+          "sha256": "ef593d09a36906e0966a30844afb02cb60eb5708f68998425097e569fb1656ea",
+          "size_bytes": 5224592
+        },
+        "ota": {
+          "flash_freq": "40m",
+          "flash_mode": "dio",
+          "flash_size": "16MB",
+          "kind": "ota",
+          "path": "prebuilt_firmware/voicepe/native-voicepe-0.1.23/firmware.bin",
+          "sha256": "71bf8e7164650fa7f207f1bd25168865bca4de48f3ffc9e10155491867a8d71e",
+          "size_bytes": 1947792
+        }
+      },
+      "board": "voice-pe",
+      "display_version": "0.1.23",
+      "firmware_version": "native-voicepe-0.1.23",
+      "flash_size": "16MB",
+      "key": "voicepe",
+      "label": "Voice PE",
+      "project": "tater.native_satellite",
+      "xmos_firmware": {
+        "included": true,
+        "path": "main/boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin",
+        "sha256": "9ae0b0516a61b6388f4105b1999fac44ab96e02ecf7f7df9cd5933f534ff9b5a",
+        "size_bytes": 282624,
+        "version": "1.3.2"
+      }
+    }
+  ],
+  "display_version": "0.1.23",
+  "generated_from": ".",
+  "kind": "tater_native_satellite_firmware",
+  "project": "tater.native_satellite",
+  "schema": 1,
+  "version": "native-voicepe-0.1.23"
+}

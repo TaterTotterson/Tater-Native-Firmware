@@ -4,6 +4,7 @@ idf_component_register(
         "boards/voice_pe/audio_voice_pe.c"
         "boards/voice_pe/button_voice_pe.c"
         "boards/voice_pe/led_ring_voice_pe.c"
+        "cache_storage.c"
         "native_settings.c"
         "ota_update.c"
         "playback.c"
@@ -30,6 +31,7 @@ idf_component_register(
         json
         led_strip
         nvs_flash
+        spiffs
         tflm_microfrontend
 )
 

@@ -43,6 +43,11 @@ def read_version(board: dict[str, Any]) -> str:
     return match.group(1)
 
 
+def display_version(version: str) -> str:
+    match = re.search(r"(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?)$", version)
+    return match.group(1) if match else version
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -92,6 +97,7 @@ def main() -> int:
         run_build(board)
 
     version = read_version(board)
+    display = display_version(version)
     build_root = FIRMWARE_ROOT / ".pio" / "build" / board["build_dir"]
     ota_src = build_root / "firmware.bin"
     factory_src = build_root / "firmware.factory.bin"
@@ -144,6 +150,7 @@ def main() -> int:
         "label": board["label"],
         "board": board["board"],
         "firmware_version": version,
+        "display_version": display,
         "project": "tater.native_satellite",
         "flash_size": flash_size,
         "artifacts": {
@@ -157,6 +164,7 @@ def main() -> int:
         "schema": 1,
         "kind": "tater_native_satellite_firmware",
         "version": version,
+        "display_version": display,
         "project": "tater.native_satellite",
         "generated_from": ".",
         "devices": [device],
@@ -166,12 +174,14 @@ def main() -> int:
         "schema": 1,
         "kind": "tater_native_satellite_firmware_latest",
         "version": version,
+        "display_version": display,
         "manifest": local_manifest_repo_path,
         "boards": {
             board["key"]: {
                 "label": board["label"],
                 "board": board["board"],
                 "version": version,
+                "display_version": display,
                 "manifest": local_manifest_repo_path,
             }
         },
@@ -193,6 +203,7 @@ def main() -> int:
             "boards": {
                 board["key"]: {
                     **latest["boards"][board["key"]],
+                    "display_version": display,
                     "manifest": release_manifest_url,
                 }
             },

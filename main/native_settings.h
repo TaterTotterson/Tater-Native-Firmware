@@ -21,6 +21,7 @@ typedef struct {
     char wake_sound[64];
     char wake_sound_url[192];
     bool continued_chat;
+    bool barge_in_enabled;
     uint8_t volume_percent;
     uint8_t led_brightness;
     char led_color[8];

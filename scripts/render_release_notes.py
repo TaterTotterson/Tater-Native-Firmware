@@ -33,8 +33,9 @@ def main() -> int:
 
     manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
     version = text(manifest.get("version")) or args.manifest.stem
+    display_version = text(manifest.get("display_version")) or version
     lines: list[str] = [
-        f"# {version}",
+        f"# Tater Firmware {display_version}",
         "",
         "Tater Native Satellite firmware release.",
         "",

@@ -17,26 +17,25 @@ This first Voice PE target now covers the basic native satellite loop:
 - sends `voice.stop` when the button is released
 - receives `state`, `voice.event`, `play.url`, and `ota.url`
 - drives Voice PE LED states and directional listening from XMOS DoA
-- fetches and plays Tater runtime WAV TTS URLs
+- streams Tater runtime WAV TTS URLs while downloading
 - plays embedded wake sounds on-device
 - runs the embedded `hey_tater` microWakeWord model locally
 - auto-updates Voice PE XMOS firmware to `1.3.2` when the installed version differs
 - includes the editable Voice PE XMOS source used to rebuild that update image
-- loads a custom microWakeWord `.json`/`.tflite` URL into RAM
+- loads and persists a custom microWakeWord `.json`/`.tflite` URL in the on-device cache
+- downloads and persists custom wake-sound WAV URLs in the on-device cache
 - applies live settings from Tater
 - enters setup mode from Tater or a deliberate button gesture
 - reopens the mic for continued chat
+- optionally allows local wake-word barge-in during satellite playback
 - uploads optional good-wake and close-miss raw PCM clips to the trainer
 - performs firmware OTA from a native `ota.url` command
 
-Still intentionally limited:
+Still intentionally limited or pending:
 
-- streaming decode/playback
-- persistent on-device custom wake model cache
-- custom wake sound URL download/playback
-- barge-in during playback
 - S3 Box/display targets
-- full Tater device-management UI for native OTA
+- Satellite1/Sat1 native firmware is scaffolded, but not published as a flashable target until its native audio, DAC, PD, XMOS, LED, and button drivers are implemented and tested.
+- Streaming playback currently supports PCM WAV responses. Compressed streaming codecs can be added later if Tater starts serving them.
 
 ## Build With PlatformIO
 
@@ -107,8 +106,8 @@ The tag must match the firmware version in the board header.
 For Voice PE:
 
 ```sh
-git tag native-voicepe-0.1.20
-git push origin native-voicepe-0.1.20
+git tag native-voicepe-0.1.23
+git push origin native-voicepe-0.1.23
 ```
 
 The release workflow builds `voicepe`, packages release assets, writes release
@@ -200,3 +199,28 @@ Pulled from the existing ESPHome Voice PE config:
 - LED ring: WS2812, GPIO21, 12 LEDs
 - center button: GPIO0, active low
 - rotary encoder: GPIO16/GPIO18
+
+## Satellite1 / Sat1 Scaffold
+
+The Sat1 hardware constants live at:
+
+```text
+main/boards/sat1/board_sat1.h
+```
+
+Sat1 is not included in `platformio.ini`, the release workflow, or
+`prebuilt_firmware/latest.json` yet. The old firmware uses a different native
+hardware stack than Voice PE:
+
+- 24 LED ring on GPIO21
+- shared-duplex I2S on GPIO7/GPIO8/GPIO16
+- microphone DIN on GPIO15 at 48 kHz
+- speaker DOUT on GPIO9 at 48 kHz stereo
+- PCM5122/TAS2780 speaker path over I2C
+- FUSB302B USB-C PD negotiation on GPIO1
+- Satellite1 XMOS firmware `v1.0.4-dev.9`
+- GPIO0 action button plus Satellite1 expander-backed volume/mute buttons
+
+Before publishing a Sat1 image, add board-specific implementations under
+`main/boards/sat1/` and then add its PlatformIO environment, manifest board
+entry, release workflow job, and USB flashing template.
