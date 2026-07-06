@@ -62,6 +62,9 @@ static int s_last_ws_http_status;
 static int s_last_audio_send_result;
 static uint32_t s_last_audio_send_samples;
 static uint32_t s_audio_send_failure_total;
+static bool s_recreate_client_on_reconnect;
+
+static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 
 typedef struct {
     bool initialized;
@@ -327,6 +330,38 @@ static void remember_websocket_error(const esp_websocket_event_data_t *data)
     s_last_ws_http_status = data->error_handle.esp_ws_handshake_status_code;
 }
 
+static esp_err_t create_websocket_client(void)
+{
+    esp_websocket_client_config_t cfg = {
+        .uri = s_ws_url,
+        .task_prio = 8,
+        .task_stack = 8192,
+        .buffer_size = 4096,
+        .ping_interval_sec = 30,
+        .pingpong_timeout_sec = 30,
+        .keep_alive_enable = true,
+        .keep_alive_idle = 30,
+        .keep_alive_interval = 10,
+        .keep_alive_count = 3,
+        .disable_auto_reconnect = true,
+        .reconnect_timeout_ms = 3000,
+        .network_timeout_ms = 15000,
+        .enable_close_reconnect = false,
+        .headers = strlen(s_auth_header) > 0 ? s_auth_header : NULL,
+    };
+    esp_websocket_client_handle_t client = esp_websocket_client_init(&cfg);
+    if (!client) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t err = esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, websocket_event_handler, NULL);
+    if (err != ESP_OK) {
+        esp_websocket_client_destroy(client);
+        return err;
+    }
+    s_client = client;
+    return ESP_OK;
+}
+
 static void reconnect_watchdog_task(void *arg)
 {
     (void)arg;
@@ -370,9 +405,27 @@ static void reconnect_watchdog_task(void *arg)
         if (s_send_lock) {
             xSemaphoreTake(s_send_lock, portMAX_DELAY);
         }
+        bool recreate_client = s_recreate_client_on_reconnect;
         esp_err_t stop_err = esp_websocket_client_stop(s_client);
         if (stop_err != ESP_OK) {
             ESP_LOGW(TAG, "websocket watchdog stop result=%s", esp_err_to_name(stop_err));
+        }
+        if (recreate_client) {
+            ESP_LOGI(TAG, "websocket watchdog recreating client with updated auth header");
+            esp_err_t destroy_err = esp_websocket_client_destroy(s_client);
+            if (destroy_err != ESP_OK) {
+                ESP_LOGW(TAG, "websocket watchdog destroy result=%s", esp_err_to_name(destroy_err));
+            }
+            s_client = NULL;
+            esp_err_t create_err = create_websocket_client();
+            if (create_err != ESP_OK) {
+                ESP_LOGE(TAG, "websocket watchdog create result=%s", esp_err_to_name(create_err));
+                if (s_send_lock) {
+                    xSemaphoreGive(s_send_lock);
+                }
+                continue;
+            }
+            s_recreate_client_on_reconnect = false;
         }
         if (s_send_lock) {
             xSemaphoreGive(s_send_lock);
@@ -675,7 +728,8 @@ static void handle_text_message(const char *data, int len)
                 if (save_err == ESP_OK) {
                     strlcpy(s_config.token, device_token, sizeof(s_config.token));
                     snprintf(s_auth_header, sizeof(s_auth_header), "X-Tater-Token: %s\r\n", s_config.token);
-                    ESP_LOGI(TAG, "paired with Tater; saved device credential");
+                    s_recreate_client_on_reconnect = true;
+                    ESP_LOGI(TAG, "paired with Tater; saved device credential and queued websocket auth refresh");
                 } else {
                     ESP_LOGE(TAG, "device credential save failed: %s", esp_err_to_name(save_err));
                     emit_state(TATER_STATE_ERROR, "credential save failed");
@@ -914,26 +968,12 @@ void tater_protocol_init(
 
 void tater_protocol_start(void)
 {
-    esp_websocket_client_config_t cfg = {
-        .uri = s_ws_url,
-        .task_prio = 8,
-        .task_stack = 8192,
-        .buffer_size = 4096,
-        .ping_interval_sec = 30,
-        .pingpong_timeout_sec = 30,
-        .keep_alive_enable = true,
-        .keep_alive_idle = 30,
-        .keep_alive_interval = 10,
-        .keep_alive_count = 3,
-        .reconnect_timeout_ms = 3000,
-        .network_timeout_ms = 15000,
-        .enable_close_reconnect = true,
-        .headers = strlen(s_auth_header) > 0 ? s_auth_header : NULL,
-    };
-    s_client = esp_websocket_client_init(&cfg);
-    ESP_ERROR_CHECK(esp_websocket_register_events(s_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, NULL));
+    ESP_ERROR_CHECK(create_websocket_client());
     ESP_ERROR_CHECK(esp_websocket_client_start(s_client));
-    xTaskCreate(reconnect_watchdog_task, "tater_ws_reconnect", 4096, NULL, 4, NULL);
+    BaseType_t task_ok = xTaskCreate(reconnect_watchdog_task, "tater_ws_reconnect", 4096, NULL, 4, NULL);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "websocket reconnect watchdog task create failed");
+    }
 }
 
 bool tater_protocol_is_connected(void)
