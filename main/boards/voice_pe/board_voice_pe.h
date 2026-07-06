@@ -3,7 +3,7 @@
 #include "driver/gpio.h"
 
 #define TATER_BOARD_ID "voice-pe"
-#define TATER_FIRMWARE_VERSION "native-voicepe-0.1.23"
+#define TATER_FIRMWARE_VERSION "native-voicepe-0.1.24"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6

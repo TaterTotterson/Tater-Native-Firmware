@@ -803,6 +803,9 @@ static void render(void)
     case TATER_STATE_TOOL_CALL:
         render_voice_animation(settings ? settings->led_tool_call_animation : "", "ping_pong", s_animation_tick, voice_color);
         break;
+    case TATER_STATE_TIMER:
+        render_voice_animation("heartbeat", "heartbeat", s_animation_tick, TATER_RED);
+        break;
     case TATER_STATE_OTA:
         paired_spinner(s_animation_tick, TATER_BLUE, false);
         break;

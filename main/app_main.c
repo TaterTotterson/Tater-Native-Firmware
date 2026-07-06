@@ -143,6 +143,9 @@ void app_main(void)
             tater_protocol_voice_active(),
             (unsigned long)esp_get_free_heap_size()
         );
-        tater_protocol_send_status(tater_protocol_voice_active() ? "listening" : "idle");
+        const char *status_state = tater_protocol_timer_is_ringing()
+            ? "timer"
+            : (tater_protocol_voice_active() ? "listening" : "idle");
+        tater_protocol_send_status(status_state);
     }
 }

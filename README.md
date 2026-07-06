@@ -106,8 +106,8 @@ The tag must match the firmware version in the board header.
 For Voice PE:
 
 ```sh
-git tag native-voicepe-0.1.23
-git push origin native-voicepe-0.1.23
+git tag native-voicepe-0.1.24
+git push origin native-voicepe-0.1.24
 ```
 
 The release workflow builds `voicepe`, packages release assets, writes release

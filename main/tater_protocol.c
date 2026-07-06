@@ -53,6 +53,13 @@ static bool s_hello_acked;
 static bool s_playback_return_armed;
 static tater_state_t s_playback_return_state = TATER_STATE_IDLE;
 static bool s_tool_visual_hold;
+static bool s_timer_active;
+static bool s_timer_ringing;
+static char s_timer_id[48];
+static char s_timer_label[64];
+static int64_t s_timer_deadline_us;
+static TaskHandle_t s_timer_alarm_task;
+static TaskHandle_t s_timer_monitor_task;
 static char s_last_link_down_detail[96];
 static int s_last_ws_error_type;
 static int s_last_ws_tls_err;
@@ -65,6 +72,7 @@ static uint32_t s_audio_send_failure_total;
 static bool s_recreate_client_on_reconnect;
 
 static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
+static void timer_monitor_task(void *arg);
 
 typedef struct {
     bool initialized;
@@ -265,7 +273,14 @@ static void make_id(char *out, size_t out_len)
 
 static void emit_state(tater_state_t state, const char *detail)
 {
-    if (state == TATER_STATE_TOOL_CALL) {
+    if (s_timer_ringing && state != TATER_STATE_TIMER && state != TATER_STATE_OTA && state != TATER_STATE_PROVISIONING) {
+        ESP_LOGI(TAG, "state=%d detail=%s ignored during timer alarm", (int)state, detail ? detail : "");
+        return;
+    }
+
+    if (state == TATER_STATE_TIMER) {
+        s_tool_visual_hold = false;
+    } else if (state == TATER_STATE_TOOL_CALL) {
         s_tool_visual_hold = true;
     } else if ((state == TATER_STATE_IDLE || state == TATER_STATE_DISCONNECTED || state == TATER_STATE_ERROR)
         && tater_playback_is_playing()) {
@@ -574,6 +589,7 @@ static bool should_log_send(const char *type, int sent)
     }
     return strcmp(type, "hello") == 0
         || strcmp(type, "status") == 0
+        || strcmp(type, "timer.event") == 0
         || strcmp(type, "voice.start") == 0
         || strcmp(type, "voice.stop") == 0;
 }
@@ -625,6 +641,155 @@ static cJSON *new_envelope(const char *type)
     return root;
 }
 
+static uint32_t timer_payload_duration_ms(const cJSON *payload, const char *ms_key, const char *s_key, uint32_t fallback_ms)
+{
+    const cJSON *ms_item = cJSON_GetObjectItem(payload, ms_key);
+    if (cJSON_IsNumber(ms_item) && ms_item->valuedouble > 0) {
+        return (uint32_t)ms_item->valuedouble;
+    }
+    const cJSON *s_item = cJSON_GetObjectItem(payload, s_key);
+    if (cJSON_IsNumber(s_item) && s_item->valuedouble > 0) {
+        return (uint32_t)(s_item->valuedouble * 1000.0);
+    }
+    return fallback_ms;
+}
+
+static void timer_copy_identity(const cJSON *payload)
+{
+    const cJSON *id_item = cJSON_GetObjectItem(payload, "id");
+    const cJSON *label_item = cJSON_GetObjectItem(payload, "label");
+    if (cJSON_IsString(id_item) && id_item->valuestring && id_item->valuestring[0]) {
+        strlcpy(s_timer_id, id_item->valuestring, sizeof(s_timer_id));
+    }
+    if (cJSON_IsString(label_item) && label_item->valuestring) {
+        strlcpy(s_timer_label, label_item->valuestring, sizeof(s_timer_label));
+    }
+}
+
+static void timer_emit_event(const char *event)
+{
+    cJSON *root = new_envelope("timer.event");
+    cJSON *payload = cJSON_GetObjectItem(root, "payload");
+    cJSON_AddStringToObject(payload, "event", event ? event : "");
+    cJSON_AddStringToObject(payload, "id", s_timer_id);
+    cJSON_AddStringToObject(payload, "label", s_timer_label);
+    cJSON_AddBoolToObject(payload, "active", s_timer_active);
+    cJSON_AddBoolToObject(payload, "ringing", s_timer_ringing);
+    if (s_timer_active && s_timer_deadline_us > 0) {
+        int64_t remaining_ms = (s_timer_deadline_us - esp_timer_get_time()) / 1000;
+        if (remaining_ms < 0) {
+            remaining_ms = 0;
+        }
+        cJSON_AddNumberToObject(payload, "remaining_ms", remaining_ms);
+    }
+    send_json(root);
+}
+
+static void timer_alarm_task(void *arg)
+{
+    (void)arg;
+    while (s_timer_ringing) {
+        emit_state(TATER_STATE_TIMER, "timer ringing");
+        if (!tater_playback_is_playing()) {
+            esp_err_t err = tater_playback_play_tone_local(880, 420, 80);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "timer alarm tone failed: %s", esp_err_to_name(err));
+            }
+        }
+        for (int i = 0; i < 18 && s_timer_ringing; i++) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+    s_timer_alarm_task = NULL;
+    vTaskDelete(NULL);
+}
+
+static void timer_start_alarm_task(void)
+{
+    if (s_timer_alarm_task) {
+        return;
+    }
+    BaseType_t ok = xTaskCreatePinnedToCore(timer_alarm_task, "tater_timer_alarm", 4096, NULL, 5, &s_timer_alarm_task, 1);
+    if (ok != pdPASS) {
+        s_timer_alarm_task = NULL;
+        ESP_LOGE(TAG, "timer alarm task create failed");
+    }
+}
+
+static void timer_ring(const char *detail, bool notify_expired)
+{
+    s_timer_active = true;
+    s_timer_ringing = true;
+    s_timer_deadline_us = 0;
+    emit_state(TATER_STATE_TIMER, detail ? detail : "timer");
+    if (notify_expired) {
+        timer_emit_event("expired");
+    }
+    timer_start_alarm_task();
+}
+
+static void timer_clear_local(bool notify, const char *event)
+{
+    bool was_active = s_timer_active;
+    bool was_ringing = s_timer_ringing;
+    if (notify && was_active) {
+        timer_emit_event(event ? event : "stopped");
+    }
+    s_timer_active = false;
+    s_timer_ringing = false;
+    s_timer_deadline_us = 0;
+    s_timer_id[0] = '\0';
+    s_timer_label[0] = '\0';
+    if (was_ringing && tater_playback_is_playing()) {
+        tater_playback_stop();
+    }
+    if (s_current_state == TATER_STATE_TIMER) {
+        emit_state(websocket_ready() ? TATER_STATE_IDLE : TATER_STATE_DISCONNECTED, "timer cleared");
+    }
+}
+
+static void timer_arm_from_payload(const cJSON *payload)
+{
+    uint32_t remaining_ms = timer_payload_duration_ms(payload, "remaining_ms", "remaining_s", 0);
+    uint32_t duration_ms = timer_payload_duration_ms(payload, "duration_ms", "duration_s", 0);
+    uint32_t arm_ms = remaining_ms > 0 ? remaining_ms : duration_ms;
+    if (arm_ms == 0) {
+        timer_ring("timer alarm", false);
+        return;
+    }
+    bool was_ringing = s_timer_ringing;
+    timer_copy_identity(payload);
+    s_timer_active = true;
+    s_timer_ringing = false;
+    s_timer_deadline_us = esp_timer_get_time() + ((int64_t)arm_ms * 1000LL);
+    if (was_ringing && tater_playback_is_playing()) {
+        tater_playback_stop();
+    }
+    if (s_current_state == TATER_STATE_TIMER) {
+        emit_state(websocket_ready() ? TATER_STATE_IDLE : TATER_STATE_DISCONNECTED, "timer armed");
+    }
+    ESP_LOGI(TAG, "timer armed id=%s remaining_ms=%lu", s_timer_id, (unsigned long)arm_ms);
+}
+
+static void timer_alarm_from_payload(const cJSON *payload)
+{
+    timer_copy_identity(payload);
+    ESP_LOGW(TAG, "timer alarm id=%s", s_timer_id);
+    timer_ring("timer alarm", false);
+}
+
+static void timer_monitor_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        if (s_timer_active && !s_timer_ringing && s_timer_deadline_us > 0 && esp_timer_get_time() >= s_timer_deadline_us) {
+            ESP_LOGW(TAG, "timer expired locally id=%s", s_timer_id);
+            timer_ring("timer expired locally", true);
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+
 static bool json_truthy(const cJSON *item)
 {
     if (cJSON_IsBool(item)) {
@@ -670,6 +835,7 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "continued_chat_reopen", true);
     cJSON_AddBoolToObject(caps, "barge_in", true);
     cJSON_AddBoolToObject(caps, "tool_call_mode", true);
+    cJSON_AddBoolToObject(caps, "timers", true);
     cJSON_AddBoolToObject(caps, "ota", true);
     cJSON_AddBoolToObject(caps, "xmos", true);
     cJSON_AddItemToObject(payload, "capabilities", caps);
@@ -692,6 +858,9 @@ static tater_state_t parse_state(const char *state)
     }
     if (strcmp(state, "tool_call") == 0 || strcmp(state, "tool") == 0 || strcmp(state, "tool_running") == 0) {
         return TATER_STATE_TOOL_CALL;
+    }
+    if (strcmp(state, "timer") == 0 || strcmp(state, "timer_ringing") == 0 || strcmp(state, "ringing") == 0) {
+        return TATER_STATE_TIMER;
     }
     if (strcmp(state, "ota") == 0 || strcmp(state, "updating") == 0) {
         return TATER_STATE_OTA;
@@ -833,6 +1002,12 @@ static void handle_text_message(const char *data, int len)
         if (s_play_tone_cb) {
             s_play_tone_cb(frequency_hz, duration_ms, volume_percent);
         }
+    } else if (strcmp(type, "timer.arm") == 0 && cJSON_IsObject(payload)) {
+        timer_arm_from_payload(payload);
+    } else if (strcmp(type, "timer.alarm") == 0 && cJSON_IsObject(payload)) {
+        timer_alarm_from_payload(payload);
+    } else if (strcmp(type, "timer.clear") == 0) {
+        timer_clear_local(false, "cleared");
     } else if (strcmp(type, "ota.url") == 0 && cJSON_IsObject(payload)) {
         const cJSON *url_item = cJSON_GetObjectItem(payload, "url");
         if (cJSON_IsString(url_item) && s_ota_url_cb) {
@@ -975,6 +1150,13 @@ void tater_protocol_start(void)
     if (task_ok != pdPASS) {
         ESP_LOGE(TAG, "websocket reconnect watchdog task create failed");
     }
+    if (!s_timer_monitor_task) {
+        BaseType_t timer_task_ok = xTaskCreate(timer_monitor_task, "tater_timer", 3072, NULL, 4, &s_timer_monitor_task);
+        if (timer_task_ok != pdPASS) {
+            s_timer_monitor_task = NULL;
+            ESP_LOGE(TAG, "timer monitor task create failed");
+        }
+    }
 }
 
 bool tater_protocol_is_connected(void)
@@ -987,9 +1169,23 @@ bool tater_protocol_voice_active(void)
     return s_voice_active;
 }
 
+bool tater_protocol_timer_is_ringing(void)
+{
+    return s_timer_ringing;
+}
+
+void tater_protocol_timer_stop_from_device(void)
+{
+    if (!s_timer_ringing) {
+        return;
+    }
+    ESP_LOGI(TAG, "timer stopped from device button");
+    timer_clear_local(true, "stopped");
+}
+
 bool tater_protocol_can_start_local_wake(void)
 {
-    if (!websocket_ready() || s_voice_active) {
+    if (!websocket_ready() || s_voice_active || s_timer_ringing) {
         return false;
     }
     if (s_current_state == TATER_STATE_IDLE) {
@@ -1023,6 +1219,19 @@ void tater_protocol_send_status(const char *state)
     cJSON_AddNumberToObject(payload, "free_heap", esp_get_free_heap_size());
     cJSON_AddBoolToObject(payload, "voice_active", s_voice_active);
     cJSON_AddBoolToObject(payload, "voice_start_pending", s_voice_start_pending);
+    cJSON *timer = cJSON_CreateObject();
+    cJSON_AddBoolToObject(timer, "active", s_timer_active);
+    cJSON_AddBoolToObject(timer, "ringing", s_timer_ringing);
+    cJSON_AddStringToObject(timer, "id", s_timer_id);
+    cJSON_AddStringToObject(timer, "label", s_timer_label);
+    if (s_timer_active && s_timer_deadline_us > 0) {
+        int64_t remaining_ms = (s_timer_deadline_us - esp_timer_get_time()) / 1000;
+        if (remaining_ms < 0) {
+            remaining_ms = 0;
+        }
+        cJSON_AddNumberToObject(timer, "remaining_ms", remaining_ms);
+    }
+    cJSON_AddItemToObject(payload, "timer", timer);
     cJSON_AddNumberToObject(payload, "audio_preroll_samples", s_audio_preroll_count);
     cJSON_AddBoolToObject(payload, "connected", websocket_ready());
     if (s_last_link_down_detail[0]) {

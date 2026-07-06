@@ -96,6 +96,7 @@ static void button_task(void *arg)
     int setup_armed_ticks = 0;
     bool voice_started_for_press = false;
     bool setup_hold_candidate = false;
+    bool timer_stopped_for_press = false;
 
     while (true) {
         bool raw_pressed = gpio_get_level(TATER_CENTER_BUTTON) == 0;
@@ -111,14 +112,26 @@ static void button_task(void *arg)
                 press_ticks = 0;
                 setup_hold_ticks = 0;
                 voice_started_for_press = false;
+                timer_stopped_for_press = false;
                 setup_hold_candidate = setup_click_count >= SETUP_RESET_CLICK_COUNT && setup_armed_ticks > 0;
+                if (tater_protocol_timer_is_ringing()) {
+                    ESP_LOGI(TAG, "center button press: stop timer alarm");
+                    tater_protocol_timer_stop_from_device();
+                    timer_stopped_for_press = true;
+                    setup_hold_candidate = false;
+                    tater_leds_clear_setup_reset_feedback();
+                }
                 if (setup_hold_candidate) {
                     ESP_LOGW(TAG, "setup reset armed; keep holding for 5 seconds");
                     tater_protocol_send_log("warn", "Setup reset armed; keep holding the button for 5 seconds.");
                     tater_leds_show_setup_reset_countdown(SETUP_RESET_COUNTDOWN_STEPS, SETUP_RESET_COUNTDOWN_STEPS);
                 }
             } else {
-                if (setup_hold_candidate) {
+                if (timer_stopped_for_press) {
+                    setup_click_count = 0;
+                    setup_armed_ticks = 0;
+                    setup_click_window_ticks = 0;
+                } else if (setup_hold_candidate) {
                     ESP_LOGI(TAG, "setup reset hold cancelled");
                     tater_leds_clear_setup_reset_feedback();
                     setup_click_count = 0;
@@ -152,6 +165,7 @@ static void button_task(void *arg)
                 setup_hold_ticks = 0;
                 voice_started_for_press = false;
                 setup_hold_candidate = false;
+                timer_stopped_for_press = false;
             }
         }
 
@@ -170,7 +184,7 @@ static void button_task(void *arg)
                 if (setup_hold_ticks >= SETUP_RESET_HOLD_TICKS) {
                     enter_setup_mode("button gesture");
                 }
-            } else if (!voice_started_for_press && press_ticks >= VOICE_START_TICKS) {
+            } else if (!timer_stopped_for_press && !voice_started_for_press && press_ticks >= VOICE_START_TICKS) {
                 if (tater_ota_is_running()) {
                     ESP_LOGW(TAG, "button ignored during OTA");
                 } else {

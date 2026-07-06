@@ -14,6 +14,7 @@ typedef enum {
     TATER_STATE_THINKING,
     TATER_STATE_SPEAKING,
     TATER_STATE_TOOL_CALL,
+    TATER_STATE_TIMER,
     TATER_STATE_OTA,
     TATER_STATE_ERROR,
 } tater_state_t;
@@ -34,6 +35,8 @@ void tater_protocol_start(void);
 bool tater_protocol_is_connected(void);
 bool tater_protocol_voice_active(void);
 bool tater_protocol_can_start_local_wake(void);
+bool tater_protocol_timer_is_ringing(void);
+void tater_protocol_timer_stop_from_device(void);
 const char *tater_protocol_device_id(void);
 const char *tater_protocol_device_name(void);
 const char *tater_protocol_server_url(void);
