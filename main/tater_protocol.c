@@ -9,6 +9,7 @@
 #include "cJSON.h"
 #include "esp_core_dump.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
@@ -72,6 +73,9 @@ static uint32_t s_audio_send_failure_total;
 static bool s_recreate_client_on_reconnect;
 
 static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
+static int send_audio_locked(const int16_t *pcm, size_t sample_count, TickType_t timeout);
+static void audio_tx_clear_queue(void);
+static void audio_tx_task(void *arg);
 static void timer_monitor_task(void *arg);
 
 typedef struct {
@@ -101,9 +105,31 @@ typedef struct {
 #define TATER_WS_HELLO_ACK_TIMEOUT_MS 5000
 
 #define TATER_AUDIO_PREROLL_SAMPLES (TATER_MIC_SAMPLE_RATE)
+#define TATER_AUDIO_TX_QUEUE_CHUNKS 96
+#define TATER_AUDIO_TX_SEND_TIMEOUT_MS 120
+#define TATER_AUDIO_TX_DRAIN_WAIT_MS 250
+
+typedef struct {
+    uint16_t samples;
+    int16_t pcm[TATER_MIC_CHUNK_FRAMES];
+} tater_audio_tx_chunk_t;
+
 static int16_t s_audio_preroll[TATER_AUDIO_PREROLL_SAMPLES];
 static size_t s_audio_preroll_start;
 static size_t s_audio_preroll_count;
+static tater_audio_tx_chunk_t *s_audio_tx_queue;
+static size_t s_audio_tx_capacity;
+static size_t s_audio_tx_head;
+static size_t s_audio_tx_count;
+static SemaphoreHandle_t s_audio_tx_lock;
+static SemaphoreHandle_t s_audio_tx_has_data;
+static TaskHandle_t s_audio_tx_task;
+static uint32_t s_audio_tx_high_water;
+static uint32_t s_audio_tx_dropped;
+static uint32_t s_audio_tx_overruns;
+static uint32_t s_audio_tx_send_timeouts;
+static uint32_t s_audio_tx_last_send_ms;
+static uint32_t s_audio_tx_last_queue_depth;
 
 static double now_seconds(void)
 {
@@ -318,6 +344,7 @@ static void mark_link_down(const char *detail)
     s_voice_start_pending = false;
     s_audio_preroll_start = 0;
     s_audio_preroll_count = 0;
+    audio_tx_clear_queue();
     if (changed) {
         emit_state(TATER_STATE_DISCONNECTED, detail ? detail : "disconnected");
     }
@@ -461,6 +488,229 @@ static void reconnect_watchdog_task(void *arg)
     }
 }
 
+static esp_err_t audio_tx_init(void)
+{
+    if (s_audio_tx_queue) {
+        return ESP_OK;
+    }
+
+    s_audio_tx_lock = xSemaphoreCreateMutex();
+    s_audio_tx_has_data = xSemaphoreCreateBinary();
+    if (!s_audio_tx_lock || !s_audio_tx_has_data) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    const size_t bytes = sizeof(tater_audio_tx_chunk_t) * TATER_AUDIO_TX_QUEUE_CHUNKS;
+    s_audio_tx_queue = (tater_audio_tx_chunk_t *)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_audio_tx_queue) {
+        s_audio_tx_queue = (tater_audio_tx_chunk_t *)heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
+    }
+    if (!s_audio_tx_queue) {
+        return ESP_ERR_NO_MEM;
+    }
+    memset(s_audio_tx_queue, 0, bytes);
+    s_audio_tx_capacity = TATER_AUDIO_TX_QUEUE_CHUNKS;
+    ESP_LOGI(TAG, "audio tx queue ready chunks=%u bytes=%u", (unsigned)s_audio_tx_capacity, (unsigned)bytes);
+    return ESP_OK;
+}
+
+static void audio_tx_start_task(void)
+{
+    if (!s_audio_tx_queue || s_audio_tx_task) {
+        return;
+    }
+    BaseType_t ok = xTaskCreatePinnedToCore(audio_tx_task, "tater_audio_tx", 6144, NULL, 7, &s_audio_tx_task, 0);
+    if (ok != pdPASS) {
+        s_audio_tx_task = NULL;
+        ESP_LOGE(TAG, "audio tx task create failed");
+    }
+}
+
+static size_t audio_tx_queue_depth(void)
+{
+    size_t depth = 0;
+    if (!s_audio_tx_lock) {
+        return 0;
+    }
+    xSemaphoreTake(s_audio_tx_lock, portMAX_DELAY);
+    depth = s_audio_tx_count;
+    xSemaphoreGive(s_audio_tx_lock);
+    return depth;
+}
+
+static void audio_tx_clear_queue(void)
+{
+    if (!s_audio_tx_lock) {
+        return;
+    }
+    xSemaphoreTake(s_audio_tx_lock, portMAX_DELAY);
+    s_audio_tx_head = 0;
+    s_audio_tx_count = 0;
+    s_audio_tx_last_queue_depth = 0;
+    xSemaphoreGive(s_audio_tx_lock);
+    if (s_audio_tx_has_data) {
+        while (xSemaphoreTake(s_audio_tx_has_data, 0) == pdTRUE) {
+        }
+    }
+}
+
+static bool audio_tx_wait_drained(TickType_t timeout)
+{
+    TickType_t start = xTaskGetTickCount();
+    while (audio_tx_queue_depth() > 0) {
+        if ((xTaskGetTickCount() - start) >= timeout) {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return true;
+}
+
+static bool audio_tx_enqueue(const int16_t *pcm, size_t sample_count, const char *source)
+{
+    if (!s_audio_tx_queue || !s_audio_tx_lock || !s_audio_tx_has_data || !pcm || sample_count == 0) {
+        return false;
+    }
+
+    size_t offset = 0;
+    while (offset < sample_count) {
+        size_t chunk_samples = sample_count - offset;
+        if (chunk_samples > TATER_MIC_CHUNK_FRAMES) {
+            chunk_samples = TATER_MIC_CHUNK_FRAMES;
+        }
+
+        bool log_drop = false;
+        uint32_t dropped_after = 0;
+        xSemaphoreTake(s_audio_tx_lock, portMAX_DELAY);
+        if (s_audio_tx_count >= s_audio_tx_capacity) {
+            s_audio_tx_head = (s_audio_tx_head + 1) % s_audio_tx_capacity;
+            s_audio_tx_count--;
+            s_audio_tx_dropped++;
+            s_audio_tx_overruns++;
+            if ((s_audio_tx_overruns == 1) || (s_audio_tx_overruns % 25 == 0)) {
+                log_drop = true;
+                dropped_after = s_audio_tx_dropped;
+            }
+        }
+
+        size_t tail = (s_audio_tx_head + s_audio_tx_count) % s_audio_tx_capacity;
+        s_audio_tx_queue[tail].samples = (uint16_t)chunk_samples;
+        memcpy(s_audio_tx_queue[tail].pcm, pcm + offset, chunk_samples * sizeof(int16_t));
+        s_audio_tx_count++;
+        s_audio_tx_last_queue_depth = (uint32_t)s_audio_tx_count;
+        if (s_audio_tx_count > s_audio_tx_high_water) {
+            s_audio_tx_high_water = (uint32_t)s_audio_tx_count;
+        }
+        xSemaphoreGive(s_audio_tx_lock);
+        xSemaphoreGive(s_audio_tx_has_data);
+        if (log_drop) {
+            ESP_LOGW(
+                TAG,
+                "audio tx queue full; dropping oldest source=%s dropped=%u",
+                source ? source : "-",
+                (unsigned)dropped_after
+            );
+        }
+
+        offset += chunk_samples;
+    }
+
+    return true;
+}
+
+static bool audio_tx_pop(tater_audio_tx_chunk_t *out, size_t *depth_after)
+{
+    if (!s_audio_tx_queue || !s_audio_tx_lock || !out) {
+        return false;
+    }
+
+    bool ok = false;
+    xSemaphoreTake(s_audio_tx_lock, portMAX_DELAY);
+    if (s_audio_tx_count > 0) {
+        *out = s_audio_tx_queue[s_audio_tx_head];
+        s_audio_tx_head = (s_audio_tx_head + 1) % s_audio_tx_capacity;
+        s_audio_tx_count--;
+        s_audio_tx_last_queue_depth = (uint32_t)s_audio_tx_count;
+        if (depth_after) {
+            *depth_after = s_audio_tx_count;
+        }
+        ok = true;
+    } else if (depth_after) {
+        *depth_after = 0;
+    }
+    xSemaphoreGive(s_audio_tx_lock);
+    return ok;
+}
+
+static void record_audio_send_result(int sent, size_t sample_count, uint32_t elapsed_ms, size_t queue_depth)
+{
+    int expected = (int)(sample_count * sizeof(int16_t));
+    bool failed = sent < expected;
+    s_last_audio_send_result = sent;
+    s_last_audio_send_samples = (uint32_t)sample_count;
+    s_audio_tx_last_send_ms = elapsed_ms;
+    s_audio_tx_last_queue_depth = (uint32_t)queue_depth;
+
+    if (s_audio_send_logs < 3 || failed || elapsed_ms > TATER_AUDIO_TX_SEND_TIMEOUT_MS) {
+        ESP_LOGI(
+            TAG,
+            "audio bin send samples=%u bytes=%u result=%d elapsed_ms=%u queue=%u",
+            (unsigned)sample_count,
+            (unsigned)(sample_count * sizeof(int16_t)),
+            sent,
+            (unsigned)elapsed_ms,
+            (unsigned)queue_depth
+        );
+        s_audio_send_logs++;
+    }
+
+    if (failed) {
+        s_audio_send_failures++;
+        s_audio_send_failure_total++;
+        if (elapsed_ms >= TATER_AUDIO_TX_SEND_TIMEOUT_MS) {
+            s_audio_tx_send_timeouts++;
+        }
+    } else {
+        s_audio_send_failures = 0;
+    }
+}
+
+static void audio_tx_task(void *arg)
+{
+    (void)arg;
+    tater_audio_tx_chunk_t chunk;
+
+    while (true) {
+        if (!audio_tx_pop(&chunk, NULL)) {
+            xSemaphoreTake(s_audio_tx_has_data, portMAX_DELAY);
+            continue;
+        }
+
+        if (chunk.samples == 0) {
+            continue;
+        }
+        if (!websocket_ready() || !s_voice_active || s_voice_start_pending) {
+            audio_tx_clear_queue();
+            continue;
+        }
+
+        int sent = -1;
+        size_t depth_after = audio_tx_queue_depth();
+        int64_t start_us = esp_timer_get_time();
+        xSemaphoreTake(s_send_lock, portMAX_DELAY);
+        if (websocket_ready() && s_voice_active && !s_voice_start_pending) {
+            sent = send_audio_locked(chunk.pcm, chunk.samples, pdMS_TO_TICKS(TATER_AUDIO_TX_SEND_TIMEOUT_MS));
+        }
+        xSemaphoreGive(s_send_lock);
+        uint32_t elapsed_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+        record_audio_send_result(sent, chunk.samples, elapsed_ms, depth_after);
+
+        if (sent < (int)(chunk.samples * sizeof(int16_t)) && !websocket_transport_ready()) {
+            mark_link_down("websocket audio transport lost");
+        }
+    }
+}
+
 static void clear_audio_preroll_locked(void)
 {
     s_audio_preroll_start = 0;
@@ -474,12 +724,14 @@ static void clear_voice_capture_state(void)
         s_voice_active = false;
         s_voice_start_pending = false;
         clear_audio_preroll_locked();
+        audio_tx_clear_queue();
         xSemaphoreGive(s_send_lock);
     } else {
         s_voice_active = false;
         s_voice_start_pending = false;
         s_audio_preroll_start = 0;
         s_audio_preroll_count = 0;
+        audio_tx_clear_queue();
     }
 }
 
@@ -519,11 +771,9 @@ static void flush_audio_preroll_locked(void)
         for (size_t i = 0; i < chunk_samples; i++) {
             chunk[i] = s_audio_preroll[(s_audio_preroll_start + i) % TATER_AUDIO_PREROLL_SAMPLES];
         }
-        int sent = send_audio_locked(chunk, chunk_samples, pdMS_TO_TICKS(1000));
-        if (sent < 0) {
-            ESP_LOGW(TAG, "audio preroll flush failed samples=%u result=%d", (unsigned)chunk_samples, sent);
+        if (!audio_tx_enqueue(chunk, chunk_samples, "preroll")) {
+            ESP_LOGW(TAG, "audio preroll queue failed samples=%u", (unsigned)chunk_samples);
             clear_audio_preroll_locked();
-            mark_link_down("websocket audio preroll send failed");
             return;
         }
         s_audio_preroll_start = (s_audio_preroll_start + chunk_samples) % TATER_AUDIO_PREROLL_SAMPLES;
@@ -531,7 +781,7 @@ static void flush_audio_preroll_locked(void)
         flushed += chunk_samples;
     }
     if (flushed > 0) {
-        ESP_LOGI(TAG, "audio preroll flushed samples=%u", (unsigned)flushed);
+        ESP_LOGI(TAG, "audio preroll queued samples=%u", (unsigned)flushed);
     }
 }
 
@@ -1133,6 +1383,10 @@ void tater_protocol_init(
     s_ota_url_cb = ota_url_cb;
     tater_live_settings_init_defaults();
     s_send_lock = xSemaphoreCreateMutex();
+    esp_err_t audio_tx_err = audio_tx_init();
+    if (audio_tx_err != ESP_OK) {
+        ESP_LOGE(TAG, "audio tx queue init failed: %s", esp_err_to_name(audio_tx_err));
+    }
     build_device_id();
     build_ws_url();
     if (strlen(s_config.token) > 0) {
@@ -1144,6 +1398,7 @@ void tater_protocol_start(void)
 {
     ESP_ERROR_CHECK(create_websocket_client());
     ESP_ERROR_CHECK(esp_websocket_client_start(s_client));
+    audio_tx_start_task();
     BaseType_t task_ok = xTaskCreate(reconnect_watchdog_task, "tater_ws_reconnect", 4096, NULL, 4, NULL);
     if (task_ok != pdPASS) {
         ESP_LOGE(TAG, "websocket reconnect watchdog task create failed");
@@ -1246,6 +1501,14 @@ void tater_protocol_send_status(const char *state)
     cJSON_AddNumberToObject(transport, "audio_send_failure_total", s_audio_send_failure_total);
     cJSON_AddNumberToObject(transport, "last_audio_send_result", s_last_audio_send_result);
     cJSON_AddNumberToObject(transport, "last_audio_send_samples", s_last_audio_send_samples);
+    cJSON_AddNumberToObject(transport, "audio_tx_queue_depth", audio_tx_queue_depth());
+    cJSON_AddNumberToObject(transport, "audio_tx_queue_capacity", s_audio_tx_capacity);
+    cJSON_AddNumberToObject(transport, "audio_tx_high_water", s_audio_tx_high_water);
+    cJSON_AddNumberToObject(transport, "audio_tx_dropped", s_audio_tx_dropped);
+    cJSON_AddNumberToObject(transport, "audio_tx_overruns", s_audio_tx_overruns);
+    cJSON_AddNumberToObject(transport, "audio_tx_send_timeouts", s_audio_tx_send_timeouts);
+    cJSON_AddNumberToObject(transport, "audio_tx_last_send_ms", s_audio_tx_last_send_ms);
+    cJSON_AddNumberToObject(transport, "audio_tx_last_queue_depth", s_audio_tx_last_queue_depth);
     cJSON_AddNumberToObject(transport, "last_ws_error_type", s_last_ws_error_type);
     cJSON_AddNumberToObject(transport, "last_ws_tls_err", s_last_ws_tls_err);
     cJSON_AddNumberToObject(transport, "last_ws_stack_err", s_last_ws_stack_err);
@@ -1316,6 +1579,7 @@ void tater_protocol_start_voice_with_conversation(const char *wake_word, const c
     }
     xSemaphoreTake(s_send_lock, portMAX_DELAY);
     clear_audio_preroll_locked();
+    audio_tx_clear_queue();
     s_voice_active = true;
     s_voice_start_pending = true;
     s_audio_send_logs = 0;
@@ -1350,6 +1614,12 @@ void tater_protocol_stop_voice(bool abort)
         clear_voice_capture_state();
         return;
     }
+    if (!abort) {
+        bool drained = audio_tx_wait_drained(pdMS_TO_TICKS(TATER_AUDIO_TX_DRAIN_WAIT_MS));
+        if (!drained) {
+            ESP_LOGW(TAG, "audio tx queue not fully drained before voice.stop depth=%u", (unsigned)audio_tx_queue_depth());
+        }
+    }
     cJSON *root = new_envelope("voice.stop");
     cJSON *payload = cJSON_GetObjectItem(root, "payload");
     cJSON_AddBoolToObject(payload, "abort", abort);
@@ -1363,31 +1633,28 @@ void tater_protocol_send_audio(const int16_t *pcm, size_t sample_count)
     if (!websocket_ready() || !s_voice_active || !pcm || sample_count == 0) {
         return;
     }
+
     xSemaphoreTake(s_send_lock, portMAX_DELAY);
     if (s_voice_start_pending) {
         buffer_audio_preroll_locked(pcm, sample_count);
         xSemaphoreGive(s_send_lock);
         return;
     }
-    int expected = (int)(sample_count * sizeof(int16_t));
-    int sent = send_audio_locked(pcm, sample_count, pdMS_TO_TICKS(1500));
     xSemaphoreGive(s_send_lock);
-    bool failed = sent < expected;
-    s_last_audio_send_result = sent;
-    s_last_audio_send_samples = (uint32_t)sample_count;
-    if (s_audio_send_logs < 3 || failed) {
-        ESP_LOGI(TAG, "audio bin send samples=%u bytes=%u result=%d", (unsigned)sample_count, (unsigned)(sample_count * sizeof(int16_t)), sent);
-        s_audio_send_logs++;
+
+    if (audio_tx_enqueue(pcm, sample_count, "capture")) {
+        return;
     }
-    if (failed) {
-        s_audio_send_failures++;
-        s_audio_send_failure_total++;
-        if (s_audio_send_failures >= 8) {
-            mark_link_down("websocket audio send failed");
-        }
-    } else {
-        s_audio_send_failures = 0;
+
+    int sent = -1;
+    int64_t start_us = esp_timer_get_time();
+    xSemaphoreTake(s_send_lock, portMAX_DELAY);
+    if (websocket_ready() && s_voice_active && !s_voice_start_pending) {
+        sent = send_audio_locked(pcm, sample_count, pdMS_TO_TICKS(TATER_AUDIO_TX_SEND_TIMEOUT_MS));
     }
+    xSemaphoreGive(s_send_lock);
+    uint32_t elapsed_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
+    record_audio_send_result(sent, sample_count, elapsed_ms, 0);
 }
 
 void tater_protocol_send_log(const char *level, const char *message)

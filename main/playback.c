@@ -1,6 +1,7 @@
 #include "playback.h"
 
 #include <inttypes.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,17 +9,30 @@
 
 #include "audio_i2s.h"
 #include "board.h"
+#include "esp_audio_simple_dec.h"
+#include "esp_flac_dec.h"
 #include "esp_check.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_mp3_dec.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "native_settings.h"
 #include "tater_protocol.h"
 
 static const char *TAG = "tater_playback";
+static const size_t PLAYBACK_HTTP_READ_SIZE = 8192;
+static const size_t PLAYBACK_HEADER_LIMIT = 16 * 1024;
+static const size_t PLAYBACK_CODEC_OUT_INITIAL = 4096;
+static const size_t PLAYBACK_MP3_JITTER_CAPACITY = 128 * 1024;
+static const size_t PLAYBACK_MP3_PREBUFFER = 64 * 1024;
+static const size_t PLAYBACK_FLAC_JITTER_CAPACITY = 512 * 1024;
+static const size_t PLAYBACK_FLAC_PREBUFFER = 256 * 1024;
+static const uint32_t PLAYBACK_HTTP_READER_TASK_STACK = 8192;
+static const uint32_t PLAYBACK_URL_TASK_STACK = 24576;
 
 typedef struct {
     uint16_t audio_format;
@@ -46,7 +60,7 @@ typedef enum {
 } wav_header_result_t;
 
 typedef struct {
-    uint8_t partial_frame[8];
+    uint8_t partial_frame[32];
     size_t partial_len;
     size_t data_bytes_seen;
     uint64_t resample_accum;
@@ -54,7 +68,55 @@ typedef struct {
     size_t out_frames;
     uint32_t input_frames;
     uint32_t output_frames;
-} wav_stream_state_t;
+} pcm_stream_state_t;
+
+typedef pcm_stream_state_t wav_stream_state_t;
+
+typedef enum {
+    STREAM_AUDIO_UNKNOWN = 0,
+    STREAM_AUDIO_WAV,
+    STREAM_AUDIO_MP3,
+    STREAM_AUDIO_FLAC,
+} stream_audio_type_t;
+
+typedef struct {
+    esp_audio_simple_dec_handle_t decoder;
+    esp_audio_simple_dec_type_t type;
+    uint8_t *out_buf;
+    size_t out_cap;
+    esp_audio_simple_dec_info_t info;
+    bool have_info;
+    bool speaker_started;
+    pcm_stream_state_t pcm;
+    uint32_t decoded_bytes;
+} codec_stream_state_t;
+
+typedef struct {
+    uint8_t *data;
+    size_t capacity;
+    size_t read_pos;
+    size_t write_pos;
+    size_t fill;
+    size_t total_written;
+    size_t total_read;
+    size_t high_water;
+    bool eof;
+    bool failed;
+    esp_err_t error;
+    SemaphoreHandle_t lock;
+    SemaphoreHandle_t can_read;
+    SemaphoreHandle_t can_write;
+} codec_jitter_buffer_t;
+
+typedef struct {
+    esp_http_client_handle_t client;
+    codec_jitter_buffer_t *buffer;
+    uint8_t *read_buf;
+    size_t read_size;
+    int64_t content_length;
+    size_t bytes_seen;
+    TaskHandle_t notify_task;
+} codec_http_reader_args_t;
 
 typedef struct {
     uint32_t frequency_hz;
@@ -214,6 +276,237 @@ static uint8_t *alloc_audio(size_t size)
     return buf;
 }
 
+static size_t codec_jitter_capacity(stream_audio_type_t type)
+{
+    return type == STREAM_AUDIO_FLAC ? PLAYBACK_FLAC_JITTER_CAPACITY : PLAYBACK_MP3_JITTER_CAPACITY;
+}
+
+static size_t codec_jitter_prebuffer(stream_audio_type_t type, int64_t content_length)
+{
+    size_t target = type == STREAM_AUDIO_FLAC ? PLAYBACK_FLAC_PREBUFFER : PLAYBACK_MP3_PREBUFFER;
+    if (content_length > 0 && (uint64_t)content_length < target) {
+        target = (size_t)content_length;
+    }
+    return target;
+}
+
+static void codec_jitter_signal(codec_jitter_buffer_t *buffer)
+{
+    if (!buffer) {
+        return;
+    }
+    if (buffer->can_read) {
+        xSemaphoreGive(buffer->can_read);
+    }
+    if (buffer->can_write) {
+        xSemaphoreGive(buffer->can_write);
+    }
+}
+
+static esp_err_t codec_jitter_init(codec_jitter_buffer_t *buffer, size_t capacity)
+{
+    if (!buffer || capacity == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(buffer, 0, sizeof(*buffer));
+    buffer->data = alloc_audio(capacity);
+    buffer->lock = xSemaphoreCreateMutex();
+    buffer->can_read = xSemaphoreCreateBinary();
+    buffer->can_write = xSemaphoreCreateBinary();
+    if (!buffer->data || !buffer->lock || !buffer->can_read || !buffer->can_write) {
+        if (buffer->lock) {
+            vSemaphoreDelete(buffer->lock);
+        }
+        if (buffer->can_read) {
+            vSemaphoreDelete(buffer->can_read);
+        }
+        if (buffer->can_write) {
+            vSemaphoreDelete(buffer->can_write);
+        }
+        free(buffer->data);
+        memset(buffer, 0, sizeof(*buffer));
+        return ESP_ERR_NO_MEM;
+    }
+    buffer->capacity = capacity;
+    buffer->error = ESP_OK;
+    xSemaphoreGive(buffer->can_write);
+    return ESP_OK;
+}
+
+static void codec_jitter_destroy(codec_jitter_buffer_t *buffer)
+{
+    if (!buffer) {
+        return;
+    }
+    if (buffer->lock) {
+        vSemaphoreDelete(buffer->lock);
+    }
+    if (buffer->can_read) {
+        vSemaphoreDelete(buffer->can_read);
+    }
+    if (buffer->can_write) {
+        vSemaphoreDelete(buffer->can_write);
+    }
+    free(buffer->data);
+    memset(buffer, 0, sizeof(*buffer));
+}
+
+static void codec_jitter_close(codec_jitter_buffer_t *buffer)
+{
+    if (!buffer || !buffer->lock) {
+        return;
+    }
+    xSemaphoreTake(buffer->lock, portMAX_DELAY);
+    buffer->eof = true;
+    xSemaphoreGive(buffer->lock);
+    codec_jitter_signal(buffer);
+}
+
+static void codec_jitter_fail(codec_jitter_buffer_t *buffer, esp_err_t error)
+{
+    if (!buffer || !buffer->lock) {
+        return;
+    }
+    xSemaphoreTake(buffer->lock, portMAX_DELAY);
+    buffer->failed = true;
+    buffer->error = error == ESP_OK ? ESP_FAIL : error;
+    xSemaphoreGive(buffer->lock);
+    codec_jitter_signal(buffer);
+}
+
+static size_t codec_jitter_copy_in(codec_jitter_buffer_t *buffer, const uint8_t *data, size_t len)
+{
+    size_t take = len;
+    size_t free_space = buffer->capacity - buffer->fill;
+    if (take > free_space) {
+        take = free_space;
+    }
+    size_t first = take;
+    size_t tail_space = buffer->capacity - buffer->write_pos;
+    if (first > tail_space) {
+        first = tail_space;
+    }
+    memcpy(buffer->data + buffer->write_pos, data, first);
+    if (take > first) {
+        memcpy(buffer->data, data + first, take - first);
+    }
+    buffer->write_pos = (buffer->write_pos + take) % buffer->capacity;
+    buffer->fill += take;
+    buffer->total_written += take;
+    if (buffer->fill > buffer->high_water) {
+        buffer->high_water = buffer->fill;
+    }
+    return take;
+}
+
+static size_t codec_jitter_copy_out(codec_jitter_buffer_t *buffer, uint8_t *out, size_t len)
+{
+    size_t take = len;
+    if (take > buffer->fill) {
+        take = buffer->fill;
+    }
+    size_t first = take;
+    size_t tail_space = buffer->capacity - buffer->read_pos;
+    if (first > tail_space) {
+        first = tail_space;
+    }
+    memcpy(out, buffer->data + buffer->read_pos, first);
+    if (take > first) {
+        memcpy(out + first, buffer->data, take - first);
+    }
+    buffer->read_pos = (buffer->read_pos + take) % buffer->capacity;
+    buffer->fill -= take;
+    buffer->total_read += take;
+    return take;
+}
+
+static esp_err_t codec_jitter_write(codec_jitter_buffer_t *buffer, const uint8_t *data, size_t len)
+{
+    if (!buffer || !data) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t off = 0;
+    while (!s_abort && off < len) {
+        xSemaphoreTake(buffer->lock, portMAX_DELAY);
+        if (buffer->failed) {
+            esp_err_t err = buffer->error == ESP_OK ? ESP_FAIL : buffer->error;
+            xSemaphoreGive(buffer->lock);
+            return err;
+        }
+        size_t wrote = codec_jitter_copy_in(buffer, data + off, len - off);
+        if (wrote > 0) {
+            off += wrote;
+            xSemaphoreGive(buffer->can_read);
+        }
+        xSemaphoreGive(buffer->lock);
+        if (off < len) {
+            xSemaphoreTake(buffer->can_write, pdMS_TO_TICKS(50));
+        }
+    }
+    return off == len ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t codec_jitter_wait_prebuffer(codec_jitter_buffer_t *buffer, size_t target)
+{
+    if (!buffer) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    while (!s_abort) {
+        xSemaphoreTake(buffer->lock, portMAX_DELAY);
+        bool failed = buffer->failed;
+        bool eof = buffer->eof;
+        size_t fill = buffer->fill;
+        esp_err_t err = buffer->error == ESP_OK ? ESP_FAIL : buffer->error;
+        xSemaphoreGive(buffer->lock);
+
+        if (failed) {
+            return err;
+        }
+        if (fill >= target || (eof && fill > 0)) {
+            return ESP_OK;
+        }
+        if (eof && fill == 0) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        xSemaphoreTake(buffer->can_read, pdMS_TO_TICKS(50));
+    }
+    return ESP_FAIL;
+}
+
+static int codec_jitter_read(codec_jitter_buffer_t *buffer, uint8_t *out, size_t max_len, bool *eos)
+{
+    if (!buffer || !out || max_len == 0) {
+        return -1;
+    }
+    if (eos) {
+        *eos = false;
+    }
+    while (!s_abort) {
+        xSemaphoreTake(buffer->lock, portMAX_DELAY);
+        if (buffer->fill > 0) {
+            size_t got = codec_jitter_copy_out(buffer, out, max_len);
+            bool ended = buffer->eof && buffer->fill == 0;
+            if (eos) {
+                *eos = ended;
+            }
+            xSemaphoreGive(buffer->can_write);
+            xSemaphoreGive(buffer->lock);
+            return (int)got;
+        }
+        if (buffer->failed) {
+            xSemaphoreGive(buffer->lock);
+            return -1;
+        }
+        if (buffer->eof) {
+            xSemaphoreGive(buffer->lock);
+            return 0;
+        }
+        xSemaphoreGive(buffer->lock);
+        xSemaphoreTake(buffer->can_read, pdMS_TO_TICKS(50));
+    }
+    return -1;
+}
+
 static int16_t scale_output_sample(int16_t sample)
 {
     const tater_live_settings_t *settings = tater_live_settings_get();
@@ -246,7 +539,55 @@ static int16_t wav_frame_sample_s16(const wav_stream_info_t *info, const uint8_t
     return (int16_t)((int32_t)le32(p) >> 16);
 }
 
-static esp_err_t wav_stream_flush(wav_stream_state_t *state)
+static int16_t pcm_sample_s16(uint16_t bits_per_sample, const uint8_t *sample)
+{
+    if (!sample) {
+        return 0;
+    }
+    switch (bits_per_sample) {
+        case 8:
+            return (int16_t)(((int32_t)sample[0] - 128) << 8);
+        case 16:
+            return (int16_t)le16(sample);
+        case 24: {
+            int32_t value = (int32_t)sample[0] | ((int32_t)sample[1] << 8) | ((int32_t)sample[2] << 16);
+            if (value & 0x00800000) {
+                value |= 0xFF000000;
+            }
+            return (int16_t)(value >> 8);
+        }
+        case 32:
+            return (int16_t)((int32_t)le32(sample) >> 16);
+        default:
+            return 0;
+    }
+}
+
+static int16_t decoded_frame_sample_s16(const esp_audio_simple_dec_info_t *info, const uint8_t *frame, uint8_t channel)
+{
+    if (!info || !frame || info->channel == 0) {
+        return 0;
+    }
+    if (channel >= info->channel) {
+        channel = 0;
+    }
+    const size_t bytes_per_sample = info->bits_per_sample / 8;
+    return pcm_sample_s16(info->bits_per_sample, frame + ((size_t)channel * bytes_per_sample));
+}
+
+static bool decoded_pcm_info_supported(const esp_audio_simple_dec_info_t *info)
+{
+    if (!info || info->sample_rate == 0 || info->channel == 0 || info->channel > 8) {
+        return false;
+    }
+    if (info->bits_per_sample != 8 && info->bits_per_sample != 16 && info->bits_per_sample != 24 && info->bits_per_sample != 32) {
+        return false;
+    }
+    size_t bytes_per_frame = ((size_t)info->bits_per_sample / 8) * info->channel;
+    return bytes_per_frame > 0 && bytes_per_frame <= sizeof(((pcm_stream_state_t *)0)->partial_frame);
+}
+
+static esp_err_t pcm_stream_flush(pcm_stream_state_t *state)
 {
     if (!state || state->out_frames == 0) {
         return ESP_OK;
@@ -259,26 +600,37 @@ static esp_err_t wav_stream_flush(wav_stream_state_t *state)
     return err;
 }
 
-static esp_err_t wav_stream_emit_frame(const wav_stream_info_t *info, wav_stream_state_t *state, const uint8_t *frame)
+static esp_err_t pcm_stream_emit_stereo(uint32_t sample_rate, pcm_stream_state_t *state, int16_t left, int16_t right)
 {
-    int16_t left = scale_output_sample(wav_frame_sample_s16(info, frame, 0));
-    int16_t right = scale_output_sample(info->channels > 1 ? wav_frame_sample_s16(info, frame, 1) : left);
+    if (!state || sample_rate == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    left = scale_output_sample(left);
+    right = scale_output_sample(right);
     state->input_frames++;
     state->resample_accum += TATER_SPK_SAMPLE_RATE;
 
-    while (!s_abort && state->resample_accum >= info->sample_rate) {
+    while (!s_abort && state->resample_accum >= sample_rate) {
         state->out[state->out_frames * 2] = left;
         state->out[(state->out_frames * 2) + 1] = right;
         state->out_frames++;
-        state->resample_accum -= info->sample_rate;
+        state->resample_accum -= sample_rate;
         if (state->out_frames >= 256) {
-            esp_err_t err = wav_stream_flush(state);
+            esp_err_t err = pcm_stream_flush(state);
             if (err != ESP_OK) {
                 return err;
             }
         }
     }
     return ESP_OK;
+}
+
+static esp_err_t wav_stream_emit_frame(const wav_stream_info_t *info, wav_stream_state_t *state, const uint8_t *frame)
+{
+    int16_t left = wav_frame_sample_s16(info, frame, 0);
+    int16_t right = info->channels > 1 ? wav_frame_sample_s16(info, frame, 1) : left;
+    return pcm_stream_emit_stereo(info->sample_rate, state, left, right);
 }
 
 static esp_err_t wav_stream_process_data(const wav_stream_info_t *info, wav_stream_state_t *state, const uint8_t *data, size_t len)
@@ -332,19 +684,529 @@ static esp_err_t wav_stream_process_data(const wav_stream_info_t *info, wav_stre
     return ESP_OK;
 }
 
-static esp_err_t stream_wav_url(const char *url)
+static esp_err_t decoded_pcm_emit_frame(const esp_audio_simple_dec_info_t *info, pcm_stream_state_t *state, const uint8_t *frame)
+{
+    int16_t left = decoded_frame_sample_s16(info, frame, 0);
+    int16_t right = info->channel > 1 ? decoded_frame_sample_s16(info, frame, 1) : left;
+    return pcm_stream_emit_stereo(info->sample_rate, state, left, right);
+}
+
+static esp_err_t decoded_pcm_process_data(const esp_audio_simple_dec_info_t *info, pcm_stream_state_t *state, const uint8_t *data, size_t len)
+{
+    if (!decoded_pcm_info_supported(info) || !state || !data || len == 0) {
+        return ESP_OK;
+    }
+
+    const size_t bytes_per_frame = ((size_t)info->bits_per_sample / 8) * info->channel;
+    size_t off = 0;
+    while (!s_abort && off < len) {
+        if (state->partial_len > 0) {
+            size_t needed = bytes_per_frame - state->partial_len;
+            size_t take = len - off < needed ? len - off : needed;
+            memcpy(state->partial_frame + state->partial_len, data + off, take);
+            state->partial_len += take;
+            off += take;
+            state->data_bytes_seen += take;
+            if (state->partial_len < bytes_per_frame) {
+                return ESP_OK;
+            }
+            esp_err_t err = decoded_pcm_emit_frame(info, state, state->partial_frame);
+            state->partial_len = 0;
+            if (err != ESP_OK) {
+                return err;
+            }
+            continue;
+        }
+
+        if (len - off < bytes_per_frame) {
+            size_t take = len - off;
+            memcpy(state->partial_frame, data + off, take);
+            state->partial_len = take;
+            state->data_bytes_seen += take;
+            return ESP_OK;
+        }
+
+        esp_err_t err = decoded_pcm_emit_frame(info, state, data + off);
+        if (err != ESP_OK) {
+            return err;
+        }
+        off += bytes_per_frame;
+        state->data_bytes_seen += bytes_per_frame;
+    }
+    return ESP_OK;
+}
+
+static bool url_path_has_extension(const char *url, const char *extension)
+{
+    if (!url || !extension) {
+        return false;
+    }
+
+    const char *end = strpbrk(url, "?#");
+    size_t url_len = end ? (size_t)(end - url) : strlen(url);
+    const char *slash = url;
+    for (size_t i = 0; i < url_len; i++) {
+        if (url[i] == '/') {
+            slash = url + i + 1;
+        }
+    }
+
+    const char *dot = NULL;
+    for (const char *p = slash; p < url + url_len; p++) {
+        if (*p == '.') {
+            dot = p;
+        }
+    }
+    if (!dot) {
+        return false;
+    }
+
+    dot++;
+    size_t ext_len = strlen(extension);
+    if ((size_t)((url + url_len) - dot) != ext_len) {
+        return false;
+    }
+    for (size_t i = 0; i < ext_len; i++) {
+        if (tolower((unsigned char)dot[i]) != tolower((unsigned char)extension[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static stream_audio_type_t stream_audio_type_from_url(const char *url)
+{
+    if (url_path_has_extension(url, "wav")) {
+        return STREAM_AUDIO_WAV;
+    }
+    if (url_path_has_extension(url, "mp3")) {
+        return STREAM_AUDIO_MP3;
+    }
+    if (url_path_has_extension(url, "flac")) {
+        return STREAM_AUDIO_FLAC;
+    }
+    return STREAM_AUDIO_UNKNOWN;
+}
+
+static stream_audio_type_t stream_audio_type_from_content_type(const char *content_type)
+{
+    if (!content_type) {
+        return STREAM_AUDIO_UNKNOWN;
+    }
+    if (strstr(content_type, "audio/mpeg") || strstr(content_type, "audio/mp3") || strstr(content_type, "audio/x-mp3")) {
+        return STREAM_AUDIO_MP3;
+    }
+    if (strstr(content_type, "audio/flac") || strstr(content_type, "audio/x-flac")) {
+        return STREAM_AUDIO_FLAC;
+    }
+    if (strstr(content_type, "audio/wav") || strstr(content_type, "audio/x-wav") || strstr(content_type, "audio/wave")) {
+        return STREAM_AUDIO_WAV;
+    }
+    return STREAM_AUDIO_UNKNOWN;
+}
+
+static stream_audio_type_t stream_audio_type_from_magic(const uint8_t *data, size_t len)
+{
+    if (!data) {
+        return STREAM_AUDIO_UNKNOWN;
+    }
+    if (len >= 12 && memcmp(data, "RIFF", 4) == 0 && memcmp(data + 8, "WAVE", 4) == 0) {
+        return STREAM_AUDIO_WAV;
+    }
+    if (len >= 4 && memcmp(data, "fLaC", 4) == 0) {
+        return STREAM_AUDIO_FLAC;
+    }
+    if (len >= 3 && memcmp(data, "ID3", 3) == 0) {
+        return STREAM_AUDIO_MP3;
+    }
+    if (len >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0) {
+        return STREAM_AUDIO_MP3;
+    }
+    return STREAM_AUDIO_UNKNOWN;
+}
+
+static const char *stream_audio_type_name(stream_audio_type_t type)
+{
+    switch (type) {
+        case STREAM_AUDIO_WAV:
+            return "wav";
+        case STREAM_AUDIO_MP3:
+            return "mp3";
+        case STREAM_AUDIO_FLAC:
+            return "flac";
+        default:
+            return "unknown";
+    }
+}
+
+static esp_audio_simple_dec_type_t simple_decoder_type_for_stream(stream_audio_type_t type)
+{
+    switch (type) {
+        case STREAM_AUDIO_MP3:
+            return ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+        case STREAM_AUDIO_FLAC:
+            return ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC;
+        default:
+            return ESP_AUDIO_SIMPLE_DEC_TYPE_NONE;
+    }
+}
+
+static esp_err_t audio_codec_register_once(void)
+{
+    static bool registered;
+    if (registered) {
+        return ESP_OK;
+    }
+
+    esp_audio_err_t mp3_err = esp_mp3_dec_register();
+    if (mp3_err != ESP_AUDIO_ERR_OK && mp3_err != ESP_AUDIO_ERR_ALREADY_EXIST) {
+        ESP_LOGE(TAG, "mp3 decoder register failed err=%d", mp3_err);
+        return mp3_err == ESP_AUDIO_ERR_MEM_LACK ? ESP_ERR_NO_MEM : ESP_FAIL;
+    }
+
+    esp_audio_err_t flac_err = esp_flac_dec_register();
+    if (flac_err != ESP_AUDIO_ERR_OK && flac_err != ESP_AUDIO_ERR_ALREADY_EXIST) {
+        ESP_LOGE(TAG, "flac decoder register failed err=%d", flac_err);
+        return flac_err == ESP_AUDIO_ERR_MEM_LACK ? ESP_ERR_NO_MEM : ESP_FAIL;
+    }
+
+    registered = true;
+    return ESP_OK;
+}
+
+static esp_err_t codec_stream_begin(codec_stream_state_t *stream, stream_audio_type_t type)
+{
+    if (!stream) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_RETURN_ON_ERROR(audio_codec_register_once(), TAG, "codec registry failed");
+    memset(stream, 0, sizeof(*stream));
+    stream->type = simple_decoder_type_for_stream(type);
+    if (stream->type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    stream->out_cap = PLAYBACK_CODEC_OUT_INITIAL;
+    stream->out_buf = alloc_audio(stream->out_cap);
+    if (!stream->out_buf) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_audio_simple_dec_cfg_t dec_cfg = {
+        .dec_type = stream->type,
+        .use_frame_dec = false,
+    };
+    esp_audio_err_t err = esp_audio_simple_dec_open(&dec_cfg, &stream->decoder);
+    if (err != ESP_AUDIO_ERR_OK) {
+        ESP_LOGE(TAG, "open %s decoder failed err=%d", stream_audio_type_name(type), err);
+        free(stream->out_buf);
+        stream->out_buf = NULL;
+        return err == ESP_AUDIO_ERR_MEM_LACK ? ESP_ERR_NO_MEM : ESP_ERR_NOT_SUPPORTED;
+    }
+    return ESP_OK;
+}
+
+static void codec_stream_end(codec_stream_state_t *stream)
+{
+    if (!stream) {
+        return;
+    }
+    if (stream->speaker_started) {
+        esp_err_t end_err = tater_audio_speaker_end();
+        if (end_err != ESP_OK) {
+            ESP_LOGW(TAG, "speaker end failed err=%s", esp_err_to_name(end_err));
+        }
+        stream->speaker_started = false;
+    }
+    if (stream->decoder) {
+        esp_audio_simple_dec_close(stream->decoder);
+        stream->decoder = NULL;
+    }
+    free(stream->out_buf);
+    stream->out_buf = NULL;
+}
+
+static esp_err_t codec_stream_handle_pcm(codec_stream_state_t *stream, const uint8_t *data, size_t len)
+{
+    if (!stream || !data || len == 0) {
+        return ESP_OK;
+    }
+
+    if (!stream->have_info) {
+        esp_audio_err_t info_err = esp_audio_simple_dec_get_info(stream->decoder, &stream->info);
+        if (info_err != ESP_AUDIO_ERR_OK || !decoded_pcm_info_supported(&stream->info)) {
+            ESP_LOGE(TAG, "unsupported decoded audio info err=%d rate=%" PRIu32 " channels=%u bits=%u",
+                     info_err, stream->info.sample_rate, stream->info.channel, stream->info.bits_per_sample);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        ESP_LOGI(TAG, "stream %s rate=%" PRIu32 " channels=%u bits=%u bitrate=%" PRIu32,
+                 esp_audio_simple_dec_get_name(stream->type),
+                 stream->info.sample_rate,
+                 stream->info.channel,
+                 stream->info.bits_per_sample,
+                 stream->info.bitrate);
+        ESP_RETURN_ON_ERROR(tater_audio_speaker_begin(), TAG, "speaker begin failed");
+        stream->speaker_started = true;
+        stream->have_info = true;
+    }
+
+    return decoded_pcm_process_data(&stream->info, &stream->pcm, data, len);
+}
+
+static esp_err_t codec_stream_feed(codec_stream_state_t *stream, uint8_t *data, size_t len, bool eos)
+{
+    if (!stream || !stream->decoder || !data || len == 0) {
+        return ESP_OK;
+    }
+
+    esp_audio_simple_dec_raw_t raw = {
+        .buffer = data,
+        .len = len,
+        .eos = eos,
+    };
+
+    while (!s_abort && raw.len > 0) {
+        esp_audio_simple_dec_out_t out = {
+            .buffer = stream->out_buf,
+            .len = stream->out_cap,
+        };
+        esp_audio_err_t dec_err = esp_audio_simple_dec_process(stream->decoder, &raw, &out);
+        if (dec_err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+            if (out.needed_size <= stream->out_cap) {
+                return ESP_FAIL;
+            }
+            uint8_t *new_buf = heap_caps_realloc(stream->out_buf, out.needed_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!new_buf) {
+                new_buf = heap_caps_realloc(stream->out_buf, out.needed_size, MALLOC_CAP_8BIT);
+            }
+            if (!new_buf) {
+                return ESP_ERR_NO_MEM;
+            }
+            stream->out_buf = new_buf;
+            stream->out_cap = out.needed_size;
+            continue;
+        }
+        if (dec_err != ESP_AUDIO_ERR_OK) {
+            ESP_LOGE(TAG, "decode %s failed err=%d", esp_audio_simple_dec_get_name(stream->type), dec_err);
+            return ESP_FAIL;
+        }
+
+        if (out.decoded_size > 0) {
+            ESP_RETURN_ON_ERROR(codec_stream_handle_pcm(stream, out.buffer, out.decoded_size), TAG, "pcm output failed");
+            stream->decoded_bytes += out.decoded_size;
+        }
+
+        if (raw.consumed == 0) {
+            break;
+        }
+        if (raw.consumed > raw.len) {
+            return ESP_FAIL;
+        }
+        raw.len -= raw.consumed;
+        raw.buffer += raw.consumed;
+        raw.consumed = 0;
+    }
+    return ESP_OK;
+}
+
+static void codec_http_reader_task(void *arg)
+{
+    codec_http_reader_args_t *reader = (codec_http_reader_args_t *)arg;
+    esp_err_t err = ESP_OK;
+    size_t bytes_seen = reader ? reader->bytes_seen : 0;
+
+    if (!reader || !reader->client || !reader->buffer || !reader->read_buf || reader->read_size == 0) {
+        err = ESP_ERR_INVALID_ARG;
+        goto done;
+    }
+
+    while (!s_abort) {
+        if (reader->content_length >= 0 && (int64_t)bytes_seen >= reader->content_length) {
+            break;
+        }
+        int got = esp_http_client_read(reader->client, (char *)reader->read_buf, reader->read_size);
+        if (got < 0) {
+            err = ESP_FAIL;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        bytes_seen += (size_t)got;
+        err = codec_jitter_write(reader->buffer, reader->read_buf, (size_t)got);
+        if (err != ESP_OK) {
+            break;
+        }
+    }
+
+done:
+    if (reader && reader->buffer) {
+        if (err == ESP_OK || s_abort) {
+            codec_jitter_close(reader->buffer);
+        } else {
+            codec_jitter_fail(reader->buffer, err);
+        }
+        ESP_LOGI(
+            TAG,
+            "codec reader done bytes=%u err=%s",
+            (unsigned)bytes_seen,
+            esp_err_to_name(err == ESP_OK ? ESP_OK : err)
+        );
+    }
+    if (reader && reader->notify_task) {
+        xTaskNotifyGive(reader->notify_task);
+    }
+    free(reader);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t stream_codec_from_open_client(
+    esp_http_client_handle_t client,
+    stream_audio_type_t type,
+    uint8_t *initial_data,
+    size_t initial_len,
+    uint8_t *read_buf,
+    size_t read_size,
+    int64_t content_length
+)
+{
+    codec_jitter_buffer_t jitter = {0};
+    codec_stream_state_t stream = {0};
+    esp_err_t err = codec_stream_begin(&stream, type);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    size_t capacity = codec_jitter_capacity(type);
+    size_t prebuffer = codec_jitter_prebuffer(type, content_length);
+    err = codec_jitter_init(&jitter, capacity);
+    if (err != ESP_OK) {
+        codec_stream_end(&stream);
+        return err;
+    }
+    ESP_LOGI(
+        TAG,
+        "stream %s jitter capacity=%u prebuffer=%u content_length=%lld",
+        stream_audio_type_name(type),
+        (unsigned)capacity,
+        (unsigned)prebuffer,
+        (long long)content_length
+    );
+
+    size_t bytes_seen = initial_len;
+    err = codec_jitter_write(&jitter, initial_data, initial_len);
+    TaskHandle_t reader_task = NULL;
+    if (err == ESP_OK) {
+        codec_http_reader_args_t *reader = calloc(1, sizeof(*reader));
+        if (!reader) {
+            err = ESP_ERR_NO_MEM;
+        } else {
+            reader->client = client;
+            reader->buffer = &jitter;
+            reader->read_buf = read_buf;
+            reader->read_size = read_size;
+            reader->content_length = content_length;
+            reader->bytes_seen = bytes_seen;
+            reader->notify_task = xTaskGetCurrentTaskHandle();
+            BaseType_t ok = xTaskCreatePinnedToCore(
+                codec_http_reader_task,
+                "codec_http",
+                PLAYBACK_HTTP_READER_TASK_STACK,
+                reader,
+                4,
+                &reader_task,
+                0
+            );
+            if (ok != pdPASS) {
+                free(reader);
+                err = ESP_ERR_NO_MEM;
+            }
+        }
+    }
+
+    uint8_t *decode_buf = NULL;
+    if (err == ESP_OK) {
+        err = codec_jitter_wait_prebuffer(&jitter, prebuffer);
+    }
+    if (err == ESP_OK) {
+        decode_buf = alloc_audio(read_size);
+        if (!decode_buf) {
+            err = ESP_ERR_NO_MEM;
+        }
+    }
+    while (!s_abort && err == ESP_OK) {
+        bool eos = false;
+        int got = codec_jitter_read(&jitter, decode_buf, read_size, &eos);
+        if (got < 0) {
+            err = jitter.error == ESP_OK ? ESP_FAIL : jitter.error;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        err = codec_stream_feed(&stream, decode_buf, (size_t)got, eos);
+    }
+
+    if (err == ESP_OK && !s_abort) {
+        if (stream.speaker_started) {
+            err = pcm_stream_flush(&stream.pcm);
+        } else {
+            err = ESP_ERR_NOT_SUPPORTED;
+        }
+    }
+    ESP_LOGI(
+        TAG,
+        "stream %s playback input_frames=%u output_frames=%u decoded_bytes=%u",
+        stream_audio_type_name(type),
+        (unsigned)stream.pcm.input_frames,
+        (unsigned)stream.pcm.output_frames,
+        (unsigned)stream.decoded_bytes
+    );
+    free(decode_buf);
+    codec_stream_end(&stream);
+    if (err == ESP_OK && !s_abort) {
+        codec_jitter_close(&jitter);
+    } else {
+        codec_jitter_fail(&jitter, err == ESP_OK ? ESP_FAIL : err);
+    }
+    if (reader_task) {
+        uint32_t waited_ms = 0;
+        while (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100)) == 0) {
+            waited_ms += 100;
+            if (waited_ms == 6000 || (waited_ms > 6000 && (waited_ms % 5000) == 0)) {
+                ESP_LOGW(TAG, "codec reader still stopping after %u ms", (unsigned)waited_ms);
+            }
+        }
+    }
+    ESP_LOGI(
+        TAG,
+        "stream %s jitter read=%u wrote=%u high_water=%u",
+        stream_audio_type_name(type),
+        (unsigned)jitter.total_read,
+        (unsigned)jitter.total_written,
+        (unsigned)jitter.high_water
+    );
+    codec_jitter_destroy(&jitter);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return s_abort ? ESP_FAIL : ESP_OK;
+}
+
+static esp_err_t stream_audio_url(const char *url)
 {
     esp_http_client_config_t cfg = {
         .url = url,
         .timeout_ms = 15000,
-        .buffer_size = 8192,
+        .buffer_size = PLAYBACK_HTTP_READ_SIZE,
         .crt_bundle_attach = esp_crt_bundle_attach,
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     ESP_RETURN_ON_FALSE(client, ESP_ERR_NO_MEM, TAG, "http client init failed");
 
-    uint8_t *read_buf = alloc_audio(8192);
-    uint8_t *header_buf = alloc_audio(16 * 1024);
+    uint8_t *read_buf = alloc_audio(PLAYBACK_HTTP_READ_SIZE);
+    uint8_t *header_buf = alloc_audio(PLAYBACK_HEADER_LIMIT);
     if (!read_buf || !header_buf) {
         if (read_buf) {
             free(read_buf);
@@ -362,6 +1224,16 @@ static esp_err_t stream_wav_url(const char *url)
     }
 
     (void)esp_http_client_fetch_headers(client);
+    int64_t content_length = esp_http_client_get_content_length(client);
+    stream_audio_type_t hint_type = stream_audio_type_from_url(url);
+    char *content_type = NULL;
+    if (esp_http_client_get_header(client, "Content-Type", &content_type) == ESP_OK && content_type) {
+        stream_audio_type_t content_type_hint = stream_audio_type_from_content_type(content_type);
+        if (hint_type == STREAM_AUDIO_UNKNOWN) {
+            hint_type = content_type_hint;
+        }
+        ESP_LOGI(TAG, "playback content-type=%s hint=%s", content_type, stream_audio_type_name(hint_type));
+    }
     wav_stream_info_t info = {0};
     wav_stream_state_t state = {0};
     size_t header_len = 0;
@@ -369,7 +1241,7 @@ static esp_err_t stream_wav_url(const char *url)
     bool header_ready = false;
 
     while (!s_abort) {
-        int got = esp_http_client_read(client, (char *)read_buf, 8192);
+        int got = esp_http_client_read(client, (char *)read_buf, PLAYBACK_HTTP_READ_SIZE);
         if (got < 0) {
             err = ESP_FAIL;
             goto done;
@@ -379,13 +1251,29 @@ static esp_err_t stream_wav_url(const char *url)
         }
 
         if (!header_ready) {
-            if (header_len + (size_t)got > 16 * 1024) {
-                ESP_LOGE(TAG, "WAV header exceeded limit");
+            if (header_len + (size_t)got > PLAYBACK_HEADER_LIMIT) {
+                ESP_LOGE(TAG, "audio header exceeded limit");
                 err = ESP_ERR_NOT_SUPPORTED;
                 goto done;
             }
             memcpy(header_buf + header_len, read_buf, (size_t)got);
             header_len += (size_t)got;
+
+            stream_audio_type_t magic_type = stream_audio_type_from_magic(header_buf, header_len);
+            stream_audio_type_t stream_type = magic_type != STREAM_AUDIO_UNKNOWN ? magic_type : hint_type;
+            if (stream_type == STREAM_AUDIO_MP3 || stream_type == STREAM_AUDIO_FLAC) {
+                ESP_LOGI(TAG, "stream audio format=%s", stream_audio_type_name(stream_type));
+                err = stream_codec_from_open_client(
+                    client,
+                    stream_type,
+                    header_buf,
+                    header_len,
+                    read_buf,
+                    PLAYBACK_HTTP_READ_SIZE,
+                    content_length
+                );
+                goto done;
+            }
 
             size_t data_offset = 0;
             wav_header_result_t header = parse_wav_stream_header(header_buf, header_len, &info, &data_offset);
@@ -393,7 +1281,7 @@ static esp_err_t stream_wav_url(const char *url)
                 continue;
             }
             if (header == WAV_HEADER_INVALID) {
-                ESP_LOGE(TAG, "unsupported streamed wav");
+                ESP_LOGE(TAG, "unsupported streamed audio");
                 err = ESP_ERR_NOT_SUPPORTED;
                 goto done;
             }
@@ -434,7 +1322,7 @@ static esp_err_t stream_wav_url(const char *url)
         goto done;
     }
     if (!s_abort) {
-        err = wav_stream_flush(&state);
+        err = pcm_stream_flush(&state);
     }
     ESP_LOGI(
         TAG,
@@ -623,7 +1511,7 @@ static void playback_task(void *arg)
     ESP_LOGI(TAG, "playback url=%s", url);
     tater_protocol_send_log("info", "playback started");
 
-    esp_err_t err = stream_wav_url(url);
+    esp_err_t err = stream_audio_url(url);
     if (notify_finished) {
         if (!s_abort && err == ESP_OK) {
             tater_protocol_send_playback_finished();
@@ -719,6 +1607,10 @@ esp_err_t tater_playback_init(void)
     s_abort = false;
     s_playing = false;
     s_task = NULL;
+    esp_err_t codec_err = audio_codec_register_once();
+    if (codec_err != ESP_OK) {
+        ESP_LOGW(TAG, "mp3/flac decoder registration deferred err=%s", esp_err_to_name(codec_err));
+    }
     return ESP_OK;
 }
 
@@ -740,7 +1632,7 @@ static esp_err_t play_url(const char *url, bool notify_finished)
     }
     request->notify_finished = notify_finished;
     s_abort = false;
-    BaseType_t ok = xTaskCreatePinnedToCore(playback_task, "tater_playback", 8192, request, 5, &s_task, 1);
+    BaseType_t ok = xTaskCreatePinnedToCore(playback_task, "tater_playback", PLAYBACK_URL_TASK_STACK, request, 5, &s_task, 1);
     if (ok != pdPASS) {
         free(request->url);
         free(request);

@@ -17,7 +17,8 @@ This first Voice PE target now covers the basic native satellite loop:
 - sends `voice.stop` when the button is released
 - receives `state`, `voice.event`, `play.url`, and `ota.url`
 - drives Voice PE LED states and directional listening from XMOS DoA
-- streams Tater runtime WAV TTS URLs while downloading
+- streams Tater runtime WAV, MP3, and FLAC audio URLs while downloading
+- buffers MP3/FLAC compressed streams before decode to smooth Wi-Fi jitter
 - plays embedded wake sounds on-device
 - runs the embedded `hey_tater` microWakeWord model locally
 - auto-updates Voice PE XMOS firmware to `1.3.2` when the installed version differs
@@ -35,7 +36,7 @@ Still intentionally limited or pending:
 
 - S3 Box/display targets
 - Satellite1/Sat1 native firmware is scaffolded, but not published as a flashable target until its native audio, DAC, PD, XMOS, LED, and button drivers are implemented and tested.
-- Streaming playback currently supports PCM WAV responses. Compressed streaming codecs can be added later if Tater starts serving them.
+- Other compressed containers such as M4A/AAC and OGG/Vorbis are still intentionally left out of the firmware image until we need them.
 
 ## Build With PlatformIO
 
@@ -106,8 +107,8 @@ The tag must match the firmware version in the board header.
 For Voice PE:
 
 ```sh
-git tag native-voicepe-0.1.26
-git push origin native-voicepe-0.1.26
+git tag native-voicepe-0.1.28
+git push origin native-voicepe-0.1.28
 ```
 
 The release workflow builds `voicepe`, packages release assets, writes release

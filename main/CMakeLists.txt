@@ -26,6 +26,7 @@ idf_component_register(
         esp_partition
         esp_timer
         esp_wifi
+        esp_audio_codec
         esp_websocket_client
         esp-tflite-micro
         json
