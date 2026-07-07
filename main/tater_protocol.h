@@ -35,6 +35,7 @@ void tater_protocol_start(void);
 bool tater_protocol_is_connected(void);
 bool tater_protocol_voice_active(void);
 bool tater_protocol_can_start_local_wake(void);
+bool tater_protocol_timer_is_active(void);
 bool tater_protocol_timer_is_ringing(void);
 void tater_protocol_timer_stop_from_device(void);
 const char *tater_protocol_device_id(void);

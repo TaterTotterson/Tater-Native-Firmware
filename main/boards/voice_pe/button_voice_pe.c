@@ -20,7 +20,7 @@ static const char *TAG = "tater_button";
 
 #define BUTTON_POLL_MS 20
 #define BUTTON_DEBOUNCE_TICKS 3
-#define VOICE_START_TICKS 8
+#define INTERCOM_START_TICKS (600 / BUTTON_POLL_MS)
 #define SETUP_RESET_CLICK_COUNT 5
 #define SETUP_RESET_CLICK_WINDOW_TICKS (3000 / BUTTON_POLL_MS)
 #define SETUP_RESET_ARMED_TICKS (5000 / BUTTON_POLL_MS)
@@ -28,6 +28,7 @@ static const char *TAG = "tater_button";
 #define SETUP_RESET_SHORT_CLICK_MAX_TICKS (500 / BUTTON_POLL_MS)
 #define SETUP_RESET_COUNTDOWN_STEPS 12
 #define SETUP_RESET_SOUND_ID "short-definite-fart"
+#define BUTTON_INTERCOM_WAKE_WORD "push to intercom"
 
 esp_err_t tater_button_init(void)
 {
@@ -94,9 +95,9 @@ static void button_task(void *arg)
     int setup_click_count = 0;
     int setup_click_window_ticks = 0;
     int setup_armed_ticks = 0;
-    bool voice_started_for_press = false;
+    bool intercom_started_for_press = false;
     bool setup_hold_candidate = false;
-    bool timer_stopped_for_press = false;
+    bool button_consumed_for_press = false;
 
     while (true) {
         bool raw_pressed = gpio_get_level(TATER_CENTER_BUTTON) == 0;
@@ -111,13 +112,25 @@ static void button_task(void *arg)
             if (stable_pressed) {
                 press_ticks = 0;
                 setup_hold_ticks = 0;
-                voice_started_for_press = false;
-                timer_stopped_for_press = false;
+                intercom_started_for_press = false;
+                button_consumed_for_press = false;
                 setup_hold_candidate = setup_click_count >= SETUP_RESET_CLICK_COUNT && setup_armed_ticks > 0;
                 if (tater_protocol_timer_is_ringing()) {
                     ESP_LOGI(TAG, "center button press: stop timer alarm");
                     tater_protocol_timer_stop_from_device();
-                    timer_stopped_for_press = true;
+                    button_consumed_for_press = true;
+                    setup_hold_candidate = false;
+                    tater_leds_clear_setup_reset_feedback();
+                } else if (tater_playback_is_playing()) {
+                    ESP_LOGI(TAG, "center button press: stop playback");
+                    tater_playback_stop();
+                    button_consumed_for_press = true;
+                    setup_hold_candidate = false;
+                    tater_leds_clear_setup_reset_feedback();
+                } else if (tater_protocol_voice_active()) {
+                    ESP_LOGI(TAG, "center button press: cancel active voice");
+                    tater_protocol_stop_voice(true);
+                    button_consumed_for_press = true;
                     setup_hold_candidate = false;
                     tater_leds_clear_setup_reset_feedback();
                 }
@@ -127,7 +140,7 @@ static void button_task(void *arg)
                     tater_leds_show_setup_reset_countdown(SETUP_RESET_COUNTDOWN_STEPS, SETUP_RESET_COUNTDOWN_STEPS);
                 }
             } else {
-                if (timer_stopped_for_press) {
+                if (button_consumed_for_press) {
                     setup_click_count = 0;
                     setup_armed_ticks = 0;
                     setup_click_window_ticks = 0;
@@ -137,7 +150,15 @@ static void button_task(void *arg)
                     setup_click_count = 0;
                     setup_armed_ticks = 0;
                     setup_click_window_ticks = 0;
-                } else if (!voice_started_for_press && press_ticks > 0 && press_ticks <= SETUP_RESET_SHORT_CLICK_MAX_TICKS) {
+                } else if (intercom_started_for_press) {
+                    if (tater_protocol_voice_active()) {
+                        ESP_LOGI(TAG, "center button release: intercom voice.stop");
+                        tater_protocol_stop_voice(false);
+                    }
+                    setup_click_count = 0;
+                    setup_armed_ticks = 0;
+                    setup_click_window_ticks = 0;
+                } else if (press_ticks > 0 && press_ticks <= SETUP_RESET_SHORT_CLICK_MAX_TICKS) {
                     if (setup_click_window_ticks <= 0) {
                         setup_click_count = 0;
                     }
@@ -157,15 +178,11 @@ static void button_task(void *arg)
                     setup_armed_ticks = 0;
                 }
 
-                if (voice_started_for_press && tater_protocol_voice_active()) {
-                    ESP_LOGI(TAG, "center button release: voice.stop");
-                    tater_protocol_stop_voice(false);
-                }
                 press_ticks = 0;
                 setup_hold_ticks = 0;
-                voice_started_for_press = false;
+                intercom_started_for_press = false;
                 setup_hold_candidate = false;
-                timer_stopped_for_press = false;
+                button_consumed_for_press = false;
             }
         }
 
@@ -184,17 +201,15 @@ static void button_task(void *arg)
                 if (setup_hold_ticks >= SETUP_RESET_HOLD_TICKS) {
                     enter_setup_mode("button gesture");
                 }
-            } else if (!timer_stopped_for_press && !voice_started_for_press && press_ticks >= VOICE_START_TICKS) {
+            } else if (!button_consumed_for_press && !intercom_started_for_press && press_ticks >= INTERCOM_START_TICKS) {
                 if (tater_ota_is_running()) {
                     ESP_LOGW(TAG, "button ignored during OTA");
+                    button_consumed_for_press = true;
                 } else {
-                    if (tater_playback_is_playing()) {
-                        tater_playback_stop();
-                    }
-                    ESP_LOGI(TAG, "center button hold: voice.start");
+                    ESP_LOGI(TAG, "center button hold: intercom voice.start");
                     tater_leds_clear_setup_reset_feedback();
-                    tater_protocol_start_voice("", "center_button");
-                    voice_started_for_press = true;
+                    tater_protocol_start_voice(BUTTON_INTERCOM_WAKE_WORD, "center_button_hold");
+                    intercom_started_for_press = true;
                     setup_click_count = 0;
                     setup_click_window_ticks = 0;
                     setup_armed_ticks = 0;
@@ -204,6 +219,8 @@ static void button_task(void *arg)
             if (setup_click_window_ticks > 0) {
                 setup_click_window_ticks--;
                 if (setup_click_window_ticks <= 0 && setup_armed_ticks <= 0) {
+                    ESP_LOGI(TAG, "setup reset click sequence expired");
+                    tater_leds_clear_setup_reset_feedback();
                     setup_click_count = 0;
                 }
             }

@@ -765,9 +765,7 @@ static void timer_arm_from_payload(const cJSON *payload)
     if (was_ringing && tater_playback_is_playing()) {
         tater_playback_stop();
     }
-    if (s_current_state == TATER_STATE_TIMER) {
-        emit_state(websocket_ready() ? TATER_STATE_IDLE : TATER_STATE_DISCONNECTED, "timer armed");
-    }
+    emit_state(TATER_STATE_TIMER, "timer armed");
     ESP_LOGI(TAG, "timer armed id=%s remaining_ms=%lu", s_timer_id, (unsigned long)arm_ms);
 }
 
@@ -1172,6 +1170,11 @@ bool tater_protocol_voice_active(void)
 bool tater_protocol_timer_is_ringing(void)
 {
     return s_timer_ringing;
+}
+
+bool tater_protocol_timer_is_active(void)
+{
+    return s_timer_active;
 }
 
 void tater_protocol_timer_stop_from_device(void)
