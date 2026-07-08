@@ -807,14 +807,14 @@ static void render(void)
         render_voice_animation("heartbeat", "heartbeat", s_animation_tick, TATER_RED);
         break;
     case TATER_STATE_OTA:
-        paired_spinner(s_animation_tick, TATER_BLUE, false);
+        paired_spinner(s_animation_tick, TATER_ORANGE, false);
         break;
     case TATER_STATE_ERROR:
         error_pulse(s_animation_tick, TATER_RED);
         break;
     case TATER_STATE_DISCONNECTED:
     default:
-        twinkle(s_animation_tick, TATER_RED);
+        twinkle(s_animation_tick, TATER_ORANGE);
         break;
     }
     led_strip_refresh(s_strip);

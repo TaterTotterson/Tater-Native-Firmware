@@ -11,6 +11,7 @@
 #include "driver/i2c.h"
 #include "driver/i2s_std.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -110,6 +111,8 @@ extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_end[] asm("_binary_ffva
 #define AIC3204_LOR_DRV_GAIN 0x13
 #define AIC3204_HP_START 0x14
 #define AIC3204_REF_STARTUP 0x7B
+#define TATER_SPK_DMA_DESC_NUM 3
+#define TATER_SPK_DMA_FRAME_NUM 360
 
 static esp_err_t xmos_reset_boot(void)
 {
@@ -809,26 +812,25 @@ static esp_err_t aic3204_init(void)
     return ESP_OK;
 }
 
-static esp_err_t speaker_i2s_init(void)
-{
-    s_speaker_ready = true;
-    s_speaker_enabled = false;
-    s_speaker_preloaded = false;
-    ESP_LOGI(TAG, "speaker i2s ready bclk=%d ws=%d dout=%d", TATER_SPK_I2S_BCLK, TATER_SPK_I2S_WS, TATER_SPK_I2S_DOUT);
-    return ESP_OK;
-}
-
-static esp_err_t speaker_i2s_start_driver(void)
+static esp_err_t speaker_i2s_configure_channel(void)
 {
     if (s_tx_chan) {
         return ESP_OK;
     }
 
+    ESP_LOGI(
+        TAG,
+        "speaker i2s configure dma_free=%u dma_largest=%u desc=%u frames=%u",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+        (unsigned)TATER_SPK_DMA_DESC_NUM,
+        (unsigned)TATER_SPK_DMA_FRAME_NUM
+    );
     i2s_chan_config_t chan_cfg = {
         .id = I2S_NUM_0,
         .role = I2S_ROLE_SLAVE,
-        .dma_desc_num = 4,
-        .dma_frame_num = 720,
+        .dma_desc_num = TATER_SPK_DMA_DESC_NUM,
+        .dma_frame_num = TATER_SPK_DMA_FRAME_NUM,
         .auto_clear = true,
         .intr_priority = 3,
     };
@@ -862,14 +864,33 @@ static esp_err_t speaker_i2s_start_driver(void)
         s_tx_chan = NULL;
         return err;
     }
-    err = i2s_channel_enable(s_tx_chan);
+    return ESP_OK;
+}
+
+static esp_err_t speaker_i2s_init(void)
+{
+    esp_err_t err = speaker_i2s_configure_channel();
     if (err != ESP_OK) {
-        i2s_del_channel(s_tx_chan);
-        s_tx_chan = NULL;
+        s_speaker_ready = false;
+        s_speaker_enabled = false;
+        s_speaker_preloaded = false;
         return err;
     }
+    s_speaker_ready = true;
+    s_speaker_enabled = false;
+    s_speaker_preloaded = false;
+    ESP_LOGI(TAG, "speaker i2s ready bclk=%d ws=%d dout=%d", TATER_SPK_I2S_BCLK, TATER_SPK_I2S_WS, TATER_SPK_I2S_DOUT);
+    return ESP_OK;
+}
 
-    s_speaker_enabled = true;
+static esp_err_t speaker_i2s_start_driver(void)
+{
+    ESP_RETURN_ON_ERROR(speaker_i2s_configure_channel(), TAG, "speaker i2s configure failed");
+    if (s_speaker_enabled) {
+        ESP_RETURN_ON_ERROR(i2s_channel_disable(s_tx_chan), TAG, "speaker i2s disable failed");
+        s_speaker_enabled = false;
+    }
+
     s_speaker_preloaded = false;
     return ESP_OK;
 }
@@ -1089,11 +1110,6 @@ esp_err_t tater_audio_speaker_end(void)
             result = err;
         }
     }
-    esp_err_t del_err = i2s_del_channel(s_tx_chan);
-    if (result == ESP_OK && del_err != ESP_OK) {
-        result = del_err;
-    }
-    s_tx_chan = NULL;
     s_speaker_enabled = false;
     s_speaker_preloaded = false;
     reset_speaker_audio_level();
