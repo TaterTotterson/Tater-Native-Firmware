@@ -73,6 +73,7 @@ extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_end[] asm("_binary_ffva
 #define XMOS_TARGET_VERSION_MAJOR 1
 #define XMOS_TARGET_VERSION_MINOR 3
 #define XMOS_TARGET_VERSION_PATCH 2
+#define VOICE_PE_XMOS_PROCESSED_CHANNEL 0
 #define CONFIGURATION_SERVICER_RESID_CHANNEL_0_PIPELINE_STAGE 0x30
 #define CONFIGURATION_SERVICER_RESID_CHANNEL_1_PIPELINE_STAGE 0x40
 #define PIPELINE_STAGE_NS 3
@@ -673,7 +674,7 @@ static esp_err_t voice_kit_configure_pipeline(void)
         TAG,
         "xmos channel 1 stage failed"
     );
-    ESP_LOGI(TAG, "xmos pipeline configured channel0=AGC channel1=NS");
+    ESP_LOGI(TAG, "xmos pipeline configured channel0=AEC+IC+NS+AGC channel1=AEC+IC+NS");
     return ESP_OK;
 }
 
@@ -1030,10 +1031,7 @@ static void audio_task(void *arg)
         }
 
         for (size_t i = 0; i < frames; i++) {
-            int32_t left = rx[i * 2];
-            int32_t right = rx[(i * 2) + 1];
-            int32_t mixed = ((int32_t)pcm32_to_pcm16(left) + (int32_t)pcm32_to_pcm16(right)) / 2;
-            mono[i] = (int16_t)mixed;
+            mono[i] = pcm32_to_pcm16(rx[(i * TATER_MIC_SOURCE_CHANNELS) + VOICE_PE_XMOS_PROCESSED_CHANNEL]);
         }
 
         tater_audio_aec_process_mic(mono, frames);
@@ -1042,7 +1040,13 @@ static void audio_task(void *arg)
 
         if (active) {
             if (active_chunks < 3) {
-                ESP_LOGI(TAG, "mic chunk %u frames=%u bytes=%u", (unsigned)(active_chunks + 1), (unsigned)frames, (unsigned)bytes_read);
+                ESP_LOGI(
+                    TAG,
+                    "mic chunk %u frames=%u bytes=%u xmos_channel=processed_aec_ic_ns_agc",
+                    (unsigned)(active_chunks + 1),
+                    (unsigned)frames,
+                    (unsigned)bytes_read
+                );
             }
             active_chunks++;
             tater_protocol_send_audio(mono, frames);

@@ -1,16 +1,23 @@
 {
   "boards": {
+    "satellite1": {
+      "board": "satellite1",
+      "display_version": "0.1.35",
+      "label": "Satellite1",
+      "manifest": "prebuilt_firmware/native-0.1.35.json",
+      "version": "native-satellite1-0.1.35"
+    },
     "voicepe": {
       "board": "voice-pe",
-      "display_version": "0.1.23",
+      "display_version": "0.1.35",
       "label": "Voice PE",
-      "manifest": "prebuilt_firmware/native-voicepe-0.1.23.json",
-      "version": "native-voicepe-0.1.23"
+      "manifest": "prebuilt_firmware/native-0.1.35.json",
+      "version": "native-voicepe-0.1.35"
     }
   },
-  "display_version": "0.1.23",
+  "display_version": "0.1.35",
   "kind": "tater_native_satellite_firmware_latest",
-  "manifest": "prebuilt_firmware/native-voicepe-0.1.23.json",
+  "manifest": "prebuilt_firmware/native-0.1.35.json",
   "schema": 1,
-  "version": "native-voicepe-0.1.23"
+  "version": "native-0.1.35"
 }

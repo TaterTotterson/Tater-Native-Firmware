@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "audio_aec.h"
@@ -27,6 +28,9 @@
 
 static const char *TAG = "tater_audio_sat1";
 
+extern const uint8_t _binary_sat1_xmos_1_0_4_dev_11_factory_bin_start[] asm("_binary_sat1_xmos_1_0_4_dev_11_factory_bin_start");
+extern const uint8_t _binary_sat1_xmos_1_0_4_dev_11_factory_bin_end[] asm("_binary_sat1_xmos_1_0_4_dev_11_factory_bin_end");
+
 #define TATER_I2C_PORT I2C_NUM_0
 #define SAT1_SPI_HOST SPI2_HOST
 #define SAT1_CONTROL_CMD_READ_BIT 0x80
@@ -42,7 +46,19 @@ static const char *TAG = "tater_audio_sat1";
 #define SAT1_XMOS_TARGET_MAJOR 1
 #define SAT1_XMOS_TARGET_MINOR 0
 #define SAT1_XMOS_TARGET_PATCH 4
+#define SAT1_XMOS_TARGET_PRERELEASE 4
+#define SAT1_XMOS_TARGET_COUNTER 11
+#define SAT1_XMOS_VERSION_READY_TIMEOUT_MS 8000
+#define SAT1_XMOS_VERSION_RETRY_DELAY_MS 250
+#define SAT1_XMOS_FLASH_PAGE_SIZE 256U
+#define SAT1_XMOS_FLASH_SECTOR_SIZE 4096U
+#define SAT1_XMOS_FLASH_TOTAL_SIZE (8U * 1024U * 1024U)
+#define SAT1_XMOS_FLASH_BUSY_BIT 0x01
+#define SAT1_XMOS_FLASH_WEL_BIT 0x02
+#define SAT1_XMOS_FLASH_WRITE_TIMEOUT_MS 100
+#define SAT1_XMOS_FLASH_ERASE_TIMEOUT_MS 2000
 #define SAT1_MIC_GAIN_Q8 2048
+#define SAT1_XMOS_PROCESSED_CHANNEL 0
 #define SAT1_SPK_DMA_DESC_NUM 4
 #define SAT1_SPK_DMA_FRAME_NUM 240
 #define SAT1_SPK_WRITE_FRAMES SAT1_SPK_DMA_FRAME_NUM
@@ -86,6 +102,54 @@ static uint32_t read_u32_le(const uint8_t *payload)
 static int16_t read_i16_le(const uint8_t *payload)
 {
     return (int16_t)((uint16_t)payload[0] | ((uint16_t)payload[1] << 8));
+}
+
+static size_t sat1_xmos_target_image_size(void)
+{
+    return (size_t)(_binary_sat1_xmos_1_0_4_dev_11_factory_bin_end - _binary_sat1_xmos_1_0_4_dev_11_factory_bin_start);
+}
+
+static const char *sat1_xmos_prerelease_name(uint8_t prerelease)
+{
+    switch (prerelease) {
+    case 1:
+        return "alpha";
+    case 2:
+        return "beta";
+    case 3:
+        return "rc";
+    case SAT1_XMOS_TARGET_PRERELEASE:
+        return "dev";
+    default:
+        return "";
+    }
+}
+
+static void sat1_xmos_format_version(const uint8_t version[5], char *out, size_t out_len)
+{
+    if (!out || out_len == 0) {
+        return;
+    }
+    const char *pre = sat1_xmos_prerelease_name(version ? version[3] : 0);
+    if (version && pre[0] && version[4]) {
+        snprintf(out, out_len, "%u.%u.%u-%s.%u", version[0], version[1], version[2], pre, version[4]);
+    } else if (version && pre[0]) {
+        snprintf(out, out_len, "%u.%u.%u-%s", version[0], version[1], version[2], pre);
+    } else if (version) {
+        snprintf(out, out_len, "%u.%u.%u", version[0], version[1], version[2]);
+    } else {
+        snprintf(out, out_len, "unknown");
+    }
+}
+
+static bool sat1_xmos_target_version_matches(const uint8_t version[5])
+{
+    return version
+        && version[0] == SAT1_XMOS_TARGET_MAJOR
+        && version[1] == SAT1_XMOS_TARGET_MINOR
+        && version[2] == SAT1_XMOS_TARGET_PATCH
+        && version[3] == SAT1_XMOS_TARGET_PRERELEASE
+        && version[4] == SAT1_XMOS_TARGET_COUNTER;
 }
 
 static esp_err_t i2c_init(void)
@@ -342,6 +406,39 @@ static esp_err_t sat1_xmos_reset_boot(void)
     return ESP_OK;
 }
 
+static void xmos_status_set_update_state(tater_audio_xmos_update_state_t state)
+{
+    portENTER_CRITICAL(&s_xmos_status_lock);
+    s_xmos_status.update_state = state;
+    portEXIT_CRITICAL(&s_xmos_status_lock);
+}
+
+static void xmos_status_set_progress(uint8_t progress_percent)
+{
+    if (progress_percent > 100) {
+        progress_percent = 100;
+    }
+    portENTER_CRITICAL(&s_xmos_status_lock);
+    s_xmos_status.progress_percent = progress_percent;
+    portEXIT_CRITICAL(&s_xmos_status_lock);
+}
+
+static void xmos_status_set_dfu(uint8_t dfu_state, uint8_t dfu_status)
+{
+    portENTER_CRITICAL(&s_xmos_status_lock);
+    s_xmos_status.dfu_state = dfu_state;
+    s_xmos_status.dfu_status = dfu_status;
+    portEXIT_CRITICAL(&s_xmos_status_lock);
+}
+
+static void xmos_status_set_update_flags(bool attempted, bool required)
+{
+    portENTER_CRITICAL(&s_xmos_status_lock);
+    s_xmos_status.update_attempted = attempted;
+    s_xmos_status.update_required = required;
+    portEXIT_CRITICAL(&s_xmos_status_lock);
+}
+
 static void xmos_status_set_version(bool valid, uint8_t major, uint8_t minor, uint8_t patch)
 {
     portENTER_CRITICAL(&s_xmos_status_lock);
@@ -349,11 +446,6 @@ static void xmos_status_set_version(bool valid, uint8_t major, uint8_t minor, ui
     s_xmos_status.major = major;
     s_xmos_status.minor = minor;
     s_xmos_status.patch = patch;
-    s_xmos_status.progress_percent = valid ? 100 : 0;
-    s_xmos_status.update_state = valid ? TATER_XMOS_UPDATE_SKIPPED : TATER_XMOS_UPDATE_ERROR;
-    s_xmos_status.update_attempted = false;
-    s_xmos_status.update_required = valid
-        && !(major == SAT1_XMOS_TARGET_MAJOR && minor == SAT1_XMOS_TARGET_MINOR && patch == SAT1_XMOS_TARGET_PATCH);
     portEXIT_CRITICAL(&s_xmos_status_lock);
 }
 
@@ -490,7 +582,7 @@ static bool sat1_control_transfer(uint8_t resource_id, uint8_t command, uint8_t 
     return true;
 }
 
-static esp_err_t sat1_xmos_read_version(uint8_t *major, uint8_t *minor, uint8_t *patch)
+static esp_err_t sat1_xmos_read_version(uint8_t version_out[5])
 {
     uint8_t version[5] = {0};
     if (!sat1_control_transfer(SAT1_DFU_CONTROLLER_RESID, SAT1_DFU_GET_VERSION, version, sizeof(version))) {
@@ -505,29 +597,344 @@ static esp_err_t sat1_xmos_read_version(uint8_t *major, uint8_t *minor, uint8_t 
         xmos_status_set_version(false, 0, 0, 0);
         return ESP_FAIL;
     }
-    if (major) {
-        *major = version[0];
-    }
-    if (minor) {
-        *minor = version[1];
-    }
-    if (patch) {
-        *patch = version[2];
+    if (version_out) {
+        memcpy(version_out, version, sizeof(version));
     }
     xmos_status_set_version(true, version[0], version[1], version[2]);
-    ESP_LOGI(TAG, "sat1 xmos firmware v%u.%u.%u prerelease=%u.%u", version[0], version[1], version[2], version[3], version[4]);
+    char formatted[32] = {0};
+    sat1_xmos_format_version(version, formatted, sizeof(formatted));
+    ESP_LOGI(TAG, "sat1 xmos firmware v%s", formatted);
     return ESP_OK;
 }
 
-static void sat1_xmos_read_version_with_retry(void)
+static esp_err_t sat1_xmos_read_version_with_retry(uint8_t version_out[5], uint32_t timeout_ms, const char *phase)
 {
-    for (int attempt = 1; attempt <= 8; attempt++) {
-        if (sat1_xmos_read_version(NULL, NULL, NULL) == ESP_OK) {
-            return;
+    int64_t deadline_us = esp_timer_get_time() + ((int64_t)timeout_ms * 1000);
+    uint32_t attempts = 0;
+    esp_err_t last_err = ESP_FAIL;
+    while (esp_timer_get_time() <= deadline_us) {
+        attempts++;
+        last_err = sat1_xmos_read_version(version_out);
+        if (last_err == ESP_OK) {
+            if (attempts > 1) {
+                ESP_LOGI(TAG, "sat1 xmos version ready after %" PRIu32 " attempt(s)", attempts);
+            }
+            return ESP_OK;
         }
-        ESP_LOGW(TAG, "sat1 xmos version read failed attempt=%d", attempt);
-        vTaskDelay(pdMS_TO_TICKS(250));
+        if (attempts == 1 || (attempts % 10) == 0) {
+            ESP_LOGW(
+                TAG,
+                "sat1 xmos version not ready during %s attempt=%" PRIu32 " err=%s",
+                phase ? phase : "startup",
+                attempts,
+                esp_err_to_name(last_err)
+            );
+        }
+        vTaskDelay(pdMS_TO_TICKS(SAT1_XMOS_VERSION_RETRY_DELAY_MS));
     }
+
+    ESP_LOGE(
+        TAG,
+        "sat1 xmos version unavailable after %" PRIu32 " ms during %s err=%s",
+        timeout_ms,
+        phase ? phase : "startup",
+        esp_err_to_name(last_err)
+    );
+    xmos_status_set_version(false, 0, 0, 0);
+    return last_err == ESP_OK ? ESP_ERR_TIMEOUT : last_err;
+}
+
+static esp_err_t sat1_xmos_set_flash_direct_mode(bool enable)
+{
+    gpio_set_level(TATER_XMOS_RESET, enable ? 1 : 0);
+    vTaskDelay(pdMS_TO_TICKS(enable ? 25 : 1000));
+    return ESP_OK;
+}
+
+static esp_err_t sat1_xmos_flash_read_jedec(uint8_t *manufacturer, uint8_t *type, uint8_t *capacity)
+{
+    uint8_t tx[4] = {0x9F, 0, 0, 0};
+    ESP_RETURN_ON_ERROR(sat1_spi_transfer(tx, sizeof(tx)), TAG, "sat1 xmos flash jedec transfer failed");
+    if (manufacturer) {
+        *manufacturer = tx[1];
+    }
+    if (type) {
+        *type = tx[2];
+    }
+    if (capacity) {
+        *capacity = tx[3];
+    }
+    ESP_RETURN_ON_FALSE((tx[1] | tx[2] | tx[3]) != 0, ESP_FAIL, TAG, "sat1 xmos flash jedec empty");
+    return ESP_OK;
+}
+
+static esp_err_t sat1_xmos_flash_read_status(uint8_t *status)
+{
+    uint8_t tx[2] = {0x05, 0};
+    ESP_RETURN_ON_ERROR(sat1_spi_transfer(tx, sizeof(tx)), TAG, "sat1 xmos flash status transfer failed");
+    if (status) {
+        *status = tx[1];
+    }
+    return ESP_OK;
+}
+
+static esp_err_t sat1_xmos_flash_wait_ready(uint32_t timeout_ms)
+{
+    int64_t deadline_us = esp_timer_get_time() + ((int64_t)timeout_ms * 1000);
+    while (esp_timer_get_time() <= deadline_us) {
+        uint8_t status = 0;
+        ESP_RETURN_ON_ERROR(sat1_xmos_flash_read_status(&status), TAG, "sat1 xmos flash status failed");
+        if ((status & SAT1_XMOS_FLASH_BUSY_BIT) == 0) {
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t sat1_xmos_flash_enable_write(void)
+{
+    uint8_t cmd = 0x06;
+    ESP_RETURN_ON_ERROR(sat1_spi_transfer(&cmd, sizeof(cmd)), TAG, "sat1 xmos flash write-enable transfer failed");
+    uint8_t status = 0;
+    ESP_RETURN_ON_ERROR(sat1_xmos_flash_read_status(&status), TAG, "sat1 xmos flash write-enable status failed");
+    ESP_RETURN_ON_FALSE((status & SAT1_XMOS_FLASH_WEL_BIT) != 0, ESP_FAIL, TAG, "sat1 xmos flash WEL not set");
+    return ESP_OK;
+}
+
+static esp_err_t sat1_xmos_flash_disable_write(void)
+{
+    uint8_t cmd = 0x04;
+    return sat1_spi_transfer(&cmd, sizeof(cmd));
+}
+
+static esp_err_t sat1_xmos_flash_erase_sector(uint32_t address)
+{
+    ESP_RETURN_ON_ERROR(sat1_xmos_flash_wait_ready(SAT1_XMOS_FLASH_ERASE_TIMEOUT_MS), TAG, "sat1 xmos flash busy before erase");
+    ESP_RETURN_ON_ERROR(sat1_xmos_flash_enable_write(), TAG, "sat1 xmos flash erase write-enable failed");
+    uint8_t tx[4] = {
+        0x20,
+        (uint8_t)(address >> 16),
+        (uint8_t)(address >> 8),
+        (uint8_t)address,
+    };
+    ESP_RETURN_ON_ERROR(sat1_spi_transfer(tx, sizeof(tx)), TAG, "sat1 xmos flash erase transfer failed");
+    ESP_RETURN_ON_ERROR(sat1_xmos_flash_wait_ready(SAT1_XMOS_FLASH_ERASE_TIMEOUT_MS), TAG, "sat1 xmos flash erase wait failed");
+    return sat1_xmos_flash_disable_write();
+}
+
+static esp_err_t sat1_xmos_flash_write_page(uint32_t address, const uint8_t page[SAT1_XMOS_FLASH_PAGE_SIZE])
+{
+    ESP_RETURN_ON_FALSE((address & (SAT1_XMOS_FLASH_PAGE_SIZE - 1U)) == 0, ESP_ERR_INVALID_ARG, TAG, "sat1 xmos flash write address unaligned");
+    ESP_RETURN_ON_ERROR(sat1_xmos_flash_wait_ready(SAT1_XMOS_FLASH_WRITE_TIMEOUT_MS), TAG, "sat1 xmos flash busy before write");
+    ESP_RETURN_ON_ERROR(sat1_xmos_flash_enable_write(), TAG, "sat1 xmos flash write-enable failed");
+    uint8_t tx[SAT1_XMOS_FLASH_PAGE_SIZE + 4] = {
+        0x02,
+        (uint8_t)(address >> 16),
+        (uint8_t)(address >> 8),
+        (uint8_t)address,
+    };
+    memcpy(&tx[4], page, SAT1_XMOS_FLASH_PAGE_SIZE);
+    ESP_RETURN_ON_ERROR(sat1_spi_transfer(tx, sizeof(tx)), TAG, "sat1 xmos flash write transfer failed");
+    ESP_RETURN_ON_ERROR(sat1_xmos_flash_wait_ready(SAT1_XMOS_FLASH_WRITE_TIMEOUT_MS), TAG, "sat1 xmos flash write wait failed");
+    return sat1_xmos_flash_disable_write();
+}
+
+static esp_err_t sat1_xmos_flash_read_page(uint32_t address, uint8_t page[SAT1_XMOS_FLASH_PAGE_SIZE])
+{
+    ESP_RETURN_ON_FALSE((address & (SAT1_XMOS_FLASH_PAGE_SIZE - 1U)) == 0, ESP_ERR_INVALID_ARG, TAG, "sat1 xmos flash read address unaligned");
+    uint8_t tx[SAT1_XMOS_FLASH_PAGE_SIZE + 5] = {
+        0x0B,
+        (uint8_t)(address >> 16),
+        (uint8_t)(address >> 8),
+        (uint8_t)address,
+        0,
+    };
+    ESP_RETURN_ON_ERROR(sat1_spi_transfer(tx, sizeof(tx)), TAG, "sat1 xmos flash read transfer failed");
+    memcpy(page, &tx[5], SAT1_XMOS_FLASH_PAGE_SIZE);
+    return ESP_OK;
+}
+
+static void sat1_xmos_set_flash_progress(size_t done, size_t total, uint8_t *last_progress)
+{
+    if (total == 0) {
+        return;
+    }
+    uint8_t progress = (uint8_t)((done * 100U) / total);
+    if (!last_progress || progress == 100 || progress >= (uint8_t)(*last_progress + 5)) {
+        if (last_progress) {
+            *last_progress = progress;
+        }
+        xmos_status_set_progress(progress);
+        ESP_LOGI(TAG, "sat1 xmos flash progress=%u%%", progress);
+    }
+}
+
+static esp_err_t sat1_xmos_flash_target_image(void)
+{
+    const uint8_t *image = _binary_sat1_xmos_1_0_4_dev_11_factory_bin_start;
+    const size_t image_size = sat1_xmos_target_image_size();
+    ESP_RETURN_ON_FALSE(image && image_size > 0, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image missing");
+    ESP_RETURN_ON_FALSE(image_size <= SAT1_XMOS_FLASH_TOTAL_SIZE, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image too large");
+
+    xmos_status_set_update_flags(true, true);
+    xmos_status_set_update_state(TATER_XMOS_UPDATE_RUNNING);
+    xmos_status_set_progress(0);
+    xmos_status_set_dfu(1, 0);
+
+    char target[32] = {0};
+    const uint8_t target_version[5] = {
+        SAT1_XMOS_TARGET_MAJOR,
+        SAT1_XMOS_TARGET_MINOR,
+        SAT1_XMOS_TARGET_PATCH,
+        SAT1_XMOS_TARGET_PRERELEASE,
+        SAT1_XMOS_TARGET_COUNTER,
+    };
+    sat1_xmos_format_version(target_version, target, sizeof(target));
+    ESP_LOGW(TAG, "sat1 xmos direct flash starting target=%s size=%u", target, (unsigned)image_size);
+
+    bool direct_mode = false;
+    esp_err_t err = sat1_xmos_set_flash_direct_mode(true);
+    if (err != ESP_OK) {
+        goto cleanup;
+    }
+    direct_mode = true;
+
+    uint8_t manufacturer = 0;
+    uint8_t memory_type = 0;
+    uint8_t capacity = 0;
+    err = sat1_xmos_flash_read_jedec(&manufacturer, &memory_type, &capacity);
+    if (err != ESP_OK) {
+        goto cleanup;
+    }
+    ESP_LOGI(TAG, "sat1 xmos flash jedec manufacturer=0x%02x type=0x%02x capacity=0x%02x", manufacturer, memory_type, capacity);
+
+    const size_t sectors = (image_size + SAT1_XMOS_FLASH_SECTOR_SIZE - 1U) / SAT1_XMOS_FLASH_SECTOR_SIZE;
+    const size_t pages = (image_size + SAT1_XMOS_FLASH_PAGE_SIZE - 1U) / SAT1_XMOS_FLASH_PAGE_SIZE;
+    const size_t total_steps = sectors + pages;
+    size_t completed_steps = 0;
+    uint8_t last_progress = 0;
+
+    xmos_status_set_dfu(2, 0);
+    for (size_t sector = 0; sector < sectors; sector++) {
+        err = sat1_xmos_flash_erase_sector((uint32_t)(sector * SAT1_XMOS_FLASH_SECTOR_SIZE));
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "sat1 xmos flash erase sector=%u failed err=%s", (unsigned)sector, esp_err_to_name(err));
+            goto cleanup;
+        }
+        completed_steps++;
+        sat1_xmos_set_flash_progress(completed_steps, total_steps, &last_progress);
+    }
+
+    uint8_t page[SAT1_XMOS_FLASH_PAGE_SIZE];
+    uint8_t verify[SAT1_XMOS_FLASH_PAGE_SIZE];
+    xmos_status_set_dfu(3, 0);
+    for (size_t page_index = 0; page_index < pages; page_index++) {
+        size_t offset = page_index * SAT1_XMOS_FLASH_PAGE_SIZE;
+        size_t remaining = image_size - offset;
+        size_t copy_len = remaining > SAT1_XMOS_FLASH_PAGE_SIZE ? SAT1_XMOS_FLASH_PAGE_SIZE : remaining;
+        memset(page, 0, sizeof(page));
+        memcpy(page, image + offset, copy_len);
+
+        err = sat1_xmos_flash_write_page((uint32_t)offset, page);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "sat1 xmos flash write page=%u failed err=%s", (unsigned)page_index, esp_err_to_name(err));
+            goto cleanup;
+        }
+        err = sat1_xmos_flash_read_page((uint32_t)offset, verify);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "sat1 xmos flash verify read page=%u failed err=%s", (unsigned)page_index, esp_err_to_name(err));
+            goto cleanup;
+        }
+        if (memcmp(page, verify, SAT1_XMOS_FLASH_PAGE_SIZE) != 0) {
+            ESP_LOGW(TAG, "sat1 xmos flash verify mismatch page=%u; retrying", (unsigned)page_index);
+            err = sat1_xmos_flash_write_page((uint32_t)offset, page);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "sat1 xmos flash retry write page=%u failed err=%s", (unsigned)page_index, esp_err_to_name(err));
+                goto cleanup;
+            }
+            err = sat1_xmos_flash_read_page((uint32_t)offset, verify);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "sat1 xmos flash retry verify read page=%u failed err=%s", (unsigned)page_index, esp_err_to_name(err));
+                goto cleanup;
+            }
+            if (memcmp(page, verify, SAT1_XMOS_FLASH_PAGE_SIZE) != 0) {
+                ESP_LOGE(TAG, "sat1 xmos flash verify mismatch page=%u after retry", (unsigned)page_index);
+                err = ESP_ERR_INVALID_CRC;
+                goto cleanup;
+            }
+        }
+
+        completed_steps++;
+        sat1_xmos_set_flash_progress(completed_steps, total_steps, &last_progress);
+    }
+
+    xmos_status_set_dfu(4, 0);
+    direct_mode = false;
+    err = sat1_xmos_reset_boot();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "sat1 xmos reset after flash failed err=%s", esp_err_to_name(err));
+        goto cleanup;
+    }
+
+    uint8_t installed[5] = {0};
+    err = sat1_xmos_read_version_with_retry(installed, SAT1_XMOS_VERSION_READY_TIMEOUT_MS, "flash verify");
+    if (err != ESP_OK || !sat1_xmos_target_version_matches(installed)) {
+        char installed_text[32] = {0};
+        sat1_xmos_format_version(installed, installed_text, sizeof(installed_text));
+        ESP_LOGE(TAG, "sat1 xmos flash verify failed installed=%s target=%s", installed_text, target);
+        err = err == ESP_OK ? ESP_ERR_INVALID_VERSION : err;
+        goto cleanup;
+    }
+
+    xmos_status_set_update_flags(true, false);
+    xmos_status_set_progress(100);
+    xmos_status_set_dfu(0, 0);
+    xmos_status_set_update_state(TATER_XMOS_UPDATE_COMPLETE);
+    ESP_LOGI(TAG, "sat1 xmos direct flash complete");
+    return ESP_OK;
+
+cleanup:
+    if (direct_mode) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_xmos_reset_boot());
+    }
+    xmos_status_set_dfu(0, 1);
+    xmos_status_set_update_state(TATER_XMOS_UPDATE_ERROR);
+    ESP_LOGE(TAG, "sat1 xmos direct flash failed err=%s", esp_err_to_name(err));
+    return err == ESP_OK ? ESP_FAIL : err;
+}
+
+static esp_err_t sat1_xmos_ensure_target_firmware(void)
+{
+    uint8_t installed[5] = {0};
+    const uint8_t target[5] = {
+        SAT1_XMOS_TARGET_MAJOR,
+        SAT1_XMOS_TARGET_MINOR,
+        SAT1_XMOS_TARGET_PATCH,
+        SAT1_XMOS_TARGET_PRERELEASE,
+        SAT1_XMOS_TARGET_COUNTER,
+    };
+    char target_text[32] = {0};
+    sat1_xmos_format_version(target, target_text, sizeof(target_text));
+
+    esp_err_t err = sat1_xmos_read_version_with_retry(installed, SAT1_XMOS_VERSION_READY_TIMEOUT_MS, "startup");
+    if (err == ESP_OK && sat1_xmos_target_version_matches(installed)) {
+        xmos_status_set_update_flags(false, false);
+        xmos_status_set_progress(100);
+        xmos_status_set_dfu(0, 0);
+        xmos_status_set_update_state(TATER_XMOS_UPDATE_SKIPPED);
+        ESP_LOGI(TAG, "sat1 xmos target already installed target=%s", target_text);
+        return ESP_OK;
+    }
+
+    if (err == ESP_OK) {
+        char installed_text[32] = {0};
+        sat1_xmos_format_version(installed, installed_text, sizeof(installed_text));
+        ESP_LOGW(TAG, "sat1 xmos firmware mismatch installed=%s target=%s", installed_text, target_text);
+    } else {
+        ESP_LOGW(TAG, "sat1 xmos version unavailable; attempting direct flash recovery target=%s", target_text);
+    }
+    return sat1_xmos_flash_target_image();
 }
 
 static esp_err_t sat1_read_doa(tater_audio_doa_t *out)
@@ -670,7 +1077,7 @@ esp_err_t tater_audio_i2s_init(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(tas2780_init(0));
     ESP_RETURN_ON_ERROR(spi_init(), TAG, "spi init failed");
     ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_xmos_reset_boot());
-    sat1_xmos_read_version_with_retry();
+    ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_xmos_ensure_target_firmware());
     ESP_RETURN_ON_ERROR(i2s_init_duplex(), TAG, "i2s init failed");
     tater_audio_aec_init();
     return ESP_OK;
@@ -694,17 +1101,17 @@ static int16_t pcm32_to_pcm16_gain(int32_t sample)
     return clamp_s16(v);
 }
 
-static int16_t sat1_downmix_48k_to_16k(const int32_t *samples, size_t source_frame)
+static int16_t sat1_xmos_channel_48k_to_16k(const int32_t *samples, size_t source_frame, size_t channel)
 {
     int32_t sum = 0;
+    if (channel >= TATER_MIC_SOURCE_CHANNELS) {
+        channel = 0;
+    }
     for (size_t frame = 0; frame < 3; frame++) {
         size_t base = (source_frame + frame) * TATER_MIC_SOURCE_CHANNELS;
-        sum += pcm32_to_pcm16_gain(samples[base]);
-        if (TATER_MIC_SOURCE_CHANNELS > 1) {
-            sum += pcm32_to_pcm16_gain(samples[base + 1]);
-        }
+        sum += pcm32_to_pcm16_gain(samples[base + channel]);
     }
-    return clamp_s16(sum / (3 * TATER_MIC_SOURCE_CHANNELS));
+    return clamp_s16(sum / 3);
 }
 
 static void mic_level_stats(const int16_t *samples, size_t count, uint32_t *peak_out, uint32_t *mean_out)
@@ -822,7 +1229,7 @@ static void audio_task(void *arg)
         }
 
         for (size_t i = 0; i < out_frames; i++) {
-            mono[i] = sat1_downmix_48k_to_16k(rx, i * 3);
+            mono[i] = sat1_xmos_channel_48k_to_16k(rx, i * 3, SAT1_XMOS_PROCESSED_CHANNEL);
         }
 
         tater_audio_aec_process_mic(mono, out_frames);
@@ -838,7 +1245,7 @@ static void audio_task(void *arg)
                 mic_level_stats(mono, out_frames, &peak, &mean);
                 ESP_LOGI(
                     TAG,
-                    "sat1 mic chunk %u frames=%u source_frames=%u bytes=%u peak=%u mean=%u gain_q8=%u downmix=stereo_avg",
+                    "sat1 mic chunk %u frames=%u source_frames=%u bytes=%u peak=%u mean=%u gain_q8=%u xmos_channel=processed_aec_ic_ns_agc",
                     (unsigned)(active_chunks + 1),
                     (unsigned)out_frames,
                     (unsigned)source_frames,

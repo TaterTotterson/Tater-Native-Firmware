@@ -1,0 +1,75 @@
+{
+  "devices": [
+    {
+      "artifacts": {
+        "factory": {
+          "flash_freq": "40m",
+          "flash_mode": "dio",
+          "flash_size": "16MB",
+          "kind": "factory",
+          "path": "prebuilt_firmware/satellite1/native-satellite1-0.1.35/firmware.factory.bin",
+          "sha256": "acb4ff8d58de11dbd233a4d32e5694eb230ea0fc0c3cc839643070763dfc00d7",
+          "size_bytes": 5341808
+        },
+        "ota": {
+          "flash_freq": "40m",
+          "flash_mode": "dio",
+          "flash_size": "16MB",
+          "kind": "ota",
+          "path": "prebuilt_firmware/satellite1/native-satellite1-0.1.35/firmware.bin",
+          "sha256": "5f7c829e72f42686667f2b3fed18c34dabb922b4f2e42a5a2e45e8dc0162698d",
+          "size_bytes": 2065008
+        }
+      },
+      "board": "satellite1",
+      "display_version": "0.1.35",
+      "firmware_version": "native-satellite1-0.1.35",
+      "flash_size": "16MB",
+      "key": "satellite1",
+      "label": "Satellite1",
+      "project": "tater.native_satellite"
+    },
+    {
+      "artifacts": {
+        "factory": {
+          "flash_freq": "40m",
+          "flash_mode": "dio",
+          "flash_size": "16MB",
+          "kind": "factory",
+          "path": "prebuilt_firmware/voicepe/native-voicepe-0.1.35/firmware.factory.bin",
+          "sha256": "d8be72d1ada7436f4aedf65ed1c26d82a074297aad995bd792eb78cbad428dce",
+          "size_bytes": 5342688
+        },
+        "ota": {
+          "flash_freq": "40m",
+          "flash_mode": "dio",
+          "flash_size": "16MB",
+          "kind": "ota",
+          "path": "prebuilt_firmware/voicepe/native-voicepe-0.1.35/firmware.bin",
+          "sha256": "9f9a05daa7e825ebfb7ad94a619157d544c63594e9965d5fb60e73c3079b6a48",
+          "size_bytes": 2065888
+        }
+      },
+      "board": "voice-pe",
+      "display_version": "0.1.35",
+      "firmware_version": "native-voicepe-0.1.35",
+      "flash_size": "16MB",
+      "key": "voicepe",
+      "label": "Voice PE",
+      "project": "tater.native_satellite",
+      "xmos_firmware": {
+        "included": true,
+        "path": "main/boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin",
+        "sha256": "9ae0b0516a61b6388f4105b1999fac44ab96e02ecf7f7df9cd5933f534ff9b5a",
+        "size_bytes": 282624,
+        "version": "1.3.2"
+      }
+    }
+  ],
+  "display_version": "0.1.35",
+  "generated_from": ".",
+  "kind": "tater_native_satellite_firmware",
+  "project": "tater.native_satellite",
+  "schema": 1,
+  "version": "native-0.1.35"
+}

@@ -14,13 +14,14 @@ Current status:
 - PCM5122/TAS2780 speaker path setup
 - FUSB302B USB-C PD setup path
 - XMOS DoA telemetry
-- XMOS firmware version/status reporting for target `1.0.4`
+- bundled XMOS factory image `1.0.4-dev.11`
+- boot-time XMOS auto-update when the installed image does not match the bundled image
 - line-out capability advertised to Tater
 - firmware-side AEC shared with Voice PE
 
-Unlike Voice PE, Sat1 does not currently auto-flash the XMOS firmware image from
-the ESP32. It reports the installed XMOS version and whether it differs from the
-target so Tater can surface the state.
+Unlike Voice PE, Sat1 updates XMOS by holding the XMOS in reset and directly
+writing the external XMOS flash over SPI. The update happens before audio starts,
+and each written page is read back for verification.
 
 Hardware constants live in:
 
@@ -32,4 +33,10 @@ The board-specific audio implementation lives in:
 
 ```text
 main/boards/sat1/audio_sat1.c
+```
+
+The bundled XMOS source and factory image live in:
+
+```text
+main/boards/sat1/xmos/
 ```

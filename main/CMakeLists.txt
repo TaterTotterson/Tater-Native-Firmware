@@ -40,6 +40,7 @@ idf_component_register(
 
 target_add_binary_data(${COMPONENT_LIB} "models/hey_tater.tflite" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_0_4_dev_11_factory.bin" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "wake_sounds/blip2.wav" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "wake_sounds/message-notification-4.wav" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "wake_sounds/notification-ding.wav" BINARY)
