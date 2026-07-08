@@ -1,69 +1,304 @@
 # Tater Native Satellite Firmware
 
-This is the first native firmware scaffold for official Tater satellites.
-The initial target is **Voice PE**. Hardware-specific code now lives under
-`main/boards/<board>/`, while Wi-Fi, provisioning, WebSocket protocol, OTA,
-settings, wake-word, and playback orchestration remain shared.
+Native firmware for official Tater voice satellites.
 
-This first Voice PE target now covers the basic native satellite loop:
+The goal is to make satellites behave like dedicated Tater appliances instead
+of configurable ESPHome nodes:
 
-- first-boot Wi-Fi/Tater provisioning over `Tater-Setup-XXXX`
-- saves provisioning data to NVS
-- joins Wi-Fi from saved config
-- connects to Tater at `/api/tater/satellite/v1/ws`
-- sends `hello`
-- starts a voice session from the Voice PE center button
-- streams 16 kHz, 16-bit, mono PCM as binary WebSocket frames
-- sends `voice.stop` when the button is released
-- receives `state`, `voice.event`, `play.url`, and `ota.url`
-- drives Voice PE LED states and directional listening from XMOS DoA
-- streams Tater runtime WAV, MP3, and FLAC audio URLs while downloading
-- buffers MP3/FLAC compressed streams before decode to smooth Wi-Fi jitter
-- plays embedded wake sounds on-device
-- runs the embedded `hey_tater` microWakeWord model locally
-- auto-updates Voice PE XMOS firmware to `1.3.2` when the installed version differs
-- includes the editable Voice PE XMOS source used to rebuild that update image
-- loads and persists a custom microWakeWord `.json`/`.tflite` URL in the on-device cache
-- downloads and persists custom wake-sound WAV URLs in the on-device cache
-- applies live settings from Tater
-- enters setup mode from Tater or a deliberate button gesture
-- reopens the mic for continued chat
-- optionally allows local wake-word barge-in during satellite playback
-- uploads optional good-wake and close-miss raw PCM clips to the trainer
-- performs firmware OTA from a native `ota.url` command
+- no YAML
+- no firmware editing by the user
+- setup and settings managed from Tater
+- official release images for supported hardware
+- Tater handles the intelligence; firmware handles the hardware
 
-Still intentionally limited or pending:
+## Features
 
-- S3 Box/display targets
-- Satellite1/Sat1 native firmware is scaffolded, but not published as a flashable target until its native audio, DAC, PD, XMOS, LED, and button drivers are implemented and tested.
-- Other compressed containers such as M4A/AAC and OGG/Vorbis are still intentionally left out of the firmware image until we need them.
+### Supported Hardware
 
-## Build With PlatformIO
+- Voice PE: `voicepe`
+- Satellite1 / Sat1: `sat1` build environment, `satellite1` release key
 
-This is the build path currently verified from this repo:
+Both targets are ESP32-S3 native firmware images that connect directly to Tater
+over the native satellite WebSocket protocol.
+
+### Provisioning And Pairing
+
+- First boot setup AP: `Tater-Setup-XXXX`
+- Local setup page at `http://192.168.4.1`
+- Captive DNS for phone/computer auto-popup where supported
+- Wi-Fi SSID/password setup
+- Tater server URL setup
+- Add Satellite pairing code setup
+- Device name and room setup
+- Persistent device credential saved after pairing
+- Unpaired native satellites rejected by Tater by default
+- Wi-Fi failure fallback into setup mode on the next boot
+- Setup mode can also be triggered from Tater
+- Physical setup reset gesture: 5 quick clicks, then hold the sixth press for 5 seconds
+
+### Native Tater Connection
+
+- Connects to Tater at `/api/tater/satellite/v1/ws`
+- Sends board, firmware, capabilities, diagnostics, live settings, wake state,
+  timer state, AEC state, XMOS status, and DoA telemetry
+- Streams mic audio as 16 kHz, 16-bit, mono PCM binary WebSocket frames
+- Uses an audio transmit queue and reconnect-aware send path to reduce random
+  voice-session disconnects
+- Supports native firmware OTA commands from Tater
+- Sends logs, OTA status, playback-finished events, timer events, and trainer
+  feedback events
+
+### Voice And Audio
+
+- Local embedded `hey_tater` microWakeWord model
+- Custom microWakeWord `.json` and `.tflite` URL support with persistent cache
+- Wake sensitivity, environment profile, threshold, and sliding-window settings
+- Optional good-wake and close-miss raw PCM upload hooks for the trainer
+- Continued-chat mic reopen
+- Optional wake-word barge-in during playback
+- Firmware-side adaptive AEC with live strength and delay settings
+- Server-driven playback from Tater
+- WAV streaming playback
+- MP3 streaming decode/playback
+- FLAC streaming decode/playback
+- Compressed-stream jitter buffering for MP3/FLAC
+- Embedded on-device wake sounds
+- Custom wake-sound WAV URL support with persistent cache
+- Server-driven `play.tone` support for timers and diagnostics
+- Per-device volume setting
+
+### LEDs, Buttons, And Device UI
+
+- Tater-driven LED state machine
+- Default orange-red system animations
+- Setup mode animation stays white
+- Listening, thinking, tool-call, replying, speaking, timer, OTA, provisioning,
+  Wi-Fi, connecting, disconnected, and error states
+- Per-device LED color, brightness, and animation settings
+- Directional listening animation from XMOS DoA where available
+- Tool-call visual hold until the final response
+- Short press stops playback or timer ringing
+- Hold starts push-to-talk/intercom behavior handled by Tater
+- Physical setup reset click progress, countdown, and success feedback
+
+### Timers And Intercom Hooks
+
+- Tater-managed timers with local satellite alarm fallback
+- Timer LEDs and local alarm tone while ringing
+- Timer stop from the device button
+- Native intercom/push-to-talk hooks through the same satellite transport
+- Broadcast/intercom routing is handled by Tater so room targeting can happen on
+  the server side
+
+### Board-Specific Hardware
+
+Voice PE:
+
+- 12 LED ring
+- AIC3204 speaker path
+- XMOS DoA telemetry
+- XMOS firmware auto-update to `1.3.2` when the installed version differs
+- Editable XMOS source included under `main/boards/voice_pe/xmos/source/`
+
+Satellite1 / Sat1:
+
+- 24 LED ring
+- 48 kHz microphone capture downsampled into the 16 kHz wake/STT path
+- Shared-duplex I2S speaker playback
+- PCM5122/TAS2780 speaker path setup
+- FUSB302B USB-C PD setup path
+- XMOS DoA telemetry and firmware version/status reporting
+- Line-out capability advertised to Tater
+
+### Current Limits
+
+- S3 Box/display targets are not implemented yet.
+- M4A/AAC and OGG/Vorbis are intentionally not included until there is a real
+  need for them.
+- Satellite1 currently reports XMOS version/update-required status; the Voice PE
+  automatic XMOS DFU flow is the complete auto-update path today.
+
+## How To Set Up
+
+### Option 1: OTA From Tater
+
+Use this when a satellite is already paired and connected.
+
+1. Open Tater.
+2. Go to Satellites.
+3. Open the target satellite.
+4. Choose the firmware update action.
+5. Tater downloads the native OTA image from the firmware release manifest and
+   sends an `ota.url` command to the satellite.
+6. The satellite enters the OTA LED state, downloads the image, flashes it, and
+   reboots.
+
+Tater reads the official release index from:
+
+```text
+https://github.com/TaterTotterson/Tater-Native-Firmware/releases/latest/download/latest.json
+```
+
+### Option 2: Flash Over USB From Tater
+
+Use this for first flash, recovery, or a satellite that cannot reach OTA.
+
+1. Plug the satellite into USB.
+2. Open Tater.
+3. Go to the firmware/USB flashing UI.
+4. Pick the supported native firmware target.
+5. Flash the factory image.
+6. After reboot, provision the device from the setup AP.
+
+The factory image erases and writes the full flash layout. OTA images are only
+for already-running native firmware.
+
+### Option 3: Flash Over USB From The Command Line
+
+The repo includes a browser-free USB flashing script. It reads the native
+firmware manifest, verifies SHA-256, erases flash by default, writes the factory
+image, and reboots the board.
+
+Voice PE:
+
+```sh
+./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101
+```
+
+Satellite1 / Sat1:
+
+```sh
+./scripts/flash_native_satellite_usb.py --board sat1 /dev/cu.usbmodem4101
+```
+
+Use `--no-erase` only when you intentionally want to preserve existing flash
+data.
+
+### First Boot Provisioning
+
+If no Wi-Fi credentials are saved, the satellite starts setup mode.
+
+1. Connect your phone or computer to the setup Wi-Fi network:
+
+```text
+Tater-Setup-XXXX
+```
+
+2. The captive portal should open automatically. If it does not, open:
+
+```text
+http://192.168.4.1
+```
+
+3. In Tater, go to Satellites and choose Add Satellite.
+4. Enter the pairing code shown by Tater into the setup page.
+5. Fill in:
+
+- Wi-Fi SSID
+- Wi-Fi password
+- Tater server URL, for example `http://192.168.1.20:8501`
+- pairing code
+- device name
+- room
+
+6. Save. The satellite reboots, joins Wi-Fi, pairs with Tater, and appears in
+   the Satellites page.
+
+When pairing succeeds, Tater returns a permanent device credential during
+`hello.ack`. The firmware saves that credential and uses it for future
+WebSocket connections.
+
+### Setup Reset From The Device
+
+Use this if the saved Wi-Fi/server settings are wrong.
+
+1. Click the center/action button 5 times quickly.
+2. On the sixth press, hold for 5 seconds.
+3. The LED ring shows a countdown.
+4. The satellite plays the embedded `short-definite-fart` wake sound.
+5. Saved provisioning is cleared and the device reboots into setup mode.
+
+Do not hold the center button while plugging in or resetting the board. On these
+ESP32-S3 boards, GPIO0 is also a bootloader strap pin.
+
+### Bench Testing Unpaired Devices
+
+Unpaired native satellites are rejected by default. For bench testing only, set:
+
+```sh
+TATER_NATIVE_SATELLITE_ALLOW_UNPAIRED=1
+```
+
+Do not use that setting for normal installs.
+
+## Advanced Build Info
+
+### Repository Layout
+
+```text
+main/
+  app_main.c                  Shared app startup
+  tater_protocol.c            Native WebSocket protocol
+  playback.c                  WAV/MP3/FLAC playback and tones
+  wake_engine.c               microWakeWord integration
+  native_settings.c           Live settings from Tater
+  audio_aec.c                 Firmware-side adaptive AEC
+  provisioning.c              Setup AP, captive DNS, setup web UI
+  boards/
+    voice_pe/                 Voice PE board implementation
+    sat1/                     Satellite1 board implementation
+scripts/
+  build_native_firmware_manifest.py
+  flash_native_satellite_usb.py
+  render_release_notes.py
+```
+
+Board folders hold only physical hardware differences. Shared behavior such as
+Wi-Fi, provisioning, WebSocket protocol, OTA, settings, wake assets, wake engine,
+playback, AEC, timers, and logs stays in the shared root.
+
+### Build With PlatformIO
+
+Build the default target:
 
 ```sh
 cd /Users/ahphooey/Scripts/Tater-Native-Firmware
 platformio run
 ```
 
-The firmware images are generated under `.pio/build/voicepe/`.
-
-Flash over USB from source:
+Build both official targets:
 
 ```sh
-platformio run -t upload --upload-port /dev/cu.usbmodem4101
+platformio run -e voicepe -e sat1
+```
+
+Build outputs:
+
+```text
+.pio/build/voicepe/firmware.bin
+.pio/build/voicepe/firmware.factory.bin
+.pio/build/sat1/firmware.bin
+.pio/build/sat1/firmware.factory.bin
+```
+
+Flash from source with PlatformIO:
+
+```sh
+platformio run -e voicepe -t upload --upload-port /dev/cu.usbmodem4101
 platformio device monitor --port /dev/cu.usbmodem4101 --baud 115200
 ```
 
-Package official updater artifacts after a successful build:
+For Sat1, use `-e sat1`.
+
+### Package Local Manifest Artifacts
+
+After a successful build:
 
 ```sh
 ./scripts/build_native_firmware_manifest.py --board all --skip-build
 ```
 
-Use `--board voicepe` explicitly when packaging a specific board. New satellite
-targets should add their own PlatformIO environment and manifest board entry.
+Use `--board voicepe` or `--board satellite1` to package a single board.
 
 This writes:
 
@@ -72,17 +307,40 @@ This writes:
 - `prebuilt_firmware/<board>/native-<board>-x.y.z/firmware.bin`
 - `prebuilt_firmware/<board>/native-<board>-x.y.z/firmware.factory.bin`
 
-Tater uses `firmware.bin` for native OTA and `firmware.factory.bin` for USB recovery.
-Published builds are distributed from GitHub Releases. Tater reads:
+Tater uses `firmware.bin` for native OTA and `firmware.factory.bin` for USB
+recovery/first flash.
 
-```text
-https://github.com/TaterTotterson/Tater-Native-Firmware/releases/latest/download/latest.json
+### Release Tags
+
+Firmware releases are built by GitHub Actions when a `native-*` tag is pushed.
+For combined releases, all board headers must use the same numeric version and
+the tag uses the shared `native-x.y.z` form.
+
+Example:
+
+```sh
+git tag native-0.1.33
+git push origin native-0.1.33
 ```
 
-That `latest.json` points at the release manifest, and the release manifest
-points at the release asset URLs for OTA and factory binaries.
+The release workflow builds `voicepe` and `sat1`, packages release assets,
+writes URL-backed manifests, and creates or updates the GitHub Release with:
 
-## Voice PE XMOS Source
+- `latest.json`
+- `native-x.y.z-manifest.json`
+- `native-voicepe-x.y.z-voicepe-ota.bin`
+- `native-voicepe-x.y.z-voicepe-factory.bin`
+- `native-satellite1-x.y.z-satellite1-ota.bin`
+- `native-satellite1-x.y.z-satellite1-factory.bin`
+- `RELEASE_NOTES.md`
+
+The release title is:
+
+```text
+Tater Firmware x.y.z
+```
+
+### Voice PE XMOS Firmware
 
 The embedded Voice PE XMOS update image lives at:
 
@@ -96,136 +354,18 @@ The editable source used to build that image is included at:
 main/boards/voice_pe/xmos/source/
 ```
 
-See `main/boards/voice_pe/xmos/README.md` before rebuilding or bumping the XMOS
-firmware version.
+Read `main/boards/voice_pe/xmos/README.md` before rebuilding or bumping the
+XMOS firmware version.
 
-## Release Tags
+### Add A New Satellite Board
 
-Firmware releases are built by GitHub Actions when a `native-*` tag is pushed.
-For combined releases, all board headers must use the same numeric version and
-the tag uses the shared `native-x.y.z` form.
-
-For a combined Voice PE and Satellite1 release:
-
-```sh
-git tag native-0.1.33
-git push origin native-0.1.33
-```
-
-The release workflow builds `voicepe` and `sat1`, packages release assets, writes release
-URL-backed manifests, and creates or updates the GitHub Release with:
-
-- `latest.json`
-- `native-x.y.z-manifest.json`
-- `native-voicepe-x.y.z-voicepe-ota.bin`
-- `native-voicepe-x.y.z-voicepe-factory.bin`
-- `native-satellite1-x.y.z-satellite1-ota.bin`
-- `native-satellite1-x.y.z-satellite1-factory.bin`
-- `RELEASE_NOTES.md`
-
-Flash over USB without a browser:
-
-```sh
-./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101
-./scripts/flash_native_satellite_usb.py --board sat1 /dev/cu.usbmodem4101
-```
-
-The script reads the native firmware manifest, verifies the factory image SHA-256, erases flash, writes the image, and reboots the board. Pass `--no-erase` only when you intentionally want to preserve existing flash data.
-
-If this is a fresh device, connect to the setup Wi-Fi network printed in
-serial logs, usually `Tater-Setup-XXXX`, then open:
-
-```text
-http://192.168.4.1
-```
-
-Save:
-
-- Wi-Fi SSID
-- Wi-Fi password
-- Tater server URL, for example `http://192.168.1.20:8501`
-- Add Satellite pairing code from Tater, or a saved device/API token
-- device name
-- room
-
-When a one-time Add Satellite code is used, Tater returns a permanent device
-credential during `hello.ack`. The firmware saves that credential and uses it
-for future WebSocket connections.
-
-Unpaired native satellites are rejected by default. For bench testing only,
-setting `TATER_NATIVE_SATELLITE_ALLOW_UNPAIRED=1` allows open native WebSocket
-connections.
-
-To put a running Voice PE back into setup mode from the device, click the
-center button 5 times quickly. The LEDs show click progress. On the sixth press,
-hold the button for 5 seconds while the LED ring counts down. The device plays
-the embedded `short-definite-fart` wake sound, clears saved provisioning, then
-reboots into setup mode.
-
-Do not hold the center button while plugging in or resetting the board; on Voice
-PE that button is also the ESP32-S3 bootloader strap pin.
-
-## Build With ESP-IDF
-
-Install ESP-IDF, then:
-
-```sh
-cd /Users/ahphooey/Scripts/Tater-Native-Firmware
-idf.py set-target esp32s3
-idf.py menuconfig
-idf.py build
-```
-
-Set these values in `menuconfig` under `Tater Native Satellite`:
-
-- Wi-Fi SSID
-- Wi-Fi password
-- Tater server URL, for example `ws://tater.local:8501`
-- device name
-- room name
-- satellite token, if Tater API auth is enabled
-
-Flash:
-
-```sh
-idf.py flash monitor
-```
-
-## Voice PE Hardware Map
-
-Pulled from the existing ESPHome Voice PE config:
-
-- ESP32-S3, 16 MB flash, PSRAM
-- I2C: SDA GPIO5, SCL GPIO6
-- XMOS reset: GPIO4
-- mic I2S input: BCLK GPIO13, LRCLK GPIO14, DIN GPIO15
-- speaker I2S output: BCLK GPIO8, LRCLK GPIO7, DOUT GPIO10
-- speaker amp enable: GPIO47
-- LED ring: WS2812, GPIO21, 12 LEDs
-- center button: GPIO0, active low
-- rotary encoder: GPIO16/GPIO18
-
-## Satellite1 / Sat1 Scaffold
-
-The Sat1 hardware constants live at:
-
-```text
-main/boards/sat1/board_sat1.h
-```
-
-Sat1 is not included in `platformio.ini`, the release workflow, or
-`prebuilt_firmware/latest.json` yet. The old firmware uses a different native
-hardware stack than Voice PE:
-
-- 24 LED ring on GPIO21
-- shared-duplex I2S on GPIO7/GPIO8/GPIO16
-- microphone DIN on GPIO15 at 48 kHz
-- speaker DOUT on GPIO9 at 48 kHz stereo
-- PCM5122/TAS2780 speaker path over I2C
-- FUSB302B USB-C PD negotiation on GPIO1
-- Satellite1 XMOS firmware `v1.0.4-dev.9`
-- GPIO0 action button plus Satellite1 expander-backed volume/mute buttons
-
-Before publishing a Sat1 image, add board-specific implementations under
-`main/boards/sat1/` and then add its PlatformIO environment, manifest board
-entry, release workflow job, and USB flashing template.
+1. Create `main/boards/<board>/`.
+2. Add a board header with pins, sample rates, IDs, capabilities, and firmware
+   version.
+3. Add board-specific audio, LED, button, display, codec, or power-management
+   implementations behind the shared interfaces.
+4. Add a PlatformIO environment.
+5. Add the board to `scripts/build_native_firmware_manifest.py`.
+6. Add it to the release workflow when it is ready for official builds.
+7. Test USB flashing, setup mode, pairing, wake word, mic streaming, playback,
+   LEDs, OTA, and reconnect behavior before publishing.
