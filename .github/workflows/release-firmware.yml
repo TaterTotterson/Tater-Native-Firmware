@@ -87,7 +87,7 @@ jobs:
           TITLE="Tater Firmware ${DISPLAY_VERSION}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${RELEASE_DIR}"/* --clobber
-            gh release edit "$TAG" --title "$TITLE" --notes-file "${RELEASE_DIR}/RELEASE_NOTES.md"
+            gh release edit "$TAG" --latest --title "$TITLE" --notes-file "${RELEASE_DIR}/RELEASE_NOTES.md"
           else
-            gh release create "$TAG" "${RELEASE_DIR}"/* --verify-tag --title "$TITLE" --notes-file "${RELEASE_DIR}/RELEASE_NOTES.md"
+            gh release create "$TAG" "${RELEASE_DIR}"/* --latest --verify-tag --title "$TITLE" --notes-file "${RELEASE_DIR}/RELEASE_NOTES.md"
           fi
