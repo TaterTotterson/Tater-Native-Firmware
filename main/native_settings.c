@@ -94,6 +94,9 @@ void tater_live_settings_init_defaults(void)
     s_settings.wake_sound_enabled = false;
     strlcpy_or_empty(s_settings.wake_sound, "no_sound", sizeof(s_settings.wake_sound));
     strlcpy_or_empty(s_settings.wake_sound_url, "", sizeof(s_settings.wake_sound_url));
+    s_settings.aec_enabled = true;
+    s_settings.aec_strength_percent = 70;
+    s_settings.aec_delay_ms = 85;
     s_settings.continued_chat = true;
     s_settings.barge_in_enabled = false;
     s_settings.volume_percent = 80;
@@ -132,6 +135,9 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *wake_sound_enabled = cJSON_GetObjectItem(payload, "wake_sound_enabled");
     const cJSON *wake_sound = cJSON_GetObjectItem(payload, "wake_sound");
     const cJSON *wake_sound_url = cJSON_GetObjectItem(payload, "wake_sound_url");
+    const cJSON *aec_enabled = cJSON_GetObjectItem(payload, "aec_enabled");
+    const cJSON *aec_strength_percent = cJSON_GetObjectItem(payload, "aec_strength_percent");
+    const cJSON *aec_delay_ms = cJSON_GetObjectItem(payload, "aec_delay_ms");
     const cJSON *continued_chat = cJSON_GetObjectItem(payload, "continued_chat");
     const cJSON *barge_in_enabled = cJSON_GetObjectItem(payload, "barge_in_enabled");
     const cJSON *volume_percent = cJSON_GetObjectItem(payload, "volume_percent");
@@ -173,6 +179,9 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     if (cJSON_IsString(wake_sound_url) && wake_sound_url->valuestring) {
         strlcpy_or_empty(s_settings.wake_sound_url, wake_sound_url->valuestring, sizeof(s_settings.wake_sound_url));
     }
+    s_settings.aec_enabled = json_bool(aec_enabled, s_settings.aec_enabled);
+    s_settings.aec_strength_percent = json_u8_range(aec_strength_percent, s_settings.aec_strength_percent, 0, 100);
+    s_settings.aec_delay_ms = json_u8_range(aec_delay_ms, s_settings.aec_delay_ms, 0, 220);
     s_settings.continued_chat = json_bool(continued_chat, s_settings.continued_chat);
     s_settings.barge_in_enabled = json_bool(barge_in_enabled, s_settings.barge_in_enabled);
     s_settings.volume_percent = json_u8_range(volume_percent, s_settings.volume_percent, 0, 100);
@@ -199,7 +208,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
 
     ESP_LOGI(
         TAG,
-        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f wake_sound=%d/%s continued_chat=%d barge_in=%d volume=%u led=%u color=%s animations=%s/%s/%s/%s logging=%s",
+        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u led=%u color=%s animations=%s/%s/%s/%s logging=%s",
         s_settings.wake_engine,
         s_settings.wake_word,
         s_settings.wake_word_url,
@@ -212,6 +221,9 @@ bool tater_live_settings_apply_json(const cJSON *payload)
         (double)s_settings.close_miss_threshold,
         s_settings.wake_sound_enabled,
         s_settings.wake_sound,
+        s_settings.aec_enabled,
+        s_settings.aec_strength_percent,
+        s_settings.aec_delay_ms,
         s_settings.continued_chat,
         s_settings.barge_in_enabled,
         s_settings.volume_percent,
@@ -246,6 +258,9 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddBoolToObject(settings, "wake_sound_enabled", s_settings.wake_sound_enabled);
     cJSON_AddStringToObject(settings, "wake_sound", s_settings.wake_sound);
     cJSON_AddStringToObject(settings, "wake_sound_url", s_settings.wake_sound_url);
+    cJSON_AddBoolToObject(settings, "aec_enabled", s_settings.aec_enabled);
+    cJSON_AddNumberToObject(settings, "aec_strength_percent", s_settings.aec_strength_percent);
+    cJSON_AddNumberToObject(settings, "aec_delay_ms", s_settings.aec_delay_ms);
     cJSON_AddBoolToObject(settings, "continued_chat", s_settings.continued_chat);
     cJSON_AddBoolToObject(settings, "barge_in_enabled", s_settings.barge_in_enabled);
     cJSON_AddNumberToObject(settings, "volume_percent", s_settings.volume_percent);

@@ -20,6 +20,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "audio_aec.h"
 #include "audio_i2s.h"
 #include "native_settings.h"
 #include "playback.h"
@@ -27,6 +28,14 @@
 
 static const char *TAG = "tater_proto";
 static const char *NATIVE_WS_PATH = "/api/tater/satellite/v1/ws";
+
+#ifndef TATER_CAP_LINE_OUT
+#define TATER_CAP_LINE_OUT false
+#endif
+
+#ifndef TATER_CAP_XMOS
+#define TATER_CAP_XMOS false
+#endif
 
 static esp_websocket_client_handle_t s_client;
 static SemaphoreHandle_t s_send_lock;
@@ -106,12 +115,20 @@ typedef struct {
 
 #define TATER_AUDIO_PREROLL_SAMPLES (TATER_MIC_SAMPLE_RATE)
 #define TATER_AUDIO_TX_QUEUE_CHUNKS 96
-#define TATER_AUDIO_TX_SEND_TIMEOUT_MS 120
+#ifndef TATER_AUDIO_TX_BATCH_FRAMES
+#define TATER_AUDIO_TX_BATCH_FRAMES 320
+#endif
+#if TATER_AUDIO_TX_BATCH_FRAMES < TATER_MIC_CHUNK_FRAMES
+#error "TATER_AUDIO_TX_BATCH_FRAMES must be >= TATER_MIC_CHUNK_FRAMES"
+#endif
+#define TATER_AUDIO_TX_BATCH_WAIT_MS 12
+#define TATER_AUDIO_TX_SEND_TIMEOUT_MS 250
+#define TATER_AUDIO_TX_LINK_DOWN_FAILURES 3
 #define TATER_AUDIO_TX_DRAIN_WAIT_MS 250
 
 typedef struct {
     uint16_t samples;
-    int16_t pcm[TATER_MIC_CHUNK_FRAMES];
+    int16_t pcm[TATER_AUDIO_TX_BATCH_FRAMES];
 } tater_audio_tx_chunk_t;
 
 static int16_t s_audio_preroll[TATER_AUDIO_PREROLL_SAMPLES];
@@ -130,6 +147,7 @@ static uint32_t s_audio_tx_overruns;
 static uint32_t s_audio_tx_send_timeouts;
 static uint32_t s_audio_tx_last_send_ms;
 static uint32_t s_audio_tx_last_queue_depth;
+static int64_t s_status_deferred_log_us;
 
 static double now_seconds(void)
 {
@@ -575,8 +593,8 @@ static bool audio_tx_enqueue(const int16_t *pcm, size_t sample_count, const char
     size_t offset = 0;
     while (offset < sample_count) {
         size_t chunk_samples = sample_count - offset;
-        if (chunk_samples > TATER_MIC_CHUNK_FRAMES) {
-            chunk_samples = TATER_MIC_CHUNK_FRAMES;
+        if (chunk_samples > TATER_AUDIO_TX_BATCH_FRAMES) {
+            chunk_samples = TATER_AUDIO_TX_BATCH_FRAMES;
         }
 
         bool log_drop = false;
@@ -679,6 +697,7 @@ static void audio_tx_task(void *arg)
 {
     (void)arg;
     tater_audio_tx_chunk_t chunk;
+    tater_audio_tx_chunk_t next;
 
     while (true) {
         if (!audio_tx_pop(&chunk, NULL)) {
@@ -694,8 +713,33 @@ static void audio_tx_task(void *arg)
             continue;
         }
 
-        int sent = -1;
+        bool waited_for_batch = false;
         size_t depth_after = audio_tx_queue_depth();
+        while (chunk.samples < TATER_AUDIO_TX_BATCH_FRAMES && websocket_ready() && s_voice_active && !s_voice_start_pending) {
+            if (!audio_tx_pop(&next, &depth_after)) {
+                if (waited_for_batch) {
+                    break;
+                }
+                waited_for_batch = true;
+                if (xSemaphoreTake(s_audio_tx_has_data, pdMS_TO_TICKS(TATER_AUDIO_TX_BATCH_WAIT_MS)) != pdTRUE) {
+                    break;
+                }
+                continue;
+            }
+            if (next.samples == 0) {
+                continue;
+            }
+            size_t space = TATER_AUDIO_TX_BATCH_FRAMES - chunk.samples;
+            size_t copy_samples = next.samples < space ? next.samples : space;
+            memcpy(chunk.pcm + chunk.samples, next.pcm, copy_samples * sizeof(int16_t));
+            chunk.samples = (uint16_t)(chunk.samples + copy_samples);
+            if (copy_samples < next.samples) {
+                ESP_LOGW(TAG, "audio tx batch overflow; dropping tail samples=%u", (unsigned)(next.samples - copy_samples));
+                break;
+            }
+        }
+
+        int sent = -1;
         int64_t start_us = esp_timer_get_time();
         xSemaphoreTake(s_send_lock, portMAX_DELAY);
         if (websocket_ready() && s_voice_active && !s_voice_start_pending) {
@@ -705,7 +749,9 @@ static void audio_tx_task(void *arg)
         uint32_t elapsed_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
         record_audio_send_result(sent, chunk.samples, elapsed_ms, depth_after);
 
-        if (sent < (int)(chunk.samples * sizeof(int16_t)) && !websocket_transport_ready()) {
+        if (sent < (int)(chunk.samples * sizeof(int16_t))
+            && !websocket_transport_ready()
+            && s_audio_send_failures >= TATER_AUDIO_TX_LINK_DOWN_FAILURES) {
             mark_link_down("websocket audio transport lost");
         }
     }
@@ -764,10 +810,10 @@ static void flush_audio_preroll_locked(void)
         return;
     }
 
-    int16_t chunk[TATER_MIC_CHUNK_FRAMES];
+    int16_t chunk[TATER_AUDIO_TX_BATCH_FRAMES];
     size_t flushed = 0;
     while (s_audio_preroll_count > 0) {
-        size_t chunk_samples = s_audio_preroll_count < TATER_MIC_CHUNK_FRAMES ? s_audio_preroll_count : TATER_MIC_CHUNK_FRAMES;
+        size_t chunk_samples = s_audio_preroll_count < TATER_AUDIO_TX_BATCH_FRAMES ? s_audio_preroll_count : TATER_AUDIO_TX_BATCH_FRAMES;
         for (size_t i = 0; i < chunk_samples; i++) {
             chunk[i] = s_audio_preroll[(s_audio_preroll_start + i) % TATER_AUDIO_PREROLL_SAMPLES];
         }
@@ -1076,7 +1122,7 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "display", false);
     cJSON_AddBoolToObject(caps, "buttons", true);
     cJSON_AddBoolToObject(caps, "touch", false);
-    cJSON_AddBoolToObject(caps, "line_out", false);
+    cJSON_AddBoolToObject(caps, "line_out", TATER_CAP_LINE_OUT);
     cJSON_AddBoolToObject(caps, "local_wake", true);
     cJSON_AddBoolToObject(caps, "live_settings", true);
     cJSON_AddBoolToObject(caps, "setup_mode", true);
@@ -1085,7 +1131,8 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "tool_call_mode", true);
     cJSON_AddBoolToObject(caps, "timers", true);
     cJSON_AddBoolToObject(caps, "ota", true);
-    cJSON_AddBoolToObject(caps, "xmos", true);
+    cJSON_AddBoolToObject(caps, "xmos", TATER_CAP_XMOS);
+    cJSON_AddBoolToObject(caps, "aec", true);
     cJSON_AddItemToObject(payload, "capabilities", caps);
     send_json(root);
 }
@@ -1470,6 +1517,15 @@ const char *tater_protocol_server_url(void)
 
 void tater_protocol_send_status(const char *state)
 {
+    if (s_voice_active) {
+        int64_t now_us = esp_timer_get_time();
+        if (s_status_deferred_log_us == 0 || now_us - s_status_deferred_log_us > 10000000) {
+            s_status_deferred_log_us = now_us;
+            ESP_LOGI(TAG, "status deferred while voice active queue=%u", (unsigned)audio_tx_queue_depth());
+        }
+        return;
+    }
+
     cJSON *root = new_envelope("status");
     cJSON *payload = cJSON_GetObjectItem(root, "payload");
     cJSON_AddStringToObject(payload, "state", state ? state : "idle");
@@ -1518,13 +1574,39 @@ void tater_protocol_send_status(const char *state)
     cJSON_AddItemToObject(payload, "reset", reset_diag_json());
     tater_live_settings_add_status(payload);
     tater_wake_engine_add_status(payload);
+    tater_audio_aec_stats_t aec = {0};
+    if (tater_audio_aec_stats_snapshot(&aec)) {
+        cJSON *aec_json = cJSON_CreateObject();
+        cJSON_AddBoolToObject(aec_json, "enabled", aec.enabled);
+        cJSON_AddBoolToObject(aec_json, "active", aec.active);
+        cJSON_AddNumberToObject(aec_json, "processed_frames", aec.processed_frames);
+        cJSON_AddNumberToObject(aec_json, "active_frames", aec.active_frames);
+        cJSON_AddNumberToObject(aec_json, "reference_frames", aec.reference_frames);
+        cJSON_AddNumberToObject(aec_json, "last_mic_level", aec.last_mic_level);
+        cJSON_AddNumberToObject(aec_json, "last_reference_level", aec.last_reference_level);
+        cJSON_AddNumberToObject(aec_json, "last_speaker_level", aec.last_speaker_level);
+        cJSON_AddNumberToObject(aec_json, "last_output_gain", aec.last_output_gain);
+        cJSON_AddNumberToObject(aec_json, "strength_percent", aec.strength_percent);
+        cJSON_AddNumberToObject(aec_json, "delay_ms", aec.delay_ms);
+        cJSON_AddItemToObject(payload, "aec", aec_json);
+    }
     tater_audio_doa_t doa = {0};
     if (tater_audio_doa_snapshot(&doa)) {
         cJSON *xmos = cJSON_CreateObject();
         cJSON_AddBoolToObject(xmos, "valid", doa.valid);
         cJSON_AddNumberToObject(xmos, "confidence", doa.confidence);
         cJSON_AddNumberToObject(xmos, "sample_delay", doa.sample_delay);
+        cJSON_AddNumberToObject(xmos, "vertical_delay", doa.vertical_delay);
+        cJSON_AddNumberToObject(xmos, "angle_index", doa.angle_index);
+        cJSON_AddBoolToObject(xmos, "four_mic", doa.four_mic);
         cJSON_AddNumberToObject(xmos, "energy", doa.energy);
+        cJSON *mic_energy = cJSON_CreateArray();
+        if (mic_energy) {
+            for (size_t i = 0; i < 4; i++) {
+                cJSON_AddItemToArray(mic_energy, cJSON_CreateNumber(doa.mic_energy[i]));
+            }
+            cJSON_AddItemToObject(xmos, "mic_energy", mic_energy);
+        }
         cJSON_AddNumberToObject(xmos, "frame_counter", doa.frame_counter);
         cJSON_AddNumberToObject(xmos, "age_ms", doa.age_ms);
         cJSON_AddItemToObject(payload, "xmos_doa", xmos);
@@ -1584,6 +1666,10 @@ void tater_protocol_start_voice_with_conversation(const char *wake_word, const c
     s_voice_start_pending = true;
     s_audio_send_logs = 0;
     s_audio_send_failures = 0;
+    s_audio_tx_high_water = 0;
+    s_audio_tx_last_queue_depth = 0;
+    s_audio_tx_last_send_ms = 0;
+    s_audio_tx_send_timeouts = 0;
     xSemaphoreGive(s_send_lock);
     emit_state(TATER_STATE_LISTENING, "local voice.start");
 

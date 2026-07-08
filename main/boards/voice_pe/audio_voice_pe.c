@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "audio_aec.h"
 #include "board.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
@@ -19,6 +20,8 @@
 #include "freertos/task.h"
 #include "tater_protocol.h"
 #include "wake_engine.h"
+
+#if TATER_BOARD_VOICE_PE
 
 static const char *TAG = "tater_audio";
 static i2s_chan_handle_t s_rx_chan;
@@ -927,6 +930,7 @@ esp_err_t tater_audio_i2s_init(void)
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx_chan), TAG, "i2s enable failed");
     ESP_LOGI(TAG, "mic i2s ready bclk=%d ws=%d din=%d", TATER_MIC_I2S_BCLK, TATER_MIC_I2S_WS, TATER_MIC_I2S_DIN);
     ESP_ERROR_CHECK_WITHOUT_ABORT(speaker_i2s_init());
+    tater_audio_aec_init();
     return ESP_OK;
 }
 
@@ -1032,6 +1036,7 @@ static void audio_task(void *arg)
             mono[i] = (int16_t)mixed;
         }
 
+        tater_audio_aec_process_mic(mono, frames);
         tater_wake_engine_note_audio(mono, frames);
         tater_wake_engine_process(mono, frames);
 
@@ -1066,6 +1071,7 @@ esp_err_t tater_audio_write_speaker_frames(const int16_t *stereo_frames, size_t 
         return ESP_ERR_INVALID_STATE;
     }
     update_speaker_audio_level(stereo_frames, frame_count);
+    tater_audio_aec_note_speaker_frames(stereo_frames, frame_count);
 
     const uint8_t *data = (const uint8_t *)stereo_frames;
     size_t byte_count = frame_count * TATER_SPK_CHANNELS * sizeof(int16_t);
@@ -1180,3 +1186,5 @@ bool tater_audio_xmos_status_snapshot(tater_audio_xmos_status_t *out)
     portEXIT_CRITICAL(&s_xmos_status_lock);
     return true;
 }
+
+#endif

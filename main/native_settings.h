@@ -20,6 +20,9 @@ typedef struct {
     bool wake_sound_enabled;
     char wake_sound[64];
     char wake_sound_url[192];
+    bool aec_enabled;
+    uint8_t aec_strength_percent;
+    uint8_t aec_delay_ms;
     bool continued_chat;
     bool barge_in_enabled;
     uint8_t volume_percent;

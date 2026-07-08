@@ -26,6 +26,7 @@ static tater_config_t s_config;
 
 static void set_speaker_amp(bool enabled)
 {
+#ifdef TATER_SPK_AMP_EN
     gpio_config_t cfg = {
         .pin_bit_mask = 1ULL << TATER_SPK_AMP_EN,
         .mode = GPIO_MODE_OUTPUT,
@@ -35,6 +36,9 @@ static void set_speaker_amp(bool enabled)
     };
     ESP_ERROR_CHECK(gpio_config(&cfg));
     gpio_set_level(TATER_SPK_AMP_EN, enabled ? 1 : 0);
+#else
+    (void)enabled;
+#endif
 }
 
 static void on_tater_state(tater_state_t state, const char *detail)

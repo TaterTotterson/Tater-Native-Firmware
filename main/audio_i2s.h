@@ -8,9 +8,13 @@
 
 typedef struct {
     int16_t sample_delay;
+    int16_t vertical_delay;
     uint8_t confidence;
+    uint8_t angle_index;
     bool valid;
+    bool four_mic;
     uint32_t energy;
+    uint32_t mic_energy[4];
     uint32_t frame_counter;
     uint32_t age_ms;
 } tater_audio_doa_t;

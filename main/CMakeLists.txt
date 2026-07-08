@@ -1,7 +1,9 @@
 idf_component_register(
     SRCS
         "app_main.c"
+        "audio_aec.c"
         "boards/voice_pe/audio_voice_pe.c"
+        "boards/sat1/audio_sat1.c"
         "boards/voice_pe/button_voice_pe.c"
         "boards/voice_pe/led_ring_voice_pe.c"
         "cache_storage.c"

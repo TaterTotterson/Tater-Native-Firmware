@@ -27,7 +27,7 @@ typedef struct {
     uint8_t b;
 } rgb_t;
 
-static const rgb_t TATER_ORANGE = {255, 90, 31};
+static const rgb_t TATER_ORANGE = {227, 36, 0};
 static const rgb_t TATER_BLUE = {30, 90, 255};
 static const rgb_t TATER_WARM_WHITE = {255, 227, 181};
 static const rgb_t TATER_RED = {255, 0, 24};
@@ -45,6 +45,8 @@ static bool s_tool_forward = true;
 static uint8_t s_tool_index;
 static float s_listening_position = 6.0f;
 static float s_listening_delay;
+static float s_direction_scores[TATER_LED_COUNT];
+static int s_listening_dominant_led = TATER_LED_COUNT / 2;
 static int64_t s_listening_last_update_us;
 static int64_t s_listening_last_valid_us;
 
@@ -98,11 +100,18 @@ static uint8_t apply_level(uint8_t value, uint8_t level)
 
 static int map_led_index(int logical_index)
 {
+#if TATER_BOARD_VOICE_PE
     static const uint8_t map[TATER_LED_COUNT] = {7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5, 6};
     if (logical_index < 0 || logical_index >= TATER_LED_COUNT) {
         return -1;
     }
     return map[logical_index];
+#else
+    if (logical_index < 0 || logical_index >= TATER_LED_COUNT) {
+        return -1;
+    }
+    return logical_index;
+#endif
 }
 
 static void set_pixel(int index, uint8_t r, uint8_t g, uint8_t b)
@@ -259,8 +268,18 @@ static float ring_distance_f(float a, float b)
 
 static float delay_to_position(float delay)
 {
-    const float center_led = 6.0f;
-    const float side_led_span = 3.5f;
+#if TATER_BOARD_SAT1
+    const float center_led = (float)TATER_LED_COUNT / 2.0f;
+    const float max_abs_delay = 4.0f;
+    if (delay > max_abs_delay) {
+        delay = max_abs_delay;
+    } else if (delay < -max_abs_delay) {
+        delay = -max_abs_delay;
+    }
+    return wrap_position(center_led + (delay * 2.0f));
+#else
+    const float center_led = (float)TATER_LED_COUNT / 2.0f;
+    const float side_led_span = (float)TATER_LED_COUNT * 0.29f;
     const float max_abs_delay = 1.2f;
     const float delay_deadband = 0.08f;
 
@@ -281,27 +300,60 @@ static float delay_to_position(float delay)
     }
 
     return wrap_position(center_led - (normalized * side_led_span));
+#endif
 }
 
-static bool current_doa_delay(float *delay)
+static bool current_doa_position(float *position, uint8_t *confidence)
 {
     tater_audio_doa_t doa = {0};
     if (!tater_audio_doa_snapshot(&doa)) {
         return false;
     }
-    if (!doa.valid || doa.confidence < 1 || doa.age_ms > 500) {
+    const uint8_t min_confidence =
+#if TATER_BOARD_SAT1
+        3;
+#else
+        1;
+#endif
+    if (!doa.valid || doa.confidence < min_confidence || doa.age_ms > 500) {
         return false;
     }
-    *delay = (float)doa.sample_delay;
+#if TATER_BOARD_SAT1
+    if (doa.four_mic) {
+        *position = wrap_position((float)(doa.angle_index % TATER_LED_COUNT));
+        if (confidence) {
+            *confidence = doa.confidence;
+        }
+        return true;
+    }
+#endif
+    *position = delay_to_position((float)doa.sample_delay);
+    if (confidence) {
+        *confidence = doa.confidence;
+    }
     return true;
 }
 
 static void directional_listening(rgb_t color)
 {
+#if TATER_BOARD_SAT1
+    const int fade_leds = 6;
+#else
     const int fade_leds = 3;
-    const float center_led = 6.0f;
-    const float delay_filter_alpha = 0.22f;
-    const float transition_duration = 0.25f;
+#endif
+    const float center_led = (float)TATER_LED_COUNT / 2.0f;
+    const float delay_filter_alpha =
+#if TATER_BOARD_SAT1
+        0.30f;
+#else
+        0.22f;
+#endif
+    const float transition_duration =
+#if TATER_BOARD_SAT1
+        0.32f;
+#else
+        0.25f;
+#endif
     const int64_t now_us = esp_timer_get_time();
 
     float dt = 0.05f;
@@ -313,19 +365,76 @@ static void directional_listening(rgb_t color)
     }
     s_listening_last_update_us = now_us;
 
-    float delay = 0.0f;
-    bool has_valid_doa = current_doa_delay(&delay);
+    float doa_position = center_led;
+    uint8_t doa_confidence = 0;
+    bool has_valid_doa = current_doa_position(&doa_position, &doa_confidence);
     if (s_animation_tick == 0) {
-        s_listening_delay = delay;
-        s_listening_position = has_valid_doa ? delay_to_position(delay) : center_led;
+        for (int i = 0; i < TATER_LED_COUNT; i++) {
+            s_direction_scores[i] = 0.0f;
+        }
+        s_listening_dominant_led = (int)center_led;
+        s_listening_delay = doa_position;
+        s_listening_position = has_valid_doa ? doa_position : center_led;
         s_listening_last_valid_us = has_valid_doa ? now_us : 0;
         dt = 0.0f;
     }
 
     if (has_valid_doa) {
-        s_listening_delay += (delay - s_listening_delay) * delay_filter_alpha;
-        float target_position = delay_to_position(s_listening_delay);
+        float diff_for_filter = doa_position - s_listening_delay;
+        if (diff_for_filter > ((float)TATER_LED_COUNT / 2.0f)) {
+            diff_for_filter -= (float)TATER_LED_COUNT;
+        } else if (diff_for_filter < -((float)TATER_LED_COUNT / 2.0f)) {
+            diff_for_filter += (float)TATER_LED_COUNT;
+        }
+        s_listening_delay = wrap_position(s_listening_delay + (diff_for_filter * delay_filter_alpha));
+        float target_position = s_listening_delay;
         s_listening_last_valid_us = now_us;
+
+        int target_led = (int)(target_position + 0.5f) % TATER_LED_COUNT;
+        if (target_led < 0) {
+            target_led += TATER_LED_COUNT;
+        }
+        float sample_seconds = dt;
+        if (sample_seconds <= 0.0f || sample_seconds > 0.20f) {
+            sample_seconds = 0.05f;
+        }
+#if TATER_BOARD_SAT1
+        for (int i = 0; i < TATER_LED_COUNT; i++) {
+            s_direction_scores[i] *= 0.94f;
+            if (s_direction_scores[i] < 0.0005f) {
+                s_direction_scores[i] = 0.0f;
+            }
+        }
+#endif
+        float sample_weight = sample_seconds * (1.0f + ((float)doa_confidence * 0.20f));
+        s_direction_scores[target_led] += sample_weight;
+        s_direction_scores[(target_led + 1) % TATER_LED_COUNT] += sample_weight * 0.28f;
+        s_direction_scores[(target_led + TATER_LED_COUNT - 1) % TATER_LED_COUNT] += sample_weight * 0.28f;
+
+        int best_led = s_listening_dominant_led;
+        if (best_led < 0 || best_led >= TATER_LED_COUNT) {
+            best_led = (int)center_led;
+        }
+        float best_score = s_direction_scores[best_led];
+        for (int i = 0; i < TATER_LED_COUNT; i++) {
+            if (s_direction_scores[i] > best_score) {
+                best_score = s_direction_scores[i];
+                best_led = i;
+            }
+        }
+#if TATER_BOARD_SAT1
+        int current_led = s_listening_dominant_led;
+        if (current_led < 0 || current_led >= TATER_LED_COUNT) {
+            current_led = (int)center_led;
+        }
+        float current_score = s_direction_scores[current_led];
+        if (best_led == current_led || best_score > (current_score * 1.35f) + 0.025f) {
+            s_listening_dominant_led = best_led;
+        }
+        target_position = (float)s_listening_dominant_led;
+#else
+        s_listening_dominant_led = best_led;
+#endif
 
         float diff = target_position - s_listening_position;
         if (diff > ((float)TATER_LED_COUNT / 2.0f)) {
@@ -487,9 +596,10 @@ static void scanner(uint32_t tick, rgb_t color)
 
 static void ripple(uint32_t tick, rgb_t color)
 {
-    float radius = triangle_wave(tick, 24) * 5.75f;
+    float radius = triangle_wave(tick, 24) * ((float)TATER_LED_COUNT * 0.48f);
+    int center = TATER_LED_COUNT / 2;
     for (int i = 0; i < TATER_LED_COUNT; i++) {
-        float dist = (float)ring_distance(i, 6);
+        float dist = (float)ring_distance(i, center);
         float level = 1.0f - ((dist - radius) < 0.0f ? radius - dist : dist - radius) / 1.45f;
         level = 0.035f + (clamp01(level) * 0.88f);
         set_color_level(i, color, level);
@@ -568,7 +678,7 @@ static void equalizer(uint32_t tick, rgb_t color)
 
 static void replying(uint32_t tick, rgb_t color)
 {
-    int center = 6;
+    int center = TATER_LED_COUNT / 2;
     float audio_level = tater_audio_speaker_level() * 5.5f;
     if (audio_level > 1.0f) {
         audio_level = 1.0f;
@@ -768,8 +878,12 @@ static void render(void)
         s_speaking_radius = 1.25f;
         s_tool_forward = true;
         s_tool_index = 0;
-        s_listening_position = 6.0f;
+        s_listening_position = (float)TATER_LED_COUNT / 2.0f;
+        s_listening_dominant_led = TATER_LED_COUNT / 2;
         s_listening_delay = 0.0f;
+        for (int i = 0; i < TATER_LED_COUNT; i++) {
+            s_direction_scores[i] = 0.0f;
+        }
         s_listening_last_update_us = 0;
         s_listening_last_valid_us = 0;
         memset(s_thinking_levels, 0, sizeof(s_thinking_levels));

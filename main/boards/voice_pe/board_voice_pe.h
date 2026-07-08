@@ -3,7 +3,7 @@
 #include "driver/gpio.h"
 
 #define TATER_BOARD_ID "voice-pe"
-#define TATER_FIRMWARE_VERSION "native-voicepe-0.1.31"
+#define TATER_FIRMWARE_VERSION "native-voicepe-0.1.33"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6
@@ -34,3 +34,6 @@
 #define TATER_CENTER_BUTTON GPIO_NUM_0
 #define TATER_ENCODER_A GPIO_NUM_16
 #define TATER_ENCODER_B GPIO_NUM_18
+
+#define TATER_CAP_LINE_OUT false
+#define TATER_CAP_XMOS true

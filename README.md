@@ -59,7 +59,7 @@ platformio device monitor --port /dev/cu.usbmodem4101 --baud 115200
 Package official updater artifacts after a successful build:
 
 ```sh
-./scripts/build_native_firmware_manifest.py --skip-build
+./scripts/build_native_firmware_manifest.py --board all --skip-build
 ```
 
 Use `--board voicepe` explicitly when packaging a specific board. New satellite
@@ -68,7 +68,7 @@ targets should add their own PlatformIO environment and manifest board entry.
 This writes:
 
 - `prebuilt_firmware/latest.json`
-- `prebuilt_firmware/native-voicepe-x.y.z.json`
+- `prebuilt_firmware/native-x.y.z.json`
 - `prebuilt_firmware/<board>/native-<board>-x.y.z/firmware.bin`
 - `prebuilt_firmware/<board>/native-<board>-x.y.z/firmware.factory.bin`
 
@@ -102,28 +102,32 @@ firmware version.
 ## Release Tags
 
 Firmware releases are built by GitHub Actions when a `native-*` tag is pushed.
-The tag must match the firmware version in the board header.
+For combined releases, all board headers must use the same numeric version and
+the tag uses the shared `native-x.y.z` form.
 
-For Voice PE:
+For a combined Voice PE and Satellite1 release:
 
 ```sh
-git tag native-voicepe-0.1.28
-git push origin native-voicepe-0.1.28
+git tag native-0.1.33
+git push origin native-0.1.33
 ```
 
-The release workflow builds `voicepe`, packages release assets, writes release
+The release workflow builds `voicepe` and `sat1`, packages release assets, writes release
 URL-backed manifests, and creates or updates the GitHub Release with:
 
 - `latest.json`
-- `native-voicepe-x.y.z-manifest.json`
+- `native-x.y.z-manifest.json`
 - `native-voicepe-x.y.z-voicepe-ota.bin`
 - `native-voicepe-x.y.z-voicepe-factory.bin`
+- `native-satellite1-x.y.z-satellite1-ota.bin`
+- `native-satellite1-x.y.z-satellite1-factory.bin`
 - `RELEASE_NOTES.md`
 
 Flash over USB without a browser:
 
 ```sh
 ./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101
+./scripts/flash_native_satellite_usb.py --board sat1 /dev/cu.usbmodem4101
 ```
 
 The script reads the native firmware manifest, verifies the factory image SHA-256, erases flash, writes the image, and reboots the board. Pass `--no-erase` only when you intentionally want to preserve existing flash data.

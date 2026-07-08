@@ -9,11 +9,10 @@ permissions:
   contents: write
 
 jobs:
-  voicepe:
-    name: Build Voice PE
+  firmware:
+    name: Build Native Firmware
     runs-on: ubuntu-latest
     env:
-      BOARD: voicepe
       PLATFORMIO_CORE_DIR: ${{ github.workspace }}/.platformio
     steps:
       - name: Check out source
@@ -38,7 +37,7 @@ jobs:
         run: python -m pip install --upgrade pip platformio
 
       - name: Build firmware
-        run: platformio run -e "$BOARD"
+        run: platformio run -e voicepe -e sat1
 
       - name: Package release assets
         id: package
@@ -47,7 +46,7 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           RELEASE_DIR="${RUNNER_TEMP}/tater-native-release"
           ./scripts/build_native_firmware_manifest.py \
-            --board "$BOARD" \
+            --board all \
             --skip-build \
             --release-repo "$GITHUB_REPOSITORY" \
             --release-tag "$TAG" \

@@ -80,11 +80,26 @@ def load_manifest(latest_url: str) -> tuple[dict[str, Any], str]:
     return read_json_url(manifest_url), manifest_url
 
 
+def normalize_board_key(board: str) -> str:
+    clean = text(board).lower().replace("_", "-").replace(" ", "-")
+    aliases = {
+        "sat1": "satellite1",
+        "sat-1": "satellite1",
+        "satellite-1": "satellite1",
+        "voice-pe": "voicepe",
+        "voice-pe-s3": "voicepe",
+    }
+    return aliases.get(clean, clean)
+
+
 def find_factory_artifact(manifest: dict[str, Any], board: str) -> dict[str, Any]:
+    target = normalize_board_key(board)
     for row in manifest.get("devices") or []:
         if not isinstance(row, dict):
             continue
-        if text(row.get("key")).lower() != board.lower() and text(row.get("board")).lower() != board.lower().replace("voicepe", "voice-pe"):
+        row_key = normalize_board_key(text(row.get("key")))
+        row_board = normalize_board_key(text(row.get("board")))
+        if row_key != target and row_board != target:
             continue
         artifacts = row.get("artifacts") if isinstance(row.get("artifacts"), dict) else {}
         factory = artifacts.get("factory") if isinstance(artifacts.get("factory"), dict) else None
