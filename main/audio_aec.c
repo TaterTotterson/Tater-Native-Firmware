@@ -24,6 +24,10 @@ static const char *TAG = "tater_aec";
 #define AEC_MIN_SPEAKER_LEVEL 0.012f
 #define AEC_EPSILON 0.00004f
 
+#ifndef TATER_ENABLE_EXPERIMENTAL_AEC
+#define TATER_ENABLE_EXPERIMENTAL_AEC 0
+#endif
+
 static int16_t s_reference_ring[AEC_REF_RING_SAMPLES];
 static size_t s_reference_write;
 static size_t s_reference_count;
@@ -171,7 +175,7 @@ void tater_audio_aec_init(void)
     s_history_pos = 0;
     s_last_reference_us = 0;
     memset(&s_stats, 0, sizeof(s_stats));
-    s_stats.enabled = true;
+    s_stats.enabled = false;
     s_stats.strength_percent = 70;
     s_stats.delay_ms = AEC_DEFAULT_DELAY_MS;
     ESP_LOGI(TAG, "aec initialized taps=%u ring=%u sample_rate=%u", AEC_FILTER_TAPS, AEC_REF_RING_SAMPLES, TATER_MIC_SAMPLE_RATE);
@@ -179,6 +183,11 @@ void tater_audio_aec_init(void)
 
 void tater_audio_aec_note_speaker_frames(const int16_t *stereo_frames, size_t frame_count)
 {
+#if !TATER_ENABLE_EXPERIMENTAL_AEC
+    (void)stereo_frames;
+    (void)frame_count;
+    return;
+#else
     const tater_live_settings_t *settings = tater_live_settings_get();
     if (!settings || !settings->aec_enabled || !stereo_frames || frame_count == 0) {
         return;
@@ -204,10 +213,15 @@ void tater_audio_aec_note_speaker_frames(const int16_t *stereo_frames, size_t fr
     if (reference_frames > 0) {
         update_reference_stats(reference_frames, tater_audio_speaker_level(), settings->aec_strength_percent, settings->aec_delay_ms);
     }
+#endif
 }
 
 void tater_audio_aec_process_mic(int16_t *mono_frames, size_t frame_count)
 {
+#if !TATER_ENABLE_EXPERIMENTAL_AEC
+    update_stats(false, false, frame_count, 0, normalized_abs_mean(mono_frames, frame_count), 0.0f, tater_audio_speaker_level(), 1.0f, 0, AEC_DEFAULT_DELAY_MS);
+    return;
+#else
     const tater_live_settings_t *settings = tater_live_settings_get();
     bool enabled = settings && settings->aec_enabled;
     uint8_t strength_percent = settings ? settings->aec_strength_percent : 70;
@@ -288,6 +302,7 @@ void tater_audio_aec_process_mic(int16_t *mono_frames, size_t frame_count)
         mono_frames += chunk;
         frame_count -= chunk;
     }
+#endif
 }
 
 bool tater_audio_aec_stats_snapshot(tater_audio_aec_stats_t *out)

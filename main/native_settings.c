@@ -94,7 +94,7 @@ void tater_live_settings_init_defaults(void)
     s_settings.wake_sound_enabled = false;
     strlcpy_or_empty(s_settings.wake_sound, "no_sound", sizeof(s_settings.wake_sound));
     strlcpy_or_empty(s_settings.wake_sound_url, "", sizeof(s_settings.wake_sound_url));
-    s_settings.aec_enabled = true;
+    s_settings.aec_enabled = false;
     s_settings.aec_strength_percent = 70;
     s_settings.aec_delay_ms = 85;
     s_settings.continued_chat = true;

@@ -43,7 +43,6 @@ static const char *TAG = "tater_audio_sat1";
 #define SAT1_XMOS_TARGET_MINOR 0
 #define SAT1_XMOS_TARGET_PATCH 4
 #define SAT1_MIC_GAIN_Q8 2048
-#define SAT1_MIC_SAMPLE_PHASE 0
 #define SAT1_SPK_DMA_DESC_NUM 4
 #define SAT1_SPK_DMA_FRAME_NUM 240
 #define SAT1_SPK_WRITE_FRAMES SAT1_SPK_DMA_FRAME_NUM
@@ -695,6 +694,19 @@ static int16_t pcm32_to_pcm16_gain(int32_t sample)
     return clamp_s16(v);
 }
 
+static int16_t sat1_downmix_48k_to_16k(const int32_t *samples, size_t source_frame)
+{
+    int32_t sum = 0;
+    for (size_t frame = 0; frame < 3; frame++) {
+        size_t base = (source_frame + frame) * TATER_MIC_SOURCE_CHANNELS;
+        sum += pcm32_to_pcm16_gain(samples[base]);
+        if (TATER_MIC_SOURCE_CHANNELS > 1) {
+            sum += pcm32_to_pcm16_gain(samples[base + 1]);
+        }
+    }
+    return clamp_s16(sum / (3 * TATER_MIC_SOURCE_CHANNELS));
+}
+
 static void mic_level_stats(const int16_t *samples, size_t count, uint32_t *peak_out, uint32_t *mean_out)
 {
     if (!samples || count == 0) {
@@ -804,14 +816,13 @@ static void audio_task(void *arg)
         if (source_frames > TATER_MIC_SOURCE_CHUNK_FRAMES) {
             source_frames = TATER_MIC_SOURCE_CHUNK_FRAMES;
         }
-        size_t raw_samples = source_frames * TATER_MIC_SOURCE_CHANNELS;
-        size_t out_frames = raw_samples > 3 ? ((raw_samples - 4) / 6) + 1 : 0;
+        size_t out_frames = source_frames / 3;
         if (out_frames > TATER_MIC_CHUNK_FRAMES) {
             out_frames = TATER_MIC_CHUNK_FRAMES;
         }
 
         for (size_t i = 0; i < out_frames; i++) {
-            mono[i] = pcm32_to_pcm16_gain(rx[(i * 6) + SAT1_MIC_SAMPLE_PHASE]);
+            mono[i] = sat1_downmix_48k_to_16k(rx, i * 3);
         }
 
         tater_audio_aec_process_mic(mono, out_frames);
@@ -827,15 +838,14 @@ static void audio_task(void *arg)
                 mic_level_stats(mono, out_frames, &peak, &mean);
                 ESP_LOGI(
                     TAG,
-                    "sat1 mic chunk %u frames=%u source_frames=%u bytes=%u peak=%u mean=%u gain_q8=%u phase=%u",
+                    "sat1 mic chunk %u frames=%u source_frames=%u bytes=%u peak=%u mean=%u gain_q8=%u downmix=stereo_avg",
                     (unsigned)(active_chunks + 1),
                     (unsigned)out_frames,
                     (unsigned)source_frames,
                     (unsigned)bytes_read,
                     (unsigned)peak,
                     (unsigned)mean,
-                    (unsigned)SAT1_MIC_GAIN_Q8,
-                    (unsigned)SAT1_MIC_SAMPLE_PHASE
+                    (unsigned)SAT1_MIC_GAIN_Q8
                 );
             }
             active_chunks++;

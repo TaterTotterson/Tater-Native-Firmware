@@ -143,13 +143,16 @@ static void set_color_level(int index, rgb_t color, float level)
 static void paired_spinner(uint32_t tick, rgb_t color, bool fast)
 {
     int head = (fast ? tick : tick / 2) % TATER_LED_COUNT;
+    int opposite = TATER_LED_COUNT / 2;
     for (int i = 0; i < TATER_LED_COUNT; i++) {
         uint8_t level = 0;
-        if (i == head || i == (head + 6) % TATER_LED_COUNT) {
+        if (i == head || i == (head + opposite) % TATER_LED_COUNT) {
             level = 255;
-        } else if (i == (head + 11) % TATER_LED_COUNT || i == (head + 5) % TATER_LED_COUNT) {
+        } else if (i == (head + TATER_LED_COUNT - 1) % TATER_LED_COUNT ||
+                   i == (head + opposite + TATER_LED_COUNT - 1) % TATER_LED_COUNT) {
             level = 192;
-        } else if (i == (head + 10) % TATER_LED_COUNT || i == (head + 4) % TATER_LED_COUNT) {
+        } else if (i == (head + TATER_LED_COUNT - 2) % TATER_LED_COUNT ||
+                   i == (head + opposite + TATER_LED_COUNT - 2) % TATER_LED_COUNT) {
             level = 128;
         }
         set_pixel(i, apply_level(color.r, level), apply_level(color.g, level), apply_level(color.b, level));
@@ -521,9 +524,13 @@ static void thinking(uint32_t tick, rgb_t color)
 static void tool_call(uint32_t tick, rgb_t color)
 {
     (void)tick;
-    uint8_t lead_a = s_tool_index % 6;
+    uint8_t span = TATER_LED_COUNT / 2;
+    if (span < 2) {
+        span = TATER_LED_COUNT;
+    }
+    uint8_t lead_a = s_tool_index % span;
 
-    uint8_t lead_b = (uint8_t)((11 - lead_a) % TATER_LED_COUNT);
+    uint8_t lead_b = (uint8_t)((lead_a + span) % TATER_LED_COUNT);
     uint8_t trail_a = s_tool_forward ? (uint8_t)((TATER_LED_COUNT + lead_a - 1) % TATER_LED_COUNT) : (uint8_t)((lead_a + 1) % TATER_LED_COUNT);
     uint8_t trail_b = s_tool_forward ? (uint8_t)((lead_b + 1) % TATER_LED_COUNT) : (uint8_t)((TATER_LED_COUNT + lead_b - 1) % TATER_LED_COUNT);
     uint8_t tail_a = s_tool_forward ? (uint8_t)((TATER_LED_COUNT + lead_a - 2) % TATER_LED_COUNT) : (uint8_t)((lead_a + 2) % TATER_LED_COUNT);
@@ -542,8 +549,8 @@ static void tool_call(uint32_t tick, rgb_t color)
     }
 
     if (s_tool_forward) {
-        if (s_tool_index >= 5) {
-            s_tool_index = 4;
+        if (s_tool_index >= span - 1) {
+            s_tool_index = span > 2 ? span - 2 : 0;
             s_tool_forward = false;
         } else {
             s_tool_index++;
