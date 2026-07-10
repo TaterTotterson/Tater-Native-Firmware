@@ -26,6 +26,7 @@ typedef struct {
     bool continued_chat;
     bool barge_in_enabled;
     uint8_t volume_percent;
+    bool muted;
     uint8_t led_brightness;
     char led_color[8];
     char led_listening_animation[32];
@@ -37,5 +38,8 @@ typedef struct {
 
 void tater_live_settings_init_defaults(void);
 const tater_live_settings_t *tater_live_settings_get(void);
+void tater_live_settings_set_volume_percent(uint8_t volume_percent);
+uint8_t tater_live_settings_adjust_volume(int delta_percent);
+bool tater_live_settings_set_muted(bool muted);
 bool tater_live_settings_apply_json(const cJSON *payload);
 void tater_live_settings_add_status(cJSON *payload);

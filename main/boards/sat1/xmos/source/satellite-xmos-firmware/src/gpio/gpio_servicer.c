@@ -214,7 +214,7 @@ void gpio_handler_task( device_control_gpio_ctx_t *ctx )
                 0x00000000UL,    /* Don't clear notification bits on entry */
                 0xFFFFFFFFUL,    /* Reset full notification value on exit */
                 &value,          /* Pass out notification value into value */
-                portMAX_DELAY ); /* Wait indefinitely until next notification */
+                pdMS_TO_TICKS(20) ); /* Refresh status even if GPIO interrupts are not delivered. */
 
         for( int p=0; p<ctx->num_of_ports; p++){
           gpio_val = rtos_gpio_port_in(gpio_ctx, gpio_ctrl_ports[ctx->port_defs[p].resource_idx]);

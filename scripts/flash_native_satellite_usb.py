@@ -18,6 +18,8 @@ FIRMWARE_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_LATEST = FIRMWARE_ROOT / "prebuilt_firmware" / "latest.json"
 DEFAULT_LATEST_URL = "https://github.com/TaterTotterson/Tater-Native-Firmware/releases/latest/download/latest.json"
 CACHE_ROOT = Path.home() / ".taterassistant" / "native_firmware_cache"
+APP_PARTITION_OFFSETS = ["0x20000", "0x320000", "0x620000"]
+APP_PARTITION_SIZE = 0x300000
 
 
 def text(value: Any) -> str:
@@ -64,20 +66,31 @@ def local_repo_path(path_or_url: str) -> Path | None:
     return FIRMWARE_ROOT / clean
 
 
-def load_manifest(latest_url: str) -> tuple[dict[str, Any], str]:
-    if LOCAL_LATEST.is_file():
+def load_manifest(latest_url: str, *, prefer_local: bool = False) -> tuple[dict[str, Any], str]:
+    if prefer_local and LOCAL_LATEST.is_file():
         latest = read_json_path(LOCAL_LATEST)
         manifest_ref = text(latest.get("manifest"))
         manifest_path = local_repo_path(manifest_ref)
         if manifest_path and manifest_path.is_file():
             return read_json_path(manifest_path), str(manifest_path)
 
-    latest = read_json_url(latest_url)
-    manifest_ref = text(latest.get("manifest"))
-    if not manifest_ref:
-        raise SystemExit("Native firmware latest.json is missing manifest.")
-    manifest_url = raw_url(manifest_ref, latest_url)
-    return read_json_url(manifest_url), manifest_url
+    try:
+        latest = read_json_url(latest_url)
+        manifest_ref = text(latest.get("manifest"))
+        if not manifest_ref:
+            raise SystemExit("Native firmware latest.json is missing manifest.")
+        manifest_url = raw_url(manifest_ref, latest_url)
+        return read_json_url(manifest_url), manifest_url
+    except Exception as exc:
+        if prefer_local or not LOCAL_LATEST.is_file():
+            raise
+        print(f"Remote manifest unavailable ({exc}); falling back to local prebuilt firmware.")
+        latest = read_json_path(LOCAL_LATEST)
+        manifest_ref = text(latest.get("manifest"))
+        manifest_path = local_repo_path(manifest_ref)
+        if manifest_path and manifest_path.is_file():
+            return read_json_path(manifest_path), str(manifest_path)
+        raise
 
 
 def normalize_board_key(board: str) -> str:
@@ -158,15 +171,39 @@ def find_esptool_python() -> list[str]:
     raise SystemExit("Could not find esptool. Install PlatformIO or run: python3 -m pip install esptool")
 
 
+def parse_offsets(value: str) -> list[str]:
+    clean = text(value)
+    if not clean or clean.lower() == "all":
+        return list(APP_PARTITION_OFFSETS)
+    offsets: list[str] = []
+    for item in clean.split(","):
+        offset = text(item).lower()
+        if not offset:
+            continue
+        if not offset.startswith("0x"):
+            raise SystemExit(f"Invalid app offset {item!r}; use hex offsets like 0x20000.")
+        int(offset, 16)
+        offsets.append(offset)
+    if not offsets:
+        raise SystemExit("No app offsets supplied.")
+    return offsets
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Flash Tater Native satellite firmware over USB without a browser.")
     parser.add_argument("port", nargs="?", help="Serial port, for example /dev/cu.usbmodem4101.")
-    parser.add_argument("--board", default="voicepe", help="Native board key. Default: voicepe.")
+    parser.add_argument("--board", help="Native board key, for example satellite1 or voicepe. Required unless --image is used.")
     parser.add_argument("--image", help="Use a local factory image instead of the manifest artifact.")
+    parser.add_argument("--app-image", help="Use a local app/OTA image and write app partitions only, preserving setup data.")
+    parser.add_argument("--app-offsets", default="all", help="Comma-separated app offsets for --app-image. Default: all app slots.")
     parser.add_argument("--latest-url", default=os.getenv("TATER_NATIVE_FIRMWARE_LATEST_URL", DEFAULT_LATEST_URL))
+    parser.add_argument("--local", action="store_true", help="Use this repo's local prebuilt_firmware folder instead of the GitHub release manifest.")
     parser.add_argument("--baud", default="921600")
     parser.add_argument("--no-erase", action="store_true", help="Do not erase flash before writing the factory image.")
     args = parser.parse_args()
+
+    if args.image and args.app_image:
+        raise SystemExit("Use either --image for a factory image or --app-image for an app/OTA image, not both.")
 
     port = text(args.port)
     if not port:
@@ -184,14 +221,30 @@ def main() -> int:
         else:
             raise SystemExit("No USB serial ports found. Plug in the satellite and pass the port path.")
 
-    if args.image:
+    app_offsets: list[str] = []
+    if args.app_image:
+        image = Path(args.app_image).expanduser().resolve()
+        if not image.is_file():
+            raise SystemExit(f"App image not found: {image}")
+        if "factory" in image.name:
+            raise SystemExit("--app-image expects firmware.bin, not firmware.factory.bin.")
+        if image.stat().st_size > APP_PARTITION_SIZE:
+            raise SystemExit(f"App image is too large for the app partition: {image.stat().st_size} > {APP_PARTITION_SIZE}.")
+        artifact = {"flash_size": "16MB", "flash_mode": "dio", "flash_freq": "80m"}
+        app_offsets = parse_offsets(args.app_offsets)
+    elif args.image:
         image = Path(args.image).expanduser().resolve()
         if not image.is_file():
             raise SystemExit(f"Image not found: {image}")
         artifact = {"flash_size": "16MB", "flash_mode": "dio", "flash_freq": "40m"}
+        if "factory" not in image.name:
+            raise SystemExit("Local --image expects a factory image. Use --app-image for .pio/build/<env>/firmware.bin.")
     else:
-        manifest, manifest_source = load_manifest(text(args.latest_url) or DEFAULT_LATEST_URL)
-        artifact = find_factory_artifact(manifest, text(args.board) or "voicepe")
+        board = text(args.board)
+        if not board:
+            raise SystemExit("Pass the board to flash, for example: --board satellite1 or --board voicepe.")
+        manifest, manifest_source = load_manifest(text(args.latest_url) or DEFAULT_LATEST_URL, prefer_local=bool(args.local))
+        artifact = find_factory_artifact(manifest, board)
         image = download_or_copy_artifact(artifact, manifest_source)
 
     esptool_cmd = find_esptool_python()
@@ -199,9 +252,44 @@ def main() -> int:
     flash_mode = text(artifact.get("flash_mode")) or "dio"
     flash_freq = text(artifact.get("flash_freq")) or "40m"
 
+    if app_offsets:
+        print(f"Flashing app image {image} to {port} at {', '.join(app_offsets)}...")
+        flash_pairs: list[str] = []
+        for offset in app_offsets:
+            flash_pairs.extend([offset, str(image)])
+        subprocess.run(
+            esptool_cmd
+            + [
+                "--chip",
+                "esp32s3",
+                "--port",
+                port,
+                "--baud",
+                text(args.baud),
+                "--before",
+                "default_reset",
+                "--after",
+                "hard_reset",
+                "write_flash",
+                "-z",
+                "--flash_mode",
+                flash_mode,
+                "--flash_freq",
+                flash_freq,
+                "--flash_size",
+                flash_size,
+            ]
+            + flash_pairs,
+            check=True,
+        )
+        print("Done. The satellite should reboot with existing setup data preserved.")
+        return 0
+
     if not args.no_erase:
         print(f"Erasing flash on {port}...")
         subprocess.run(esptool_cmd + ["--chip", "esp32s3", "--port", port, "--baud", text(args.baud), "erase_flash"], check=True)
+    else:
+        print("Warning: factory images still overwrite low flash regions, including provisioning data. Use --app-image to preserve setup.")
 
     print(f"Flashing {image} to {port}...")
     subprocess.run(

@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "board.h"
 #include "esp_log.h"
 #include "leds.h"
 
@@ -83,9 +84,18 @@ void tater_live_settings_init_defaults(void)
     strlcpy_or_empty(s_settings.wake_engine, "micro_wake_word", sizeof(s_settings.wake_engine));
     strlcpy_or_empty(s_settings.wake_word, "hey_tater", sizeof(s_settings.wake_word));
     strlcpy_or_empty(s_settings.wake_word_url, "", sizeof(s_settings.wake_word_url));
+#if TATER_BOARD_SAT1
+    strlcpy_or_empty(s_settings.wake_sensitivity, "high", sizeof(s_settings.wake_sensitivity));
+#else
     strlcpy_or_empty(s_settings.wake_sensitivity, "normal", sizeof(s_settings.wake_sensitivity));
+#endif
+#if TATER_BOARD_SAT1
+    strlcpy_or_empty(s_settings.wake_environment, "far_field", sizeof(s_settings.wake_environment));
+    s_settings.wake_threshold = 0.88f;
+#else
     strlcpy_or_empty(s_settings.wake_environment, "balanced", sizeof(s_settings.wake_environment));
     s_settings.wake_threshold = 0.97f;
+#endif
     s_settings.wake_sliding_window = 5;
     s_settings.capture_wake_audio = false;
     s_settings.capture_close_misses = false;
@@ -100,6 +110,7 @@ void tater_live_settings_init_defaults(void)
     s_settings.continued_chat = true;
     s_settings.barge_in_enabled = false;
     s_settings.volume_percent = 80;
+    s_settings.muted = false;
     s_settings.led_brightness = 64;
     strlcpy_or_empty(s_settings.led_color, "#ff5a1f", sizeof(s_settings.led_color));
     strlcpy_or_empty(s_settings.led_listening_animation, "directional", sizeof(s_settings.led_listening_animation));
@@ -113,6 +124,32 @@ void tater_live_settings_init_defaults(void)
 const tater_live_settings_t *tater_live_settings_get(void)
 {
     return &s_settings;
+}
+
+void tater_live_settings_set_volume_percent(uint8_t volume_percent)
+{
+    if (volume_percent > 100) {
+        volume_percent = 100;
+    }
+    s_settings.volume_percent = volume_percent;
+}
+
+uint8_t tater_live_settings_adjust_volume(int delta_percent)
+{
+    int next = (int)s_settings.volume_percent + delta_percent;
+    if (next < 0) {
+        next = 0;
+    } else if (next > 100) {
+        next = 100;
+    }
+    s_settings.volume_percent = (uint8_t)next;
+    return s_settings.volume_percent;
+}
+
+bool tater_live_settings_set_muted(bool muted)
+{
+    s_settings.muted = muted;
+    return s_settings.muted;
 }
 
 bool tater_live_settings_apply_json(const cJSON *payload)
@@ -141,6 +178,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *continued_chat = cJSON_GetObjectItem(payload, "continued_chat");
     const cJSON *barge_in_enabled = cJSON_GetObjectItem(payload, "barge_in_enabled");
     const cJSON *volume_percent = cJSON_GetObjectItem(payload, "volume_percent");
+    const cJSON *muted = cJSON_GetObjectItem(payload, "muted");
     const cJSON *led_brightness = cJSON_GetObjectItem(payload, "led_brightness");
     const cJSON *led_color = cJSON_GetObjectItem(payload, "led_color");
     const cJSON *led_listening_animation = cJSON_GetObjectItem(payload, "led_listening_animation");
@@ -185,6 +223,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     s_settings.continued_chat = json_bool(continued_chat, s_settings.continued_chat);
     s_settings.barge_in_enabled = json_bool(barge_in_enabled, s_settings.barge_in_enabled);
     s_settings.volume_percent = json_u8_range(volume_percent, s_settings.volume_percent, 0, 100);
+    s_settings.muted = json_bool(muted, s_settings.muted);
     s_settings.led_brightness = json_u8_range(led_brightness, s_settings.led_brightness, 0, 255);
     if (cJSON_IsString(led_color) && led_color->valuestring && led_color->valuestring[0]) {
         strlcpy_or_empty(s_settings.led_color, led_color->valuestring, sizeof(s_settings.led_color));
@@ -208,7 +247,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
 
     ESP_LOGI(
         TAG,
-        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u led=%u color=%s animations=%s/%s/%s/%s logging=%s",
+        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d led=%u color=%s animations=%s/%s/%s/%s logging=%s",
         s_settings.wake_engine,
         s_settings.wake_word,
         s_settings.wake_word_url,
@@ -227,6 +266,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
         s_settings.continued_chat,
         s_settings.barge_in_enabled,
         s_settings.volume_percent,
+        s_settings.muted,
         s_settings.led_brightness,
         s_settings.led_color,
         s_settings.led_listening_animation,
@@ -264,6 +304,7 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddBoolToObject(settings, "continued_chat", s_settings.continued_chat);
     cJSON_AddBoolToObject(settings, "barge_in_enabled", s_settings.barge_in_enabled);
     cJSON_AddNumberToObject(settings, "volume_percent", s_settings.volume_percent);
+    cJSON_AddBoolToObject(settings, "muted", s_settings.muted);
     cJSON_AddNumberToObject(settings, "led_brightness", s_settings.led_brightness);
     cJSON_AddStringToObject(settings, "led_color", s_settings.led_color);
     cJSON_AddStringToObject(settings, "led_listening_animation", s_settings.led_listening_animation);

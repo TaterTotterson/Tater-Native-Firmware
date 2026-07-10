@@ -49,9 +49,11 @@ static void *audio_pipeline_input_i(void *input_app_data)
 
     frame_data->vnr_pred_flag = 0;
 
+#if !(MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS < MIC_ARRAY_CONFIG_MIC_COUNT)
     doa_estimator_process_frame(frame_data->mic_samples_passthrough[0],
                                 frame_data->mic_samples_passthrough[1],
                                 appconfAUDIO_PIPELINE_FRAME_ADVANCE);
+#endif
 
     memcpy(frame_data->samples, frame_data->mic_samples_passthrough, sizeof(frame_data->samples));
 

@@ -29,6 +29,8 @@ static i2s_chan_handle_t s_tx_chan;
 static bool s_speaker_ready;
 static bool s_speaker_enabled;
 static bool s_speaker_preloaded;
+static bool s_speaker_session_active;
+static SemaphoreHandle_t s_speaker_mutex;
 static portMUX_TYPE s_speaker_level_lock = portMUX_INITIALIZER_UNLOCKED;
 static float s_speaker_audio_level;
 static int64_t s_speaker_level_update_us;
@@ -138,6 +140,29 @@ static esp_err_t xmos_reset_boot(void)
 static size_t xmos_target_firmware_size(void)
 {
     return (size_t)(_binary_ffva_v1_3_2_vod_upgrade_bin_end - _binary_ffva_v1_3_2_vod_upgrade_bin_start);
+}
+
+static esp_err_t speaker_session_take(void)
+{
+    if (!s_speaker_mutex) {
+        s_speaker_mutex = xSemaphoreCreateMutex();
+        ESP_RETURN_ON_FALSE(s_speaker_mutex, ESP_ERR_NO_MEM, TAG, "speaker mutex failed");
+    }
+    ESP_RETURN_ON_FALSE(
+        xSemaphoreTake(s_speaker_mutex, pdMS_TO_TICKS(5000)) == pdTRUE,
+        ESP_ERR_TIMEOUT,
+        TAG,
+        "speaker session lock timeout"
+    );
+    return ESP_OK;
+}
+
+static void speaker_session_give(void)
+{
+    if (s_speaker_mutex && s_speaker_session_active) {
+        s_speaker_session_active = false;
+        xSemaphoreGive(s_speaker_mutex);
+    }
 }
 
 static void xmos_status_set_update_state(tater_audio_xmos_update_state_t state)
@@ -1056,16 +1081,31 @@ static void audio_task(void *arg)
 
 void tater_audio_i2s_start_task(void)
 {
+    if (!s_speaker_mutex) {
+        s_speaker_mutex = xSemaphoreCreateMutex();
+    }
     xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
     xTaskCreatePinnedToCore(doa_task, "tater_doa", 4096, NULL, 4, NULL, 0);
 }
 
 esp_err_t tater_audio_speaker_begin(void)
 {
+    ESP_RETURN_ON_ERROR(speaker_session_take(), TAG, "speaker session lock failed");
     reset_speaker_audio_level();
-    ESP_RETURN_ON_ERROR(aic3204_apply_playback_settings(), TAG, "speaker dac settings failed");
+    esp_err_t err = aic3204_apply_playback_settings();
+    if (err != ESP_OK) {
+        xSemaphoreGive(s_speaker_mutex);
+        ESP_LOGE(TAG, "speaker dac settings failed: %s", esp_err_to_name(err));
+        return err;
+    }
     aic3204_dump_state("before-speaker-start");
-    ESP_RETURN_ON_ERROR(speaker_i2s_start_driver(), TAG, "speaker i2s start failed");
+    err = speaker_i2s_start_driver();
+    if (err != ESP_OK) {
+        xSemaphoreGive(s_speaker_mutex);
+        ESP_LOGE(TAG, "speaker i2s start failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    s_speaker_session_active = true;
     return ESP_OK;
 }
 
@@ -1123,6 +1163,7 @@ esp_err_t tater_audio_speaker_end(void)
     s_speaker_enabled = false;
     s_speaker_preloaded = false;
     reset_speaker_audio_level();
+    speaker_session_give();
     return result;
 }
 

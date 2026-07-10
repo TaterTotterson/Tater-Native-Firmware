@@ -1,7 +1,10 @@
 #include "button.h"
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
 
+#include "audio_i2s.h"
 #include "board.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
@@ -10,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "leds.h"
+#include "native_settings.h"
 #include "ota_update.h"
 #include "playback.h"
 #include "tater_config.h"
@@ -30,6 +34,305 @@ static const char *TAG = "tater_button";
 #define SETUP_RESET_SOUND_ID "short-definite-fart"
 #define BUTTON_INTERCOM_WAKE_WORD "push to intercom"
 
+#if TATER_BOARD_VOICE_PE
+#define VOICE_PE_VOLUME_STEP_PERCENT 5
+#define VOICE_PE_ENCODER_POLL_MS 5
+#define VOICE_PE_ENCODER_RESOLUTION_STEPS 2
+
+typedef struct {
+    bool stable_on;
+    bool last_raw_on;
+    int stable_count;
+} voicepe_switch_t;
+
+static bool voicepe_switch_update(voicepe_switch_t *sw, bool raw_on, bool *changed)
+{
+    if (changed) {
+        *changed = false;
+    }
+    if (!sw) {
+        return raw_on;
+    }
+    if (raw_on == sw->last_raw_on) {
+        if (sw->stable_count < BUTTON_DEBOUNCE_TICKS) {
+            sw->stable_count++;
+        }
+    } else {
+        sw->stable_count = 0;
+        sw->last_raw_on = raw_on;
+    }
+    if (sw->stable_count >= BUTTON_DEBOUNCE_TICKS && raw_on != sw->stable_on) {
+        sw->stable_on = raw_on;
+        if (changed) {
+            *changed = true;
+        }
+    }
+    return sw->stable_on;
+}
+
+static void voicepe_switch_init(voicepe_switch_t *sw, bool on)
+{
+    if (!sw) {
+        return;
+    }
+    sw->stable_on = on;
+    sw->last_raw_on = on;
+    sw->stable_count = BUTTON_DEBOUNCE_TICKS;
+}
+
+static void voicepe_send_setting_feedback(const char *message)
+{
+    if (message && message[0]) {
+        tater_protocol_send_log("info", message);
+    }
+    tater_protocol_send_status(tater_protocol_timer_is_active() ? "timer" : "idle");
+}
+
+static void voicepe_apply_volume_delta(int delta_percent)
+{
+    uint8_t volume = tater_live_settings_adjust_volume(delta_percent);
+    const tater_live_settings_t *settings = tater_live_settings_get();
+    tater_leds_show_volume(volume);
+    char message[80] = {0};
+    snprintf(message, sizeof(message), "Voice PE volume %u%%", volume);
+    ESP_LOGI(
+        TAG,
+        "voice pe encoder delta=%d volume=%u muted=%d",
+        delta_percent,
+        volume,
+        settings ? settings->muted : false
+    );
+    voicepe_send_setting_feedback(message);
+}
+
+static void voicepe_apply_mute_state(bool muted)
+{
+    bool current = tater_live_settings_set_muted(muted);
+    tater_leds_show_mute(current);
+    char message[80] = {0};
+    snprintf(message, sizeof(message), "Voice PE microphones %s", current ? "muted" : "unmuted");
+    ESP_LOGI(TAG, "voice pe microphones %s", current ? "muted" : "unmuted");
+    if (current && tater_protocol_voice_active()) {
+        tater_protocol_stop_voice(true);
+    }
+    voicepe_send_setting_feedback(message);
+}
+
+static uint8_t voicepe_encoder_state(void)
+{
+    uint8_t a = gpio_get_level(TATER_ENCODER_A) ? 1 : 0;
+    uint8_t b = gpio_get_level(TATER_ENCODER_B) ? 1 : 0;
+    return (uint8_t)(a | (b << 1));
+}
+
+static void voicepe_encoder_task(void *arg)
+{
+    (void)arg;
+    static const int8_t transition_table[16] = {
+         0,  1, -1,  0,
+        -1,  0,  0,  1,
+         1,  0,  0, -1,
+         0, -1,  1,  0,
+    };
+    uint8_t last_state = voicepe_encoder_state();
+    int detent_accum = 0;
+    ESP_LOGI(TAG, "voice pe encoder ready state=0x%02x", last_state);
+    while (true) {
+        uint8_t state = voicepe_encoder_state();
+        if (state != last_state) {
+            int8_t movement = transition_table[((last_state & 0x03) << 2) | (state & 0x03)];
+            if (movement != 0) {
+                detent_accum += movement;
+                while (detent_accum >= VOICE_PE_ENCODER_RESOLUTION_STEPS) {
+                    voicepe_apply_volume_delta(VOICE_PE_VOLUME_STEP_PERCENT);
+                    detent_accum -= VOICE_PE_ENCODER_RESOLUTION_STEPS;
+                }
+                while (detent_accum <= -VOICE_PE_ENCODER_RESOLUTION_STEPS) {
+                    voicepe_apply_volume_delta(-VOICE_PE_VOLUME_STEP_PERCENT);
+                    detent_accum += VOICE_PE_ENCODER_RESOLUTION_STEPS;
+                }
+            } else {
+                detent_accum = 0;
+            }
+            last_state = state;
+        }
+        vTaskDelay(pdMS_TO_TICKS(VOICE_PE_ENCODER_POLL_MS));
+    }
+}
+
+static void voicepe_poll_mute_switch(bool *initialized, voicepe_switch_t *mute_switch)
+{
+    bool muted = gpio_get_level(TATER_MUTE_SWITCH) != 0;
+    if (initialized && !*initialized) {
+        voicepe_switch_init(mute_switch, muted);
+        tater_live_settings_set_muted(muted);
+        ESP_LOGI(TAG, "voice pe mute switch ready muted=%d", muted);
+        *initialized = true;
+        return;
+    }
+
+    bool changed = false;
+    bool stable_muted = voicepe_switch_update(mute_switch, muted, &changed);
+    if (changed) {
+        voicepe_apply_mute_state(stable_muted);
+    }
+}
+#endif
+
+#if TATER_BOARD_SAT1
+#define SAT1_BUTTON_UP_MASK (1u << 0)
+#define SAT1_BUTTON_DOWN_MASK (1u << 2)
+#define SAT1_BUTTON_LEFT_MUTE_MASK (1u << 3)
+#define SAT1_EXTRA_BUTTON_POLL_TICKS 1
+#define SAT1_VOLUME_STEP_PERCENT 5
+
+typedef struct {
+    bool stable_pressed;
+    bool last_raw_pressed;
+    int stable_count;
+} sat1_extra_button_t;
+
+static void sat1_extra_button_init(sat1_extra_button_t *button, bool pressed)
+{
+    if (!button) {
+        return;
+    }
+    button->stable_pressed = pressed;
+    button->last_raw_pressed = pressed;
+    button->stable_count = BUTTON_DEBOUNCE_TICKS;
+}
+
+static bool sat1_extra_button_update(sat1_extra_button_t *button, bool raw_pressed, bool *changed)
+{
+    if (!button) {
+        if (changed) {
+            *changed = false;
+        }
+        return false;
+    }
+    if (changed) {
+        *changed = false;
+    }
+    if (raw_pressed == button->last_raw_pressed) {
+        if (button->stable_count < BUTTON_DEBOUNCE_TICKS) {
+            button->stable_count++;
+        }
+    } else {
+        button->stable_count = 0;
+        button->last_raw_pressed = raw_pressed;
+    }
+    if (button->stable_count >= BUTTON_DEBOUNCE_TICKS && raw_pressed != button->stable_pressed) {
+        button->stable_pressed = raw_pressed;
+        if (changed) {
+            *changed = true;
+        }
+    }
+    return button->stable_pressed;
+}
+
+static void sat1_send_setting_feedback(const char *message)
+{
+    if (message && message[0]) {
+        tater_protocol_send_log("info", message);
+    }
+    tater_protocol_send_status(tater_protocol_timer_is_active() ? "timer" : "idle");
+}
+
+static void sat1_apply_volume_delta(int delta_percent)
+{
+    uint8_t volume = tater_live_settings_adjust_volume(delta_percent);
+    const tater_live_settings_t *settings = tater_live_settings_get();
+    tater_leds_show_volume(volume);
+    char message[80] = {0};
+    snprintf(message, sizeof(message), "Sat1 volume %u%%", volume);
+    ESP_LOGI(
+        TAG,
+        "sat1 volume button delta=%d volume=%u muted=%d",
+        delta_percent,
+        volume,
+        settings ? settings->muted : false
+    );
+    sat1_send_setting_feedback(message);
+}
+
+static void sat1_apply_mute_state(bool muted)
+{
+    bool current = tater_live_settings_set_muted(muted);
+    tater_leds_show_mute(current);
+    char message[80] = {0};
+    snprintf(message, sizeof(message), "Sat1 microphones %s", current ? "muted" : "unmuted");
+    ESP_LOGI(TAG, "sat1 microphones %s", current ? "muted" : "unmuted");
+    if (current && tater_protocol_voice_active()) {
+        tater_protocol_stop_voice(true);
+    }
+    sat1_send_setting_feedback(message);
+}
+
+static void sat1_poll_extra_buttons(
+    bool *initialized,
+    sat1_extra_button_t *up,
+    sat1_extra_button_t *down,
+    sat1_extra_button_t *left_mute
+)
+{
+    uint8_t buttons = 0;
+    static bool had_read_failure = false;
+    if (tater_audio_sat1_read_buttons(&buttons) != ESP_OK) {
+        static uint32_t read_failures = 0;
+        read_failures++;
+        if (read_failures == 1 || (read_failures % 100) == 0) {
+            char message[96] = {0};
+            snprintf(message, sizeof(message), "Sat1 button status read failed count=%lu", (unsigned long)read_failures);
+            ESP_LOGW(TAG, "%s", message);
+            tater_protocol_send_log("warn", message);
+        }
+        had_read_failure = true;
+        return;
+    }
+    if (had_read_failure) {
+        ESP_LOGI(TAG, "Sat1 button status read recovered");
+        tater_protocol_send_log("info", "Sat1 button status read recovered");
+        had_read_failure = false;
+    }
+    static bool have_last_buttons = false;
+    static uint8_t last_buttons = 0;
+    if (!have_last_buttons || buttons != last_buttons) {
+        char raw_message[80] = {0};
+        snprintf(raw_message, sizeof(raw_message), "Sat1 buttons raw=0x%02x", buttons);
+        ESP_LOGI(TAG, "%s", raw_message);
+        tater_protocol_send_log("info", raw_message);
+        have_last_buttons = true;
+        last_buttons = buttons;
+    }
+
+    bool up_pressed = (buttons & SAT1_BUTTON_UP_MASK) == 0;
+    bool down_pressed = (buttons & SAT1_BUTTON_DOWN_MASK) == 0;
+    bool muted = (buttons & SAT1_BUTTON_LEFT_MUTE_MASK) != 0;
+
+    if (initialized && !*initialized) {
+        sat1_extra_button_init(up, up_pressed);
+        sat1_extra_button_init(down, down_pressed);
+        sat1_extra_button_init(left_mute, muted);
+        tater_live_settings_set_muted(muted);
+        *initialized = true;
+        ESP_LOGI(TAG, "sat1 extra buttons ready raw=0x%02x muted=%d", buttons, muted);
+        return;
+    }
+
+    bool changed = false;
+    if (sat1_extra_button_update(up, up_pressed, &changed) && changed) {
+        sat1_apply_volume_delta(SAT1_VOLUME_STEP_PERCENT);
+    }
+    if (sat1_extra_button_update(down, down_pressed, &changed) && changed) {
+        sat1_apply_volume_delta(-SAT1_VOLUME_STEP_PERCENT);
+    }
+    sat1_extra_button_update(left_mute, muted, &changed);
+    if (changed) {
+        sat1_apply_mute_state(left_mute ? left_mute->stable_pressed : muted);
+    }
+}
+#endif
+
 esp_err_t tater_button_init(void)
 {
     gpio_config_t cfg = {
@@ -39,7 +342,35 @@ esp_err_t tater_button_init(void)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    return gpio_config(&cfg);
+    esp_err_t err = gpio_config(&cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+#if TATER_BOARD_VOICE_PE
+    gpio_config_t encoder_cfg = {
+        .pin_bit_mask = (1ULL << TATER_ENCODER_A) | (1ULL << TATER_ENCODER_B),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    err = gpio_config(&encoder_cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+    gpio_config_t mute_cfg = {
+        .pin_bit_mask = 1ULL << TATER_MUTE_SWITCH,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    err = gpio_config(&mute_cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
+    return ESP_OK;
 }
 
 static void enter_setup_mode(const char *source)
@@ -98,6 +429,17 @@ static void button_task(void *arg)
     bool intercom_started_for_press = false;
     bool setup_hold_candidate = false;
     bool button_consumed_for_press = false;
+#if TATER_BOARD_SAT1
+    bool sat1_extra_buttons_initialized = false;
+    int sat1_extra_button_poll_ticks = 0;
+    sat1_extra_button_t sat1_button_up = {0};
+    sat1_extra_button_t sat1_button_down = {0};
+    sat1_extra_button_t sat1_button_left_mute = {0};
+#endif
+#if TATER_BOARD_VOICE_PE
+    bool voicepe_mute_initialized = false;
+    voicepe_switch_t voicepe_mute_switch = {0};
+#endif
 
     while (true) {
         bool raw_pressed = gpio_get_level(TATER_CENTER_BUTTON) == 0;
@@ -236,6 +578,21 @@ static void button_task(void *arg)
         }
 
         last_raw_pressed = raw_pressed;
+#if TATER_BOARD_SAT1
+        sat1_extra_button_poll_ticks++;
+        if (sat1_extra_button_poll_ticks >= SAT1_EXTRA_BUTTON_POLL_TICKS) {
+            sat1_extra_button_poll_ticks = 0;
+            sat1_poll_extra_buttons(
+                &sat1_extra_buttons_initialized,
+                &sat1_button_up,
+                &sat1_button_down,
+                &sat1_button_left_mute
+            );
+        }
+#endif
+#if TATER_BOARD_VOICE_PE
+        voicepe_poll_mute_switch(&voicepe_mute_initialized, &voicepe_mute_switch);
+#endif
         vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
     }
 }
@@ -243,4 +600,7 @@ static void button_task(void *arg)
 void tater_button_start_task(void)
 {
     xTaskCreatePinnedToCore(button_task, "tater_button", 4096, NULL, 5, NULL, 0);
+#if TATER_BOARD_VOICE_PE
+    xTaskCreatePinnedToCore(voicepe_encoder_task, "tater_encoder", 3072, NULL, 5, NULL, 0);
+#endif
 }

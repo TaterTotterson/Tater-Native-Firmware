@@ -31,6 +31,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "got ip " IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+        ESP_LOGI(TAG, "wifi power save disabled after connect");
         s_retry_count = 0;
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }

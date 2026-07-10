@@ -32,9 +32,13 @@ typedef struct {
     uint8_t major;
     uint8_t minor;
     uint8_t patch;
+    uint8_t prerelease;
+    uint8_t counter;
     uint8_t target_major;
     uint8_t target_minor;
     uint8_t target_patch;
+    uint8_t target_prerelease;
+    uint8_t target_counter;
     tater_audio_xmos_update_state_t update_state;
     bool update_attempted;
     bool update_required;
@@ -52,3 +56,4 @@ bool tater_audio_speaker_ready(void);
 float tater_audio_speaker_level(void);
 bool tater_audio_doa_snapshot(tater_audio_doa_t *out);
 bool tater_audio_xmos_status_snapshot(tater_audio_xmos_status_t *out);
+esp_err_t tater_audio_sat1_read_buttons(uint8_t *buttons);

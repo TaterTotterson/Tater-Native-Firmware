@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "esp_mp3_dec.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "native_settings.h"
@@ -27,12 +28,16 @@ static const char *TAG = "tater_playback";
 static const size_t PLAYBACK_HTTP_READ_SIZE = 8192;
 static const size_t PLAYBACK_HEADER_LIMIT = 16 * 1024;
 static const size_t PLAYBACK_CODEC_OUT_INITIAL = 4096;
+static const size_t PLAYBACK_WAV_JITTER_CAPACITY = 512 * 1024;
+static const size_t PLAYBACK_WAV_PREBUFFER_SMALL = 32 * 1024;
+static const size_t PLAYBACK_WAV_PREBUFFER_MEDIUM = 64 * 1024;
+static const size_t PLAYBACK_WAV_PREBUFFER_LARGE = 128 * 1024;
 static const size_t PLAYBACK_MP3_JITTER_CAPACITY = 128 * 1024;
 static const size_t PLAYBACK_MP3_PREBUFFER = 64 * 1024;
 static const size_t PLAYBACK_FLAC_JITTER_CAPACITY = 512 * 1024;
 static const size_t PLAYBACK_FLAC_PREBUFFER = 256 * 1024;
-static const uint32_t PLAYBACK_HTTP_READER_TASK_STACK = 8192;
-static const uint32_t PLAYBACK_URL_TASK_STACK = 24576;
+static const uint32_t PLAYBACK_HTTP_READER_TASK_STACK = 4096;
+static const uint32_t PLAYBACK_URL_TASK_STACK = 16384;
 static const uint32_t PLAYBACK_STOP_WAIT_MS = 3000;
 static const uint32_t PLAYBACK_STOP_POLL_MS = 20;
 
@@ -118,6 +123,7 @@ typedef struct {
     int64_t content_length;
     size_t bytes_seen;
     TaskHandle_t notify_task;
+    bool task_with_caps;
     volatile bool done;
 } codec_http_reader_args_t;
 
@@ -126,11 +132,13 @@ typedef struct {
     uint32_t duration_ms;
     uint8_t volume_percent;
     bool notify_finished;
+    bool task_with_caps;
 } tone_args_t;
 
 typedef struct {
     char *url;
     bool notify_finished;
+    bool task_with_caps;
 } playback_args_t;
 
 typedef struct {
@@ -138,12 +146,90 @@ typedef struct {
     size_t len;
     char label[64];
     bool free_data;
+    bool task_with_caps;
 } playback_memory_args_t;
 
 static volatile bool s_abort;
 static volatile bool s_playing;
 static TaskHandle_t s_task;
 static SemaphoreHandle_t s_lifecycle_lock;
+
+static void playback_log_heap(const char *label)
+{
+    ESP_LOGI(
+        TAG,
+        "%s heap free=%u internal=%u internal_largest=%u dma=%u dma_largest=%u psram=%u",
+        label ? label : "playback",
+        (unsigned)esp_get_free_heap_size(),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM)
+    );
+}
+
+static BaseType_t playback_create_task(
+    TaskFunction_t task,
+    const char *name,
+    uint32_t stack_depth,
+    void *arg,
+    UBaseType_t priority,
+    TaskHandle_t *handle,
+    BaseType_t core,
+    bool *task_with_caps
+)
+{
+    if (task_with_caps) {
+        *task_with_caps = false;
+    }
+
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    if (task_with_caps) {
+        *task_with_caps = true;
+    }
+    BaseType_t ok = xTaskCreatePinnedToCoreWithCaps(
+        task,
+        name,
+        stack_depth,
+        arg,
+        priority,
+        handle,
+        core,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (ok == pdPASS) {
+        return ok;
+    }
+    if (task_with_caps) {
+        *task_with_caps = false;
+    }
+    ESP_LOGW(
+        TAG,
+        "task %s psram stack create failed stack=%u psram=%u internal=%u largest=%u; retrying internal",
+        name ? name : "?",
+        (unsigned)stack_depth,
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+    );
+#endif
+
+    return xTaskCreatePinnedToCore(task, name, stack_depth, arg, priority, handle, core);
+}
+
+static void playback_delete_current_task(bool task_with_caps)
+{
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    if (task_with_caps) {
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+#else
+    (void)task_with_caps;
+#endif
+    vTaskDelete(NULL);
+}
 
 static bool playback_wait_stopped_locked(TickType_t timeout_ticks)
 {
@@ -152,7 +238,11 @@ static bool playback_wait_stopped_locked(TickType_t timeout_ticks)
 
     while (true) {
         TaskHandle_t task = s_task;
-        if ((!task && !s_playing) || task == current) {
+        if (!s_playing) {
+            s_task = NULL;
+            return true;
+        }
+        if (!task || task == current) {
             return true;
         }
 
@@ -358,6 +448,25 @@ static size_t codec_jitter_prebuffer(stream_audio_type_t type, int64_t content_l
     size_t target = type == STREAM_AUDIO_FLAC ? PLAYBACK_FLAC_PREBUFFER : PLAYBACK_MP3_PREBUFFER;
     if (content_length > 0 && (uint64_t)content_length < target) {
         target = (size_t)content_length;
+    }
+    return target;
+}
+
+static size_t wav_jitter_prebuffer(int64_t content_length)
+{
+    size_t target = PLAYBACK_WAV_PREBUFFER_MEDIUM;
+    if (content_length > 0) {
+        if (content_length <= (int64_t)(160 * 1024)) {
+            target = PLAYBACK_WAV_PREBUFFER_SMALL;
+        } else if (content_length >= (int64_t)(512 * 1024)) {
+            target = PLAYBACK_WAV_PREBUFFER_LARGE;
+        }
+        if ((uint64_t)content_length < target) {
+            target = (size_t)content_length;
+        }
+    }
+    if (target > PLAYBACK_WAV_JITTER_CAPACITY) {
+        target = PLAYBACK_WAV_JITTER_CAPACITY;
     }
     return target;
 }
@@ -1085,6 +1194,7 @@ static esp_err_t codec_stream_feed(codec_stream_state_t *stream, uint8_t *data, 
 static void codec_http_reader_task(void *arg)
 {
     codec_http_reader_args_t *reader = (codec_http_reader_args_t *)arg;
+    bool task_with_caps = reader ? reader->task_with_caps : false;
     esp_err_t err = ESP_OK;
     size_t bytes_seen = reader ? reader->bytes_seen : 0;
 
@@ -1121,7 +1231,7 @@ done:
         }
         ESP_LOGI(
             TAG,
-            "codec reader done bytes=%u err=%s",
+            "playback reader done bytes=%u err=%s",
             (unsigned)bytes_seen,
             esp_err_to_name(err == ESP_OK ? ESP_OK : err)
         );
@@ -1133,7 +1243,7 @@ done:
     if (notify_task) {
         xTaskNotifyGive(notify_task);
     }
-    vTaskDelete(NULL);
+    playback_delete_current_task(task_with_caps);
 }
 
 static esp_err_t stream_codec_from_open_client(
@@ -1185,14 +1295,15 @@ static esp_err_t stream_codec_from_open_client(
             reader->content_length = content_length;
             reader->bytes_seen = bytes_seen;
             reader->notify_task = xTaskGetCurrentTaskHandle();
-            BaseType_t ok = xTaskCreatePinnedToCore(
+            BaseType_t ok = playback_create_task(
                 codec_http_reader_task,
                 "codec_http",
                 PLAYBACK_HTTP_READER_TASK_STACK,
                 reader,
                 4,
                 &reader_task,
-                0
+                0,
+                &reader->task_with_caps
             );
             if (ok != pdPASS) {
                 free(reader);
@@ -1273,6 +1384,257 @@ static esp_err_t stream_codec_from_open_client(
     return s_abort ? ESP_FAIL : ESP_OK;
 }
 
+static esp_err_t stream_wav_direct_from_open_client(
+    esp_http_client_handle_t client,
+    const wav_stream_info_t *info,
+    const uint8_t *initial_audio,
+    size_t initial_audio_len,
+    uint8_t *read_buf,
+    size_t read_size,
+    const char *reason
+)
+{
+    if (!client || !info || !read_buf || read_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (reason && reason[0]) {
+        tater_protocol_send_log("warn", reason);
+    }
+
+    wav_stream_state_t state = {0};
+    esp_err_t err = tater_audio_speaker_begin();
+    bool speaker_started = err == ESP_OK;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "speaker begin failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    if (initial_audio_len > 0) {
+        err = wav_stream_process_data(info, &state, initial_audio, initial_audio_len);
+    }
+    while (!s_abort && err == ESP_OK) {
+        if (info->data_len > 0 && state.data_bytes_seen >= info->data_len) {
+            break;
+        }
+        int got = esp_http_client_read(client, (char *)read_buf, read_size);
+        if (got < 0) {
+            err = ESP_FAIL;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        err = wav_stream_process_data(info, &state, read_buf, (size_t)got);
+    }
+
+    if (err == ESP_OK && !s_abort) {
+        err = pcm_stream_flush(&state);
+    }
+    ESP_LOGI(
+        TAG,
+        "stream wav direct playback input_frames=%u output_frames=%u bytes=%u",
+        (unsigned)state.input_frames,
+        (unsigned)state.output_frames,
+        (unsigned)state.data_bytes_seen
+    );
+    if (speaker_started) {
+        esp_err_t end_err = tater_audio_speaker_end();
+        if (end_err != ESP_OK) {
+            ESP_LOGW(TAG, "speaker end failed err=%s", esp_err_to_name(end_err));
+        }
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+    return s_abort ? ESP_FAIL : ESP_OK;
+}
+
+static esp_err_t stream_wav_from_open_client(
+    esp_http_client_handle_t client,
+    const wav_stream_info_t *info,
+    uint8_t *initial_audio,
+    size_t initial_audio_len,
+    size_t http_bytes_seen,
+    uint8_t *read_buf,
+    size_t read_size,
+    int64_t content_length
+)
+{
+    if (!client || !info || !read_buf || read_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    codec_jitter_buffer_t jitter = {0};
+    wav_stream_state_t state = {0};
+    esp_err_t err = codec_jitter_init(&jitter, PLAYBACK_WAV_JITTER_CAPACITY);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "stream wav jitter init failed err=%s; using direct playback", esp_err_to_name(err));
+        return stream_wav_direct_from_open_client(
+            client,
+            info,
+            initial_audio,
+            initial_audio_len,
+            read_buf,
+            read_size,
+            "wav buffered playback unavailable; using direct playback"
+        );
+    }
+
+    size_t prebuffer = wav_jitter_prebuffer(content_length);
+    ESP_LOGI(
+        TAG,
+        "stream wav jitter capacity=%u prebuffer=%u content_length=%lld initial=%u",
+        (unsigned)PLAYBACK_WAV_JITTER_CAPACITY,
+        (unsigned)prebuffer,
+        (long long)content_length,
+        (unsigned)initial_audio_len
+    );
+
+    if (initial_audio_len > 0) {
+        err = codec_jitter_write(&jitter, initial_audio, initial_audio_len);
+    }
+
+    TaskHandle_t reader_task = NULL;
+    codec_http_reader_args_t *reader = NULL;
+    if (err == ESP_OK) {
+        reader = calloc(1, sizeof(*reader));
+        if (!reader) {
+            ESP_LOGW(TAG, "stream wav reader alloc failed; using direct playback");
+            err = ESP_ERR_NO_MEM;
+        } else {
+            reader->client = client;
+            reader->buffer = &jitter;
+            reader->read_buf = read_buf;
+            reader->read_size = read_size;
+            reader->content_length = content_length;
+            reader->bytes_seen = http_bytes_seen;
+            reader->notify_task = xTaskGetCurrentTaskHandle();
+            BaseType_t ok = playback_create_task(
+                codec_http_reader_task,
+                "wav_http",
+                PLAYBACK_HTTP_READER_TASK_STACK,
+                reader,
+                4,
+                &reader_task,
+                0,
+                &reader->task_with_caps
+            );
+            if (ok != pdPASS) {
+                ESP_LOGW(
+                    TAG,
+                    "stream wav reader task create failed stack=%u internal=%u largest=%u; using direct playback",
+                    (unsigned)PLAYBACK_HTTP_READER_TASK_STACK,
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+                );
+                free(reader);
+                reader = NULL;
+                err = ESP_ERR_NO_MEM;
+            }
+        }
+    }
+    if (err != ESP_OK && !reader_task) {
+        codec_jitter_destroy(&jitter);
+        return stream_wav_direct_from_open_client(
+            client,
+            info,
+            initial_audio,
+            initial_audio_len,
+            read_buf,
+            read_size,
+            "wav reader unavailable; using direct playback"
+        );
+    }
+
+    uint8_t *decode_buf = NULL;
+    bool speaker_started = false;
+    if (err == ESP_OK) {
+        err = codec_jitter_wait_prebuffer(&jitter, prebuffer);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "stream wav prebuffer failed err=%s", esp_err_to_name(err));
+        }
+    }
+    if (err == ESP_OK) {
+        decode_buf = alloc_audio(read_size);
+        if (!decode_buf) {
+            err = ESP_ERR_NO_MEM;
+        }
+    }
+    if (err == ESP_OK) {
+        tater_protocol_send_log("info", "wav buffered playback");
+        err = tater_audio_speaker_begin();
+        if (err == ESP_OK) {
+            speaker_started = true;
+        } else {
+            ESP_LOGE(TAG, "speaker begin failed: %s", esp_err_to_name(err));
+        }
+    }
+
+    while (!s_abort && err == ESP_OK) {
+        bool eos = false;
+        int got = codec_jitter_read(&jitter, decode_buf, read_size, &eos);
+        if (got < 0) {
+            err = jitter.error == ESP_OK ? ESP_FAIL : jitter.error;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        err = wav_stream_process_data(info, &state, decode_buf, (size_t)got);
+        if (err != ESP_OK || eos) {
+            break;
+        }
+    }
+
+    if (err == ESP_OK && !s_abort && speaker_started) {
+        err = pcm_stream_flush(&state);
+    }
+    ESP_LOGI(
+        TAG,
+        "stream wav playback input_frames=%u output_frames=%u bytes=%u",
+        (unsigned)state.input_frames,
+        (unsigned)state.output_frames,
+        (unsigned)state.data_bytes_seen
+    );
+    if (speaker_started) {
+        esp_err_t end_err = tater_audio_speaker_end();
+        if (end_err != ESP_OK) {
+            ESP_LOGW(TAG, "speaker end failed err=%s", esp_err_to_name(end_err));
+        }
+    }
+
+    free(decode_buf);
+    if (err == ESP_OK && !s_abort) {
+        codec_jitter_close(&jitter);
+    } else {
+        codec_jitter_fail(&jitter, err == ESP_OK ? ESP_FAIL : err);
+    }
+    if (reader_task) {
+        uint32_t waited_ms = 0;
+        while (reader && !reader->done) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+            waited_ms += 100;
+            if (waited_ms == 6000 || (waited_ms > 6000 && (waited_ms % 5000) == 0)) {
+                ESP_LOGW(TAG, "wav reader still stopping after %u ms", (unsigned)waited_ms);
+            }
+        }
+    }
+    free(reader);
+    ESP_LOGI(
+        TAG,
+        "stream wav jitter read=%u wrote=%u high_water=%u",
+        (unsigned)jitter.total_read,
+        (unsigned)jitter.total_written,
+        (unsigned)jitter.high_water
+    );
+    codec_jitter_destroy(&jitter);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return s_abort ? ESP_FAIL : ESP_OK;
+}
+
 static esp_err_t stream_audio_url(const char *url)
 {
     esp_http_client_config_t cfg = {
@@ -1314,9 +1676,7 @@ static esp_err_t stream_audio_url(const char *url)
         ESP_LOGI(TAG, "playback content-type=%s hint=%s", content_type, stream_audio_type_name(hint_type));
     }
     wav_stream_info_t info = {0};
-    wav_stream_state_t state = {0};
     size_t header_len = 0;
-    bool started = false;
     bool header_ready = false;
 
     while (!s_abort) {
@@ -1373,26 +1733,18 @@ static esp_err_t stream_audio_url(const char *url)
                 info.bits_per_sample,
                 info.data_len
             );
-            err = tater_audio_speaker_begin();
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "speaker begin failed: %s", esp_err_to_name(err));
-                goto done;
-            }
-            started = true;
             header_ready = true;
-            err = wav_stream_process_data(&info, &state, header_buf + data_offset, header_len - data_offset);
-            if (err != ESP_OK) {
-                goto done;
-            }
-            continue;
-        }
-
-        err = wav_stream_process_data(&info, &state, read_buf, (size_t)got);
-        if (err != ESP_OK) {
+            err = stream_wav_from_open_client(
+                client,
+                &info,
+                header_buf + data_offset,
+                header_len - data_offset,
+                header_len,
+                read_buf,
+                PLAYBACK_HTTP_READ_SIZE,
+                content_length
+            );
             goto done;
-        }
-        if (info.data_len > 0 && state.data_bytes_seen >= info.data_len) {
-            break;
         }
     }
 
@@ -1400,24 +1752,8 @@ static esp_err_t stream_audio_url(const char *url)
         err = ESP_ERR_NOT_SUPPORTED;
         goto done;
     }
-    if (!s_abort) {
-        err = pcm_stream_flush(&state);
-    }
-    ESP_LOGI(
-        TAG,
-        "stream wav playback input_frames=%u output_frames=%u bytes=%u",
-        (unsigned)state.input_frames,
-        (unsigned)state.output_frames,
-        (unsigned)state.data_bytes_seen
-    );
 
 done:
-    if (started) {
-        esp_err_t end_err = tater_audio_speaker_end();
-        if (end_err != ESP_OK) {
-            ESP_LOGW(TAG, "speaker end failed err=%s", esp_err_to_name(end_err));
-        }
-    }
     esp_http_client_cleanup(client);
     free(read_buf);
     free(header_buf);
@@ -1585,34 +1921,37 @@ static void playback_task(void *arg)
     playback_args_t *request = (playback_args_t *)arg;
     char *url = request ? request->url : NULL;
     bool notify_finished = request ? request->notify_finished : true;
+    bool task_with_caps = request ? request->task_with_caps : false;
 
     s_playing = true;
     ESP_LOGI(TAG, "playback url=%s", url);
     tater_protocol_send_log("info", "playback started");
 
     esp_err_t err = stream_audio_url(url);
+    bool aborted = s_abort;
+    playback_mark_finished();
     if (notify_finished) {
-        if (!s_abort && err == ESP_OK) {
+        if (!aborted && err == ESP_OK) {
             tater_protocol_send_playback_finished();
             tater_protocol_send_log("info", "playback finished");
         } else {
             tater_protocol_send_playback_finished_status(false, false);
             tater_protocol_send_log("warn", "playback stopped or failed");
         }
-    } else if (!s_abort && err == ESP_OK) {
+    } else if (!aborted && err == ESP_OK) {
         tater_protocol_send_log("info", "local playback finished");
     } else {
         tater_protocol_send_log("warn", "local playback stopped or failed");
     }
     free(url);
     free(request);
-    playback_mark_finished();
-    vTaskDelete(NULL);
+    playback_delete_current_task(task_with_caps);
 }
 
 static void playback_memory_task(void *arg)
 {
     playback_memory_args_t *request = (playback_memory_args_t *)arg;
+    bool task_with_caps = request ? request->task_with_caps : false;
     wav_info_t wav;
     esp_err_t err = ESP_OK;
 
@@ -1641,12 +1980,13 @@ static void playback_memory_task(void *arg)
     }
     free(request);
     playback_mark_finished();
-    vTaskDelete(NULL);
+    playback_delete_current_task(task_with_caps);
 }
 
 static void tone_task(void *arg)
 {
     tone_args_t *tone = (tone_args_t *)arg;
+    bool task_with_caps = tone ? tone->task_with_caps : false;
     s_playing = true;
     ESP_LOGI(
         TAG,
@@ -1657,22 +1997,23 @@ static void tone_task(void *arg)
     );
     tater_protocol_send_log("info", "tone started");
     esp_err_t err = play_tone(tone->frequency_hz, tone->duration_ms, tone->volume_percent);
+    bool aborted = s_abort;
+    playback_mark_finished();
     if (tone->notify_finished) {
-        if (!s_abort && err == ESP_OK) {
+        if (!aborted && err == ESP_OK) {
             tater_protocol_send_playback_finished();
             tater_protocol_send_log("info", "tone finished");
         } else {
             tater_protocol_send_playback_finished_status(false, false);
             tater_protocol_send_log("warn", "tone stopped or failed");
         }
-    } else if (!s_abort && err == ESP_OK) {
+    } else if (!aborted && err == ESP_OK) {
         tater_protocol_send_log("info", "local tone finished");
     } else {
         tater_protocol_send_log("warn", "local tone stopped or failed");
     }
     free(tone);
-    playback_mark_finished();
-    vTaskDelete(NULL);
+    playback_delete_current_task(task_with_caps);
 }
 
 esp_err_t tater_playback_init(void)
@@ -1699,21 +2040,34 @@ static esp_err_t play_url(const char *url, bool notify_finished)
     if (!playback_begin_start()) {
         return ESP_ERR_TIMEOUT;
     }
+    playback_log_heap("playback start");
 
     playback_args_t *request = calloc(1, sizeof(*request));
     if (!request) {
+        playback_log_heap("playback request alloc failed");
         return playback_start_failed(ESP_ERR_NO_MEM);
     }
     request->url = strdup(url);
     if (!request->url) {
         free(request);
+        playback_log_heap("playback url alloc failed");
         return playback_start_failed(ESP_ERR_NO_MEM);
     }
     request->notify_finished = notify_finished;
-    BaseType_t ok = xTaskCreatePinnedToCore(playback_task, "tater_playback", PLAYBACK_URL_TASK_STACK, request, 5, &s_task, 1);
+    BaseType_t ok = playback_create_task(
+        playback_task,
+        "tater_playback",
+        PLAYBACK_URL_TASK_STACK,
+        request,
+        5,
+        &s_task,
+        1,
+        &request->task_with_caps
+    );
     if (ok != pdPASS) {
         free(request->url);
         free(request);
+        playback_log_heap("playback task create failed");
         return playback_start_failed(ESP_ERR_NO_MEM);
     }
     playback_end_start();
@@ -1747,7 +2101,16 @@ static esp_err_t play_wav_data_local(const uint8_t *data, size_t len, const char
     request->len = len;
     request->free_data = free_data;
     snprintf(request->label, sizeof(request->label), "%s", label ? label : "wake_sound");
-    BaseType_t ok = xTaskCreatePinnedToCore(playback_memory_task, "tater_wake_wav", 8192, request, 5, &s_task, 1);
+    BaseType_t ok = playback_create_task(
+        playback_memory_task,
+        "tater_wake_wav",
+        8192,
+        request,
+        5,
+        &s_task,
+        1,
+        &request->task_with_caps
+    );
     if (ok != pdPASS) {
         free(request);
         return playback_start_failed(ESP_ERR_NO_MEM);
@@ -1780,7 +2143,16 @@ static esp_err_t play_tone_async(uint32_t frequency_hz, uint32_t duration_ms, ui
     tone->duration_ms = duration_ms;
     tone->volume_percent = volume_percent;
     tone->notify_finished = notify_finished;
-    BaseType_t ok = xTaskCreatePinnedToCore(tone_task, "tater_tone", 4096, tone, 5, &s_task, 1);
+    BaseType_t ok = playback_create_task(
+        tone_task,
+        "tater_tone",
+        4096,
+        tone,
+        5,
+        &s_task,
+        1,
+        &tone->task_with_caps
+    );
     if (ok != pdPASS) {
         free(tone);
         return playback_start_failed(ESP_ERR_NO_MEM);

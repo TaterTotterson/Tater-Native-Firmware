@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #include "esp_err.h"
 #include "tater_protocol.h"
 
@@ -10,3 +13,5 @@ void tater_leds_show_setup_reset_clicks(uint8_t clicks, uint8_t required_clicks)
 void tater_leds_show_setup_reset_countdown(uint8_t remaining_steps, uint8_t total_steps);
 void tater_leds_show_setup_reset_success(void);
 void tater_leds_clear_setup_reset_feedback(void);
+void tater_leds_show_volume(uint8_t volume_percent);
+void tater_leds_show_mute(bool muted);

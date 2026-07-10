@@ -115,8 +115,8 @@ Satellite1 / Sat1:
 - S3 Box/display targets are not implemented yet.
 - M4A/AAC and OGG/Vorbis are intentionally not included until there is a real
   need for them.
-- Satellite1 currently reports XMOS version/update-required status; the Voice PE
-  automatic XMOS DFU flow is the complete auto-update path today.
+- Sat1 XMOS direct-flash recovery is newer than the Voice PE DFU path and still
+  needs more real-device testing across factory XMOS versions.
 
 ## How To Set Up
 
@@ -162,17 +162,26 @@ image, and reboots the board.
 Voice PE:
 
 ```sh
-./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101
+./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101 --board voicepe
 ```
 
 Satellite1 / Sat1:
 
 ```sh
-./scripts/flash_native_satellite_usb.py --board sat1 /dev/cu.usbmodem4101
+./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101 --board sat1
 ```
 
-Use `--no-erase` only when you intentionally want to preserve existing flash
-data.
+Factory images rewrite the full boot/partition/app layout and the device will
+need provisioning afterward. For local development on an already-provisioned
+device, flash the app image instead:
+
+```sh
+./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101 --app-image .pio/build/sat1/firmware.bin
+```
+
+`--app-image` writes the app slots only and leaves Wi-Fi/pairing setup data in
+place. `--no-erase` does not protect setup data when writing a factory image at
+`0x0`.
 
 ### First Boot Provisioning
 

@@ -42,7 +42,6 @@ volatile int mic_from_usb = appconfMIC_SRC_DEFAULT;
 volatile int aec_ref_source = appconfAEC_REF_DEFAULT;
 
 #define APP_I2S_STEREO_CHANNELS 2
-#define SAT1_BEAMFORMER_MIN_CONFIDENCE 8
 
 
 #if ON_TILE(SPEAKER_PIPELINE_TILE_NO)
@@ -61,87 +60,23 @@ static int32_t saturate_i32_from_i64(int64_t value)
 }
 
 #if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS >= 2
-static int clamp_beamformer_delay(int delay)
-{
-    if (delay > DOA_ESTIMATOR_MAX_LAG_SAMPLES) {
-        return DOA_ESTIMATOR_MAX_LAG_SAMPLES;
-    }
-    if (delay < -DOA_ESTIMATOR_MAX_LAG_SAMPLES) {
-        return -DOA_ESTIMATOR_MAX_LAG_SAMPLES;
-    }
-    return delay;
-}
-
-static int32_t shifted_mic_sample(const int32_t *mic, size_t index, int shift, size_t frame_count)
-{
-    int shifted = (int)index + shift;
-    if (shifted < 0) {
-        shifted = 0;
-    } else if ((size_t)shifted >= frame_count) {
-        shifted = (int)frame_count - 1;
-    }
-    return mic[shifted];
-}
-
-static int64_t aligned_pair_mean(const int32_t *mic0,
-                                 const int32_t *mic1,
-                                 size_t index,
-                                 size_t frame_count,
-                                 int delay)
-{
-    delay = clamp_beamformer_delay(delay);
-
-    /*
-     * Positive delay means mic1 best matches a later sample than mic0, so use
-     * that later mic1 sample when summing the pair. Negative delay does the
-     * same for mic0. This is a small delay-and-sum beamformer using the same
-     * lag estimate that drives DOA.
-     */
-    int mic0_shift = delay < 0 ? -delay : 0;
-    int mic1_shift = delay > 0 ? delay : 0;
-
-    int64_t s0 = shifted_mic_sample(mic0, index, mic0_shift, frame_count);
-    int64_t s1 = shifted_mic_sample(mic1, index, mic1_shift, frame_count);
-    return (s0 + s1) / 2;
-}
-
 static void mix_four_mics_for_pipeline(
         int32_t *pipeline_mic_ptr,
         const int32_t full_mic_frames[MIC_ARRAY_CONFIG_MIC_COUNT][MIC_ARRAY_CONFIG_SAMPLES_PER_FRAME],
-        size_t frame_count,
-        const doa_estimator_state_t *doa)
+        size_t frame_count)
 {
-    int ew_delay = 0;
-    int ns_delay = 0;
-
-    if (doa
-            && (doa->flags & DOA_ESTIMATOR_FLAG_VALID)
-            && doa->confidence >= SAT1_BEAMFORMER_MIN_CONFIDENCE) {
-        ew_delay = doa->sample_delay;
-        ns_delay = doa->vertical_delay;
-    }
-
     for (size_t i = 0; i < frame_count; i++) {
         int64_t east = full_mic_frames[0][i];
         int64_t west = full_mic_frames[1][i];
         int64_t north = full_mic_frames[2][i];
         int64_t south = full_mic_frames[3][i];
 
-        int64_t horizontal = aligned_pair_mean(full_mic_frames[0],
-                                               full_mic_frames[1],
-                                               i,
-                                               frame_count,
-                                               ew_delay);
-        int64_t vertical = aligned_pair_mean(full_mic_frames[2],
-                                             full_mic_frames[3],
-                                             i,
-                                             frame_count,
-                                             ns_delay);
-        int64_t beamformed = (horizontal + vertical) / 2;
-        int64_t omni = (east + west + north + south) / 4;
+        int64_t primary = (east + west + north + south) / 4;
+        int64_t spatial_ref = ((east - west) + (north - south)) / 4;
+        int64_t speech_ref = primary + (spatial_ref / 4);
 
-        pipeline_mic_ptr[i] = saturate_i32_from_i64(beamformed);
-        pipeline_mic_ptr[i + frame_count] = saturate_i32_from_i64(omni);
+        pipeline_mic_ptr[i] = saturate_i32_from_i64(primary);
+        pipeline_mic_ptr[i + frame_count] = saturate_i32_from_i64(speech_ref);
     }
 }
 #endif
@@ -260,14 +195,12 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
     if (received == frame_count) {
         int32_t *pipeline_mic_ptr = (int32_t *)pipeline_mic_frames;
 #if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS >= 2
+        mix_four_mics_for_pipeline(pipeline_mic_ptr, full_mic_frames, frame_count);
         doa_estimator_process_frame_4(full_mic_frames[0],
                                       full_mic_frames[1],
                                       full_mic_frames[2],
                                       full_mic_frames[3],
                                       frame_count);
-        doa_estimator_state_t doa;
-        doa_estimator_get_state(&doa);
-        mix_four_mics_for_pipeline(pipeline_mic_ptr, full_mic_frames, frame_count, &doa);
 #else
         for (int ch = 0; ch < appconfAUDIO_PIPELINE_CHANNELS; ch++) {
             memcpy(&pipeline_mic_ptr[ch * frame_count],

@@ -14,6 +14,7 @@
 #include "playback.h"
 #include "provisioning.h"
 #include <stdbool.h>
+#include <stdio.h>
 #include "tater_config.h"
 #include "tater_protocol.h"
 #include "wake_engine.h"
@@ -54,7 +55,10 @@ static void on_tater_play_url(const char *url, tater_state_t visual_state)
     esp_err_t err = tater_playback_play_url(url);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "playback start failed: %s", esp_err_to_name(err));
-        tater_protocol_send_log("error", "playback start failed");
+        char detail[96];
+        snprintf(detail, sizeof(detail), "playback start failed: %s", esp_err_to_name(err));
+        tater_protocol_send_log("error", detail);
+        tater_protocol_send_playback_finished_status(false, false);
     }
 }
 

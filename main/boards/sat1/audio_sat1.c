@@ -28,16 +28,21 @@
 
 static const char *TAG = "tater_audio_sat1";
 
-extern const uint8_t _binary_sat1_xmos_1_0_4_dev_11_factory_bin_start[] asm("_binary_sat1_xmos_1_0_4_dev_11_factory_bin_start");
-extern const uint8_t _binary_sat1_xmos_1_0_4_dev_11_factory_bin_end[] asm("_binary_sat1_xmos_1_0_4_dev_11_factory_bin_end");
+extern const uint8_t _binary_sat1_xmos_1_0_6_factory_bin_start[] asm("_binary_sat1_xmos_1_0_6_factory_bin_start");
+extern const uint8_t _binary_sat1_xmos_1_0_6_factory_bin_end[] asm("_binary_sat1_xmos_1_0_6_factory_bin_end");
 
 #define TATER_I2C_PORT I2C_NUM_0
 #define SAT1_SPI_HOST SPI2_HOST
+#define SAT1_CONTROL_RESOURCE_ID 1
 #define SAT1_CONTROL_CMD_READ_BIT 0x80
 #define SAT1_CONTROL_COMMAND_IGNORED 7
+#define SAT1_CONTROL_PAYLOAD_AVAILABLE 23
 #define SAT1_STATUS_REGISTER_LEN 4
+#define SAT1_STATUS_GPIO_IN_A 1
 #define SAT1_DFU_CONTROLLER_RESID 240
 #define SAT1_DFU_GET_VERSION (88 | SAT1_CONTROL_CMD_READ_BIT)
+#define SAT1_GPIO_RESOURCE_IN_A 211
+#define SAT1_GPIO_READ_PORT SAT1_CONTROL_CMD_READ_BIT
 #define SAT1_DOA_RESOURCE_ID 231
 #define SAT1_DOA_READ_STATE SAT1_CONTROL_CMD_READ_BIT
 #define SAT1_DOA_STATE_PAYLOAD_LEN 32
@@ -45,9 +50,9 @@ extern const uint8_t _binary_sat1_xmos_1_0_4_dev_11_factory_bin_end[] asm("_bina
 #define SAT1_DOA_FLAG_FOUR_MIC (1u << 1)
 #define SAT1_XMOS_TARGET_MAJOR 1
 #define SAT1_XMOS_TARGET_MINOR 0
-#define SAT1_XMOS_TARGET_PATCH 4
-#define SAT1_XMOS_TARGET_PRERELEASE 4
-#define SAT1_XMOS_TARGET_COUNTER 11
+#define SAT1_XMOS_TARGET_PATCH 6
+#define SAT1_XMOS_TARGET_PRERELEASE 0
+#define SAT1_XMOS_TARGET_COUNTER 0
 #define SAT1_XMOS_VERSION_READY_TIMEOUT_MS 8000
 #define SAT1_XMOS_VERSION_RETRY_DELAY_MS 250
 #define SAT1_XMOS_FLASH_PAGE_SIZE 256U
@@ -58,7 +63,16 @@ extern const uint8_t _binary_sat1_xmos_1_0_4_dev_11_factory_bin_end[] asm("_bina
 #define SAT1_XMOS_FLASH_WRITE_TIMEOUT_MS 100
 #define SAT1_XMOS_FLASH_ERASE_TIMEOUT_MS 2000
 #define SAT1_MIC_GAIN_Q8 2048
-#define SAT1_XMOS_PROCESSED_CHANNEL 0
+#define SAT1_XMOS_WAKE_CHANNEL 0
+#define SAT1_XMOS_STREAM_CHANNEL 1
+#define SAT1_STREAM_LEVELER_MIN_GAIN_Q8 256U
+#define SAT1_STREAM_LEVELER_MAX_GAIN_Q8 1280U
+#define SAT1_STREAM_LEVELER_TARGET_PEAK 11000U
+#define SAT1_STREAM_LEVELER_LOUD_PEAK 18000U
+#define SAT1_STREAM_LEVELER_SILENCE_PEAK 140U
+#define SAT1_STREAM_LEVELER_SILENCE_MEAN 18U
+#define SAT1_WAKE_DIAG_PEAK_THRESHOLD 128U
+#define SAT1_WAKE_DIAG_INTERVAL_US 2000000
 #define SAT1_SPK_DMA_DESC_NUM 4
 #define SAT1_SPK_DMA_FRAME_NUM 240
 #define SAT1_SPK_WRITE_FRAMES SAT1_SPK_DMA_FRAME_NUM
@@ -71,6 +85,8 @@ static SemaphoreHandle_t s_spi_mutex;
 static bool s_speaker_ready;
 static bool s_speaker_enabled;
 static bool s_speaker_primed;
+static bool s_speaker_session_active;
+static SemaphoreHandle_t s_speaker_mutex;
 static uint8_t s_tas_power_mode = 0xff;
 static portMUX_TYPE s_speaker_level_lock = portMUX_INITIALIZER_UNLOCKED;
 static float s_speaker_audio_level;
@@ -88,8 +104,13 @@ static tater_audio_xmos_status_t s_xmos_status = {
     .target_major = SAT1_XMOS_TARGET_MAJOR,
     .target_minor = SAT1_XMOS_TARGET_MINOR,
     .target_patch = SAT1_XMOS_TARGET_PATCH,
+    .target_prerelease = SAT1_XMOS_TARGET_PRERELEASE,
+    .target_counter = SAT1_XMOS_TARGET_COUNTER,
     .update_state = TATER_XMOS_UPDATE_IDLE,
 };
+static portMUX_TYPE s_control_status_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t s_control_status_register[SAT1_STATUS_REGISTER_LEN];
+static bool s_control_status_valid;
 
 static uint32_t read_u32_le(const uint8_t *payload)
 {
@@ -106,7 +127,30 @@ static int16_t read_i16_le(const uint8_t *payload)
 
 static size_t sat1_xmos_target_image_size(void)
 {
-    return (size_t)(_binary_sat1_xmos_1_0_4_dev_11_factory_bin_end - _binary_sat1_xmos_1_0_4_dev_11_factory_bin_start);
+    return (size_t)(_binary_sat1_xmos_1_0_6_factory_bin_end - _binary_sat1_xmos_1_0_6_factory_bin_start);
+}
+
+static esp_err_t speaker_session_take(void)
+{
+    if (!s_speaker_mutex) {
+        s_speaker_mutex = xSemaphoreCreateMutex();
+        ESP_RETURN_ON_FALSE(s_speaker_mutex, ESP_ERR_NO_MEM, TAG, "speaker mutex failed");
+    }
+    ESP_RETURN_ON_FALSE(
+        xSemaphoreTake(s_speaker_mutex, pdMS_TO_TICKS(5000)) == pdTRUE,
+        ESP_ERR_TIMEOUT,
+        TAG,
+        "speaker session lock timeout"
+    );
+    return ESP_OK;
+}
+
+static void speaker_session_give(void)
+{
+    if (s_speaker_mutex && s_speaker_session_active) {
+        s_speaker_session_active = false;
+        xSemaphoreGive(s_speaker_mutex);
+    }
 }
 
 static const char *sat1_xmos_prerelease_name(uint8_t prerelease)
@@ -118,7 +162,7 @@ static const char *sat1_xmos_prerelease_name(uint8_t prerelease)
         return "beta";
     case 3:
         return "rc";
-    case SAT1_XMOS_TARGET_PRERELEASE:
+    case 4:
         return "dev";
     default:
         return "";
@@ -439,13 +483,15 @@ static void xmos_status_set_update_flags(bool attempted, bool required)
     portEXIT_CRITICAL(&s_xmos_status_lock);
 }
 
-static void xmos_status_set_version(bool valid, uint8_t major, uint8_t minor, uint8_t patch)
+static void xmos_status_set_version(bool valid, const uint8_t version[5])
 {
     portENTER_CRITICAL(&s_xmos_status_lock);
     s_xmos_status.version_valid = valid;
-    s_xmos_status.major = major;
-    s_xmos_status.minor = minor;
-    s_xmos_status.patch = patch;
+    s_xmos_status.major = version ? version[0] : 0;
+    s_xmos_status.minor = version ? version[1] : 0;
+    s_xmos_status.patch = version ? version[2] : 0;
+    s_xmos_status.prerelease = version ? version[3] : 0;
+    s_xmos_status.counter = version ? version[4] : 0;
     portEXIT_CRITICAL(&s_xmos_status_lock);
 }
 
@@ -527,6 +573,34 @@ static esp_err_t sat1_spi_transfer(uint8_t *buf, size_t len)
     return err;
 }
 
+static void sat1_capture_control_status(const uint8_t *buf, size_t len)
+{
+    if (!buf || len < (2 + SAT1_STATUS_REGISTER_LEN)) {
+        return;
+    }
+    if (buf[0] != SAT1_CONTROL_RESOURCE_ID || buf[1] == SAT1_CONTROL_PAYLOAD_AVAILABLE) {
+        return;
+    }
+    portENTER_CRITICAL(&s_control_status_lock);
+    memcpy(s_control_status_register, &buf[2], SAT1_STATUS_REGISTER_LEN);
+    s_control_status_valid = true;
+    portEXIT_CRITICAL(&s_control_status_lock);
+}
+
+static bool sat1_control_status_snapshot(uint8_t *out, size_t len)
+{
+    if (!out || len < SAT1_STATUS_REGISTER_LEN) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_control_status_lock);
+    bool valid = s_control_status_valid;
+    if (valid) {
+        memcpy(out, s_control_status_register, SAT1_STATUS_REGISTER_LEN);
+    }
+    portEXIT_CRITICAL(&s_control_status_lock);
+    return valid;
+}
+
 static bool sat1_control_transfer(uint8_t resource_id, uint8_t command, uint8_t *payload, uint8_t payload_len)
 {
     if (!s_spi) {
@@ -551,7 +625,8 @@ static bool sat1_control_transfer(uint8_t resource_id, uint8_t command, uint8_t 
         if (sat1_spi_transfer(send_recv_buf, payload_len + 3 + (size_t)status_report_dummies) != ESP_OK) {
             return false;
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
+        sat1_capture_control_status(send_recv_buf, payload_len + 3 + (size_t)status_report_dummies);
+        vTaskDelay(1);
     } while (send_recv_buf[0] == SAT1_CONTROL_COMMAND_IGNORED && attempts-- > 0);
 
     if (send_recv_buf[0] == SAT1_CONTROL_COMMAND_IGNORED) {
@@ -568,7 +643,7 @@ static bool sat1_control_transfer(uint8_t resource_id, uint8_t command, uint8_t 
             if (sat1_spi_transfer(send_recv_buf, payload_len + 3) != ESP_OK) {
                 return false;
             }
-            vTaskDelay(pdMS_TO_TICKS(1));
+            vTaskDelay(1);
         } while (send_recv_buf[0] == SAT1_CONTROL_COMMAND_IGNORED && attempts-- > 0);
 
         if (send_recv_buf[0] == SAT1_CONTROL_COMMAND_IGNORED) {
@@ -582,11 +657,80 @@ static bool sat1_control_transfer(uint8_t resource_id, uint8_t command, uint8_t 
     return true;
 }
 
+esp_err_t tater_audio_sat1_read_buttons(uint8_t *buttons)
+{
+    if (!buttons) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t status[SAT1_STATUS_REGISTER_LEN] = {0};
+    bool status_valid = false;
+    uint8_t status_buttons = 0;
+    for (int attempt = 0; attempt < 2; attempt++) {
+        (void)sat1_control_transfer(0, 0, NULL, 0);
+        if (sat1_control_status_snapshot(status, sizeof(status))) {
+            status_buttons = status[SAT1_STATUS_GPIO_IN_A] & 0x0f;
+            status_valid = true;
+            break;
+        }
+        vTaskDelay(1);
+    }
+
+    uint8_t direct_payload[2] = {0};
+    bool direct_valid = sat1_control_transfer(SAT1_GPIO_RESOURCE_IN_A, SAT1_GPIO_READ_PORT, direct_payload, sizeof(direct_payload))
+        && direct_payload[0] == 0;
+    uint8_t direct_port = direct_payload[1];
+    uint8_t direct_high = (direct_port >> 4) & 0x0f;
+    uint8_t direct_low = direct_port & 0x0f;
+    uint8_t direct_buttons = (direct_high != 0 || direct_low == 0) ? direct_high : direct_low;
+
+    static bool have_diag = false;
+    static bool last_status_valid = false;
+    static bool last_direct_valid = false;
+    static uint8_t last_status_buttons = 0xff;
+    static uint8_t last_direct_port = 0xff;
+    static int64_t last_diag_us = 0;
+    int64_t now_us = esp_timer_get_time();
+    bool diag_changed =
+        !have_diag
+        || status_valid != last_status_valid
+        || direct_valid != last_direct_valid
+        || status_buttons != last_status_buttons
+        || direct_port != last_direct_port;
+    if (diag_changed || now_us - last_diag_us > 5000000) {
+        char message[128] = {0};
+        snprintf(
+            message,
+            sizeof(message),
+            "Sat1 button diag status=%s/0x%02x direct=%s/0x%02x direct_buttons=0x%02x",
+            status_valid ? "ok" : "fail",
+            status_buttons,
+            direct_valid ? "ok" : "fail",
+            direct_port,
+            direct_buttons
+        );
+        ESP_LOGI(TAG, "%s", message);
+        tater_protocol_send_log("info", message);
+        have_diag = true;
+        last_status_valid = status_valid;
+        last_direct_valid = direct_valid;
+        last_status_buttons = status_buttons;
+        last_direct_port = direct_port;
+        last_diag_us = now_us;
+    }
+
+    if (status_valid) {
+        *buttons = status_buttons;
+        return ESP_OK;
+    }
+    return ESP_FAIL;
+}
+
 static esp_err_t sat1_xmos_read_version(uint8_t version_out[5])
 {
     uint8_t version[5] = {0};
     if (!sat1_control_transfer(SAT1_DFU_CONTROLLER_RESID, SAT1_DFU_GET_VERSION, version, sizeof(version))) {
-        xmos_status_set_version(false, 0, 0, 0);
+        xmos_status_set_version(false, NULL);
         return ESP_FAIL;
     }
     bool nonzero = false;
@@ -594,13 +738,13 @@ static esp_err_t sat1_xmos_read_version(uint8_t version_out[5])
         nonzero = nonzero || version[i] != 0;
     }
     if (!nonzero) {
-        xmos_status_set_version(false, 0, 0, 0);
+        xmos_status_set_version(false, NULL);
         return ESP_FAIL;
     }
     if (version_out) {
         memcpy(version_out, version, sizeof(version));
     }
-    xmos_status_set_version(true, version[0], version[1], version[2]);
+    xmos_status_set_version(true, version);
     char formatted[32] = {0};
     sat1_xmos_format_version(version, formatted, sizeof(formatted));
     ESP_LOGI(TAG, "sat1 xmos firmware v%s", formatted);
@@ -640,7 +784,7 @@ static esp_err_t sat1_xmos_read_version_with_retry(uint8_t version_out[5], uint3
         phase ? phase : "startup",
         esp_err_to_name(last_err)
     );
-    xmos_status_set_version(false, 0, 0, 0);
+    xmos_status_set_version(false, NULL);
     return last_err == ESP_OK ? ESP_ERR_TIMEOUT : last_err;
 }
 
@@ -772,7 +916,7 @@ static void sat1_xmos_set_flash_progress(size_t done, size_t total, uint8_t *las
 
 static esp_err_t sat1_xmos_flash_target_image(void)
 {
-    const uint8_t *image = _binary_sat1_xmos_1_0_4_dev_11_factory_bin_start;
+    const uint8_t *image = _binary_sat1_xmos_1_0_6_factory_bin_start;
     const size_t image_size = sat1_xmos_target_image_size();
     ESP_RETURN_ON_FALSE(image && image_size > 0, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image missing");
     ESP_RETURN_ON_FALSE(image_size <= SAT1_XMOS_FLASH_TOTAL_SIZE, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image too large");
@@ -1019,7 +1163,7 @@ static void doa_task(void *arg)
                 ESP_LOGW(TAG, "sat1 doa read failed count=%lu err=%s", (unsigned long)s_doa_failed_reads, esp_err_to_name(err));
             }
         }
-        vTaskDelay(tater_protocol_voice_active() ? pdMS_TO_TICKS(50) : pdMS_TO_TICKS(175));
+        vTaskDelay(tater_protocol_voice_active() ? pdMS_TO_TICKS(25) : pdMS_TO_TICKS(125));
     }
 }
 
@@ -1143,6 +1287,49 @@ static void mic_level_stats(const int16_t *samples, size_t count, uint32_t *peak
     }
 }
 
+static uint16_t sat1_stream_leveler_target_gain_q8(uint32_t peak, uint32_t mean)
+{
+    if ((peak <= SAT1_STREAM_LEVELER_SILENCE_PEAK && mean <= SAT1_STREAM_LEVELER_SILENCE_MEAN)
+            || peak >= SAT1_STREAM_LEVELER_LOUD_PEAK) {
+        return SAT1_STREAM_LEVELER_MIN_GAIN_Q8;
+    }
+    if (peak == 0) {
+        return SAT1_STREAM_LEVELER_MIN_GAIN_Q8;
+    }
+
+    uint32_t gain = (SAT1_STREAM_LEVELER_TARGET_PEAK * SAT1_STREAM_LEVELER_MIN_GAIN_Q8) / peak;
+    if (gain < SAT1_STREAM_LEVELER_MIN_GAIN_Q8) {
+        gain = SAT1_STREAM_LEVELER_MIN_GAIN_Q8;
+    }
+    if (gain > SAT1_STREAM_LEVELER_MAX_GAIN_Q8) {
+        gain = SAT1_STREAM_LEVELER_MAX_GAIN_Q8;
+    }
+    return (uint16_t)gain;
+}
+
+static uint16_t sat1_stream_leveler_update_gain_q8(uint16_t current_gain_q8, uint16_t target_gain_q8)
+{
+    if (current_gain_q8 < SAT1_STREAM_LEVELER_MIN_GAIN_Q8) {
+        current_gain_q8 = SAT1_STREAM_LEVELER_MIN_GAIN_Q8;
+    }
+    if (target_gain_q8 > current_gain_q8) {
+        return (uint16_t)(((uint32_t)current_gain_q8 + ((uint32_t)target_gain_q8 * 3U)) / 4U);
+    }
+    return (uint16_t)((((uint32_t)current_gain_q8 * 7U) + (uint32_t)target_gain_q8) / 8U);
+}
+
+static void sat1_apply_stream_leveler(int16_t *samples, size_t count, uint16_t gain_q8)
+{
+    if (!samples || count == 0 || gain_q8 <= SAT1_STREAM_LEVELER_MIN_GAIN_Q8) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        int32_t sample = samples[i];
+        sample = (sample * (int32_t)gain_q8) / (int32_t)SAT1_STREAM_LEVELER_MIN_GAIN_Q8;
+        samples[i] = clamp_s16(sample);
+    }
+}
+
 static float clamp_audio_level(float level)
 {
     if (level <= 0.0f) {
@@ -1196,15 +1383,19 @@ static void audio_task(void *arg)
     (void)arg;
     int32_t rx[TATER_MIC_SOURCE_CHUNK_FRAMES * TATER_MIC_SOURCE_CHANNELS];
     int16_t mono[TATER_MIC_CHUNK_FRAMES];
+    int16_t mono_stream[TATER_MIC_CHUNK_FRAMES];
     uint32_t active_read_errors = 0;
     uint32_t active_chunks = 0;
+    int64_t last_wake_diag_us = 0;
     bool last_active = false;
+    uint16_t stream_leveler_gain_q8 = SAT1_STREAM_LEVELER_MIN_GAIN_Q8;
 
     while (true) {
         bool active = tater_protocol_voice_active() && tater_protocol_is_connected();
         if (active && !last_active) {
             active_read_errors = 0;
             active_chunks = 0;
+            stream_leveler_gain_q8 = SAT1_STREAM_LEVELER_MIN_GAIN_Q8;
             ESP_LOGI(TAG, "sat1 mic stream active; waiting for i2s frames");
         }
         last_active = active;
@@ -1229,59 +1420,114 @@ static void audio_task(void *arg)
         }
 
         for (size_t i = 0; i < out_frames; i++) {
-            mono[i] = sat1_xmos_channel_48k_to_16k(rx, i * 3, SAT1_XMOS_PROCESSED_CHANNEL);
+            mono[i] = sat1_xmos_channel_48k_to_16k(rx, i * 3, SAT1_XMOS_WAKE_CHANNEL);
+            mono_stream[i] = sat1_xmos_channel_48k_to_16k(rx, i * 3, SAT1_XMOS_STREAM_CHANNEL);
         }
 
-        tater_audio_aec_process_mic(mono, out_frames);
+        uint32_t agc_peak = 0;
+        uint32_t agc_mean = 0;
+        uint32_t ns_peak = 0;
+        uint32_t ns_mean = 0;
+        mic_level_stats(mono, out_frames, &agc_peak, &agc_mean);
+        mic_level_stats(mono_stream, out_frames, &ns_peak, &ns_mean);
+
         tater_wake_engine_note_audio(mono, out_frames);
         if (!active) {
             tater_wake_engine_process(mono, out_frames);
+            uint32_t loudest_peak = agc_peak > ns_peak ? agc_peak : ns_peak;
+            int64_t now_us = esp_timer_get_time();
+            if (loudest_peak >= SAT1_WAKE_DIAG_PEAK_THRESHOLD
+                    && now_us - last_wake_diag_us >= SAT1_WAKE_DIAG_INTERVAL_US) {
+                ESP_LOGD(
+                    TAG,
+                    "sat1 wake mic levels agc_peak=%u agc_mean=%u ns_peak=%u ns_mean=%u selected=%s",
+                    (unsigned)agc_peak,
+                    (unsigned)agc_mean,
+                    (unsigned)ns_peak,
+                    (unsigned)ns_mean,
+                    "wake_aec_ns_agc"
+                );
+                last_wake_diag_us = now_us;
+            }
         }
 
         if (active) {
+            tater_audio_aec_process_mic(mono_stream, out_frames);
+            uint32_t stream_peak_before = 0;
+            uint32_t stream_mean_before = 0;
+            mic_level_stats(mono_stream, out_frames, &stream_peak_before, &stream_mean_before);
+            uint16_t target_gain_q8 = sat1_stream_leveler_target_gain_q8(stream_peak_before, stream_mean_before);
+            stream_leveler_gain_q8 = sat1_stream_leveler_update_gain_q8(stream_leveler_gain_q8, target_gain_q8);
+            sat1_apply_stream_leveler(mono_stream, out_frames, stream_leveler_gain_q8);
             if (active_chunks < 3) {
                 uint32_t peak = 0;
                 uint32_t mean = 0;
-                mic_level_stats(mono, out_frames, &peak, &mean);
+                mic_level_stats(mono_stream, out_frames, &peak, &mean);
                 ESP_LOGI(
                     TAG,
-                    "sat1 mic chunk %u frames=%u source_frames=%u bytes=%u peak=%u mean=%u gain_q8=%u xmos_channel=processed_aec_ic_ns_agc",
+                    "sat1 mic chunk %u frames=%u source_frames=%u bytes=%u peak=%u mean=%u gain_q8=%u leveler_q8=%u leveler_in_peak=%u xmos_channel=%s agc_peak=%u ns_peak=%u",
                     (unsigned)(active_chunks + 1),
                     (unsigned)out_frames,
                     (unsigned)source_frames,
                     (unsigned)bytes_read,
                     (unsigned)peak,
                     (unsigned)mean,
-                    (unsigned)SAT1_MIC_GAIN_Q8
+                    (unsigned)SAT1_MIC_GAIN_Q8,
+                    (unsigned)stream_leveler_gain_q8,
+                    (unsigned)stream_peak_before,
+                    "aec_ns_no_agc",
+                    (unsigned)agc_peak,
+                    (unsigned)ns_peak
                 );
             }
             active_chunks++;
-            tater_protocol_send_audio(mono, out_frames);
+            tater_protocol_send_audio(mono_stream, out_frames);
         }
     }
 }
 
 void tater_audio_i2s_start_task(void)
 {
+    if (!s_speaker_mutex) {
+        s_speaker_mutex = xSemaphoreCreateMutex();
+    }
     xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
     xTaskCreatePinnedToCore(doa_task, "tater_doa", 4096, NULL, 4, NULL, 0);
 }
 
 esp_err_t tater_audio_speaker_begin(void)
 {
+    ESP_RETURN_ON_ERROR(speaker_session_take(), TAG, "speaker session lock failed");
     if (!s_tx_chan) {
+        xSemaphoreGive(s_speaker_mutex);
         return ESP_ERR_INVALID_STATE;
     }
     reset_speaker_audio_level();
     ESP_ERROR_CHECK_WITHOUT_ABORT(pcm5122_set_mute(true));
-    ESP_RETURN_ON_ERROR(tas2780_activate(0), TAG, "tas activate failed");
+    esp_err_t err = tas2780_activate(0);
+    if (err != ESP_OK) {
+        xSemaphoreGive(s_speaker_mutex);
+        ESP_LOGE(TAG, "tas activate failed: %s", esp_err_to_name(err));
+        return err;
+    }
     if (s_speaker_enabled) {
-        ESP_RETURN_ON_ERROR(i2s_channel_disable(s_tx_chan), TAG, "speaker i2s disable failed");
+        err = i2s_channel_disable(s_tx_chan);
+        if (err != ESP_OK) {
+            xSemaphoreGive(s_speaker_mutex);
+            ESP_LOGE(TAG, "speaker i2s disable failed: %s", esp_err_to_name(err));
+            return err;
+        }
         s_speaker_enabled = false;
     }
-    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx_chan), TAG, "speaker i2s enable failed");
+    err = i2s_channel_enable(s_tx_chan);
+    if (err != ESP_OK) {
+        xSemaphoreGive(s_speaker_mutex);
+        ESP_LOGE(TAG, "speaker i2s enable failed: %s", esp_err_to_name(err));
+        return err;
+    }
     s_speaker_enabled = true;
     s_speaker_primed = false;
+    s_speaker_session_active = true;
     return ESP_OK;
 }
 
@@ -1363,6 +1609,7 @@ esp_err_t tater_audio_speaker_end(void)
     s_speaker_enabled = false;
     s_speaker_primed = false;
     reset_speaker_audio_level();
+    speaker_session_give();
     return result;
 }
 

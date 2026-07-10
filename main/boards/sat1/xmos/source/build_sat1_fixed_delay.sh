@@ -9,6 +9,7 @@ PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/bin/python3.10}"
 VENV_DIR="${ROOT_DIR}/.venv"
 BUILD_DIR="${ROOT_DIR}/build"
 TARGET="satellite1_firmware_fixed_delay"
+CLEAN_BUILD="${XMOS_CLEAN_BUILD:-1}"
 
 if [[ ! -x "${XTC_DIR}/bin/xcc" ]]; then
   echo "XTC Tools not found at ${XTC_DIR}."
@@ -53,6 +54,10 @@ export XMOS_CACHE_PATH="${XMOS_HOME}/cache"
 export XMOS_REPO_PATH="${XMOS_HOME}/repos"
 export XMOS_MAKE_PATH="${XTC_DIR}/build"
 export XMOS_CMAKE_PATH="${XTC_DIR}/build/xcommon_cmake"
+
+if [[ "${CLEAN_BUILD}" != "0" ]]; then
+  rm -rf "${BUILD_DIR}"
+fi
 
 "${CMAKE_BIN}" \
   -G Ninja \
