@@ -1,6 +1,6 @@
 # Tater Native Satellite Firmware
 
-Native firmware for official Tater voice satellites.
+Native firmware for Tater-managed voice satellites.
 
 The goal is to make satellites behave like dedicated Tater appliances instead
 of configurable ESPHome nodes:
@@ -18,10 +18,11 @@ of configurable ESPHome nodes:
 - Voice PE: `voicepe`
 - Satellite1 / Sat1: `sat1` build environment, `satellite1` release key
 - ReSpeaker XVF3800: `respeaker_xvf3800`
+- ESP32-S3-BOX-3 Display: `s3_box`
 
 All targets are ESP32-S3 native firmware images that connect directly to Tater
 over the native satellite WebSocket protocol. ReSpeaker XVF3800 uses an 8MB
-flash layout; Voice PE and Sat1 use the 16MB layout.
+flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 
 ### Provisioning And Pairing
 
@@ -80,6 +81,8 @@ flash layout; Voice PE and Sat1 use the 16MB layout.
 - Per-device LED color, brightness, and animation settings
 - Directional listening animation from XMOS DoA where available
 - Tool-call visual hold until the final response
+- Display targets render Tater state, clock/date, assistant name, volume/mute,
+  and Tater-provided status/stat cards instead of LED-ring animations
 - Short press stops playback or timer ringing
 - Hold starts push-to-talk/intercom behavior handled by Tater
 - Physical setup reset click progress, countdown, and success feedback
@@ -125,15 +128,26 @@ ReSpeaker XVF3800:
 - Mute state bridged through the XVF3800 control interface
 - 8MB flash layout with two OTA app slots
 
+ESP32-S3-BOX-3 Display:
+
+- 320x240 LCD with Tater-themed display UI
+- Tater assistant name, online state, voice state, clock, date, volume, mute,
+  and configured display stats
+- Display feed polling from Tater with room/profile targeting
+- 48 kHz stereo I2S microphone capture downsampled into the 16 kHz wake/STT path
+- Shared-duplex I2S speaker playback
+- Display-backed setup reset, volume, mute, timer, OTA, provisioning, and voice
+  state feedback
+- 16MB flash layout with two OTA app slots
+
 ### Current Limits
 
-- S3 Box/display targets are not implemented yet.
 - M4A/AAC and OGG/Vorbis are intentionally not included until there is a real
   need for them.
 - Sat1 XMOS direct-flash recovery is newer than the Voice PE DFU path and still
   needs more real-device testing across factory XMOS versions.
-- ReSpeaker XVF3800 support is first-pass native firmware and still needs
-  hands-on wake, playback, DoA, and physical mute validation after provisioning.
+- S3 Box display feed depends on Tater being reachable; the display falls back
+  to local state/clock placeholders when server-fed stats are unavailable.
 
 ## How To Set Up
 
@@ -192,6 +206,12 @@ ReSpeaker XVF3800:
 
 ```sh
 ./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101 --board respeaker_xvf3800
+```
+
+ESP32-S3-BOX-3 Display:
+
+```sh
+./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101 --board s3_box
 ```
 
 Factory images rewrite the full boot/partition/app layout and the device will
@@ -254,7 +274,9 @@ center/action button.
 Do not hold the center button while plugging in or resetting the board. On these
 ESP32-S3 boards, GPIO0 is also a bootloader strap pin.
 
-For ReSpeaker XVF3800, use Tater setup reset or USB recovery for now.
+For ReSpeaker XVF3800, the mute switch can also trigger setup reset: toggle it
+8 times within the reset window, then leave mute on for 5 seconds. Tater setup
+reset and USB recovery remain available.
 
 ### Bench Testing Unpaired Devices
 
@@ -283,6 +305,7 @@ main/
     voice_pe/                 Voice PE board implementation
     sat1/                     Satellite1 board implementation
     respeaker_xvf3800/        ReSpeaker XVF3800 board implementation
+    s3_box/                   ESP32-S3-BOX-3 display board implementation
 scripts/
   build_native_firmware_manifest.py
   flash_native_satellite_usb.py
@@ -302,10 +325,10 @@ cd /Users/ahphooey/Scripts/Tater-Native-Firmware
 platformio run
 ```
 
-Build both official targets:
+Build all supported targets:
 
 ```sh
-platformio run -e voicepe -e sat1 -e respeaker_xvf3800
+platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
 ```
 
 Build outputs:
@@ -317,6 +340,8 @@ Build outputs:
 .pio/build/sat1/firmware.factory.bin
 .pio/build/respeaker_xvf3800/firmware.bin
 .pio/build/respeaker_xvf3800/firmware.factory.bin
+.pio/build/s3_box/firmware.bin
+.pio/build/s3_box/firmware.factory.bin
 ```
 
 Flash from source with PlatformIO:
@@ -326,7 +351,8 @@ platformio run -e voicepe -t upload --upload-port /dev/cu.usbmodem4101
 platformio device monitor --port /dev/cu.usbmodem4101 --baud 115200
 ```
 
-For Sat1, use `-e sat1`.
+For Sat1, ReSpeaker XVF3800, or S3 Box, use `-e sat1`,
+`-e respeaker_xvf3800`, or `-e s3_box`.
 
 ### Package Local Release Assets
 
