@@ -67,6 +67,7 @@ constexpr int32_t kFrontendValueDiv = 666;
 constexpr size_t kWakeManifestMaxBytes = 16 * 1024;
 constexpr size_t kWakeDownloadedModelMaxBytes = 512 * 1024;
 constexpr size_t kWakeDownloadedSoundMaxBytes = 512 * 1024;
+constexpr int64_t kWakeDownloadStaleUs = 30000000;
 constexpr size_t kCaptureBufferSamples = kAudioSampleRate * 3;
 constexpr size_t kCaptureUploadBufferSize = 2048;
 constexpr int kCaptureUploadTimeoutMs = 15000;
@@ -96,6 +97,7 @@ struct DownloadedWakeModel {
 
 struct WakeDownloadRequest {
     char url[256];
+    uint32_t generation;
 };
 
 struct WakeSoundDownloadRequest {
@@ -190,6 +192,8 @@ uint32_t s_custom_download_failures = 0;
 uint32_t s_custom_cache_hits = 0;
 uint32_t s_custom_cache_writes = 0;
 uint32_t s_custom_cache_failures = 0;
+uint32_t s_custom_download_generation = 0;
+int64_t s_custom_download_started_us = 0;
 char s_requested_wake_sound_url[192] = "";
 char s_downloading_wake_sound_url[192] = "";
 bool s_wake_sound_download_running = false;
@@ -494,6 +498,9 @@ bool http_download_to_memory(const char *url, size_t max_bytes, bool null_termin
     cfg.timeout_ms = 20000;
     cfg.buffer_size = 4096;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.user_agent = "Tater-Native-Satellite/0.1";
+    cfg.max_redirection_count = 4;
+    cfg.disable_auto_redirect = false;
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
         heap_caps_free(buffer);
@@ -1694,13 +1701,20 @@ esp_err_t play_custom_wake_sound(const char *url)
     return ESP_ERR_NOT_FOUND;
 }
 
-void set_custom_download_running(bool running, const char *url)
+void set_custom_download_running(bool running, const char *url, uint32_t generation)
 {
     if (s_custom_model_lock) {
         xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
     }
+    if (!running && generation != 0 && generation != s_custom_download_generation) {
+        if (s_custom_model_lock) {
+            xSemaphoreGive(s_custom_model_lock);
+        }
+        return;
+    }
     s_custom_download_running = running;
     std::snprintf(s_downloading_custom_url, sizeof(s_downloading_custom_url), "%s", running && url ? url : "");
+    s_custom_download_started_us = running ? esp_timer_get_time() : 0;
     if (s_custom_model_lock) {
         xSemaphoreGive(s_custom_model_lock);
     }
@@ -1729,8 +1743,10 @@ void wake_model_download_task(void *arg)
 {
     WakeDownloadRequest *request = static_cast<WakeDownloadRequest *>(arg);
     char requested_url[sizeof(request->url)] = {0};
+    uint32_t request_generation = 0;
     if (request) {
         std::snprintf(requested_url, sizeof(requested_url), "%s", request->url);
+        request_generation = request->generation;
         heap_caps_free(request);
     }
 
@@ -1786,7 +1802,7 @@ done:
     if (model.data) {
         heap_caps_free(model.data);
     }
-    set_custom_download_running(false, "");
+    set_custom_download_running(false, "", request_generation);
     vTaskDelete(NULL);
 }
 
@@ -1838,19 +1854,25 @@ bool start_custom_wake_model_download(const char *url)
         }
         return true;
     }
+    uint32_t request_generation = 0;
     if (s_custom_model_lock) {
         xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
     }
     bool already_running = s_custom_download_running;
     bool already_requested = std::strcmp(s_requested_custom_url, url) == 0;
-    if (already_running || already_requested) {
+    bool stale_running = already_running && s_custom_download_started_us > 0 &&
+        (esp_timer_get_time() - s_custom_download_started_us) > kWakeDownloadStaleUs;
+    if (already_requested && already_running && !stale_running) {
         if (s_custom_model_lock) {
             xSemaphoreGive(s_custom_model_lock);
         }
         return s_ready;
     }
     std::snprintf(s_requested_custom_url, sizeof(s_requested_custom_url), "%s", url);
+    s_custom_download_generation++;
+    request_generation = s_custom_download_generation;
     s_custom_download_running = true;
+    s_custom_download_started_us = esp_timer_get_time();
     std::snprintf(s_downloading_custom_url, sizeof(s_downloading_custom_url), "%s", url);
     if (s_custom_model_lock) {
         xSemaphoreGive(s_custom_model_lock);
@@ -1858,15 +1880,16 @@ bool start_custom_wake_model_download(const char *url)
 
     WakeDownloadRequest *request = static_cast<WakeDownloadRequest *>(heap_caps_calloc(1, sizeof(WakeDownloadRequest), MALLOC_CAP_8BIT));
     if (!request) {
-        set_custom_download_running(false, "");
+        set_custom_download_running(false, "", request_generation);
         set_last_error("custom wake request alloc failed");
         return false;
     }
     std::snprintf(request->url, sizeof(request->url), "%s", url);
-    BaseType_t created = xTaskCreatePinnedToCore(wake_model_download_task, "wake_model_dl", 8192, request, 4, NULL, 1);
+    request->generation = request_generation;
+    BaseType_t created = xTaskCreatePinnedToCore(wake_model_download_task, "wake_model_dl", 8192, request, 4, NULL, 0);
     if (created != pdPASS) {
         heap_caps_free(request);
-        set_custom_download_running(false, "");
+        set_custom_download_running(false, "", request_generation);
         set_last_error("custom wake download task failed");
         return false;
     }

@@ -3,7 +3,7 @@
 #include "driver/gpio.h"
 
 #define TATER_BOARD_ID "satellite1"
-#define TATER_FIRMWARE_VERSION "native-satellite1-0.1.38"
+#define TATER_FIRMWARE_VERSION "native-satellite1-0.1.39"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6

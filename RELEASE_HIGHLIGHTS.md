@@ -1,0 +1,3 @@
+- Fixes custom wake-word switching so a stale or stuck download can no longer block the newly selected remote wake model.
+- Custom wake-word downloads now include explicit GitHub/raw URL redirect handling and a Tater user agent.
+- Keeps custom wake model downloads off the Sat1 audio core to reduce audio-task contention while models are fetched.
