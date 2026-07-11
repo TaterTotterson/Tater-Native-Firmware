@@ -11,6 +11,11 @@ of configurable ESPHome nodes:
 - official release images for supported hardware
 - Tater handles the intelligence; firmware handles the hardware
 
+Wake-word models now live in the
+[Tater Wake Words](https://github.com/TaterTotterson/Tater-Wake-Words) repo.
+Use that repo to browse shared microWakeWord packages or request/build new
+custom wake words for Tater Native satellites.
+
 ## Features
 
 ### Supported Hardware
