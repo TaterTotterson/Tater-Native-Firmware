@@ -1,3 +1,3 @@
-- Fixes custom wake-word switching so a stale or stuck download can no longer block the newly selected remote wake model.
-- Custom wake-word downloads now include explicit GitHub/raw URL redirect handling and a Tater user agent.
-- Keeps custom wake model downloads off the Sat1 audio core to reduce audio-task contention while models are fetched.
+- Improves native Tater OTA reliability by reducing the firmware HTTP download memory footprint.
+- Adds OTA stage-specific failure logs with heap diagnostics so update failures are easier to diagnose.
+- Pauses S3 Box display-feed HTTP polling while OTA is running to avoid memory contention during updates.

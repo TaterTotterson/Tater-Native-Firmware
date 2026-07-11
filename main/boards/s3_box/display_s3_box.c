@@ -24,6 +24,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "native_settings.h"
+#include "ota_update.h"
 #include "tater_protocol.h"
 
 #if TATER_BOARD_S3_BOX
@@ -1394,7 +1395,7 @@ static void display_feed_task(void *arg)
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(8000));
     while (true) {
-        if (s_display_ready && tater_protocol_is_connected()) {
+        if (s_display_ready && tater_protocol_is_connected() && !tater_ota_is_running()) {
             bool ok = fetch_display_feed();
             ESP_LOGI(TAG, "display feed refresh %s", ok ? "ok" : "empty");
         }
