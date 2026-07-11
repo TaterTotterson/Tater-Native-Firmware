@@ -52,8 +52,8 @@ jobs:
             --release-tag "$TAG" \
             --release-dir "$RELEASE_DIR"
 
-          VERSION="$(python -c 'import json; print(json.load(open("prebuilt_firmware/latest.json", encoding="utf-8"))["version"])')"
-          DISPLAY_VERSION="$(python -c 'import json; data=json.load(open("prebuilt_firmware/latest.json", encoding="utf-8")); print(data.get("display_version") or data["version"])')"
+          VERSION="$(python -c 'import json; print(json.load(open("'"${RELEASE_DIR}"'/latest.json", encoding="utf-8"))["version"])')"
+          DISPLAY_VERSION="$(python -c 'import json; data=json.load(open("'"${RELEASE_DIR}"'/latest.json", encoding="utf-8")); print(data.get("display_version") or data["version"])')"
           if [ "$TAG" != "$VERSION" ]; then
             echo "Tag ${TAG} does not match firmware version ${VERSION}." >&2
             exit 1

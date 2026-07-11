@@ -328,7 +328,7 @@ platformio device monitor --port /dev/cu.usbmodem4101 --baud 115200
 
 For Sat1, use `-e sat1`.
 
-### Package Local Manifest Artifacts
+### Package Local Release Assets
 
 After a successful build:
 
@@ -339,15 +339,16 @@ After a successful build:
 Use `--board voicepe`, `--board satellite1`, `--board respeaker_xvf3800`, or
 `--board s3_box` to package a single board.
 
-This writes:
+This writes local release-style assets under `release_assets/<version>/`:
 
-- `prebuilt_firmware/latest.json`
-- `prebuilt_firmware/native-x.y.z.json`
-- `prebuilt_firmware/<board>/native-<board>-x.y.z/firmware.bin`
-- `prebuilt_firmware/<board>/native-<board>-x.y.z/firmware.factory.bin`
+- `latest.json`
+- `native-x.y.z-manifest.json`
+- `native-<board>-x.y.z-<board>-ota.bin`
+- `native-<board>-x.y.z-<board>-factory.bin`
 
-Tater uses `firmware.bin` for native OTA and `firmware.factory.bin` for USB
-recovery/first flash.
+Tater OTA uses the GitHub Release `ota` artifacts. USB recovery and first flash
+use the GitHub Release `factory` artifacts, or a local factory image passed
+directly to the USB flash script.
 
 ### Release Tags
 

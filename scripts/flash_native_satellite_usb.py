@@ -8,14 +8,12 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 
 FIRMWARE_ROOT = Path(__file__).resolve().parents[1]
-LOCAL_LATEST = FIRMWARE_ROOT / "prebuilt_firmware" / "latest.json"
 DEFAULT_LATEST_URL = "https://github.com/TaterTotterson/Tater-Native-Firmware/releases/latest/download/latest.json"
 CACHE_ROOT = Path.home() / ".taterassistant" / "native_firmware_cache"
 APP_PARTITION_OFFSETS = ["0x20000", "0x320000", "0x620000"]
@@ -48,11 +46,17 @@ def read_json_url(url: str) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8", errors="replace"))
 
 
-def raw_url(path_or_url: str, latest_url: str) -> str:
+def is_url(value: str) -> bool:
+    return value.startswith(("http://", "https://"))
+
+
+def raw_url(path_or_url: str, latest_source: str) -> str:
     if path_or_url.startswith(("http://", "https://")):
         return path_or_url
-    if "raw.githubusercontent.com" in latest_url:
-        parts = latest_url.split("/")
+    if is_url(latest_source) and "/releases/download/" in latest_source:
+        return f"{latest_source.rsplit('/', 1)[0]}/{path_or_url.lstrip('/')}"
+    if "raw.githubusercontent.com" in latest_source:
+        parts = latest_source.split("/")
         try:
             base = "/".join(parts[:7])
             return f"{base}/{path_or_url.lstrip('/')}"
@@ -61,40 +65,33 @@ def raw_url(path_or_url: str, latest_url: str) -> str:
     return f"https://raw.githubusercontent.com/TaterTotterson/Tater-Native-Firmware/main/{path_or_url.lstrip('/')}"
 
 
-def local_repo_path(path_or_url: str) -> Path | None:
-    if path_or_url.startswith(("http://", "https://")):
+def local_ref_path(path_or_url: str, source: str) -> Path | None:
+    if is_url(path_or_url):
         return None
-    clean = path_or_url.lstrip("/")
-    if clean.startswith("firmware/native_satellite/"):
-        clean = clean[len("firmware/native_satellite/") :]
-    return FIRMWARE_ROOT / clean
+    path = Path(path_or_url).expanduser()
+    if path.is_absolute():
+        return path
+    if source and not is_url(source):
+        return Path(source).expanduser().resolve().parent / path_or_url
+    return FIRMWARE_ROOT / path_or_url
 
 
-def load_manifest(latest_url: str, *, prefer_local: bool = False) -> tuple[dict[str, Any], str]:
-    if prefer_local and LOCAL_LATEST.is_file():
-        latest = read_json_path(LOCAL_LATEST)
-        manifest_ref = text(latest.get("manifest"))
-        manifest_path = local_repo_path(manifest_ref)
-        if manifest_path and manifest_path.is_file():
-            return read_json_path(manifest_path), str(manifest_path)
-
-    try:
+def load_manifest(latest_url: str, *, latest_file: str = "") -> tuple[dict[str, Any], str]:
+    latest_path = Path(latest_file).expanduser().resolve() if latest_file else None
+    if latest_path:
+        latest = read_json_path(latest_path)
+        latest_source = str(latest_path)
+    else:
+        latest_source = latest_url
         latest = read_json_url(latest_url)
-        manifest_ref = text(latest.get("manifest"))
-        if not manifest_ref:
-            raise SystemExit("Native firmware latest.json is missing manifest.")
-        manifest_url = raw_url(manifest_ref, latest_url)
-        return read_json_url(manifest_url), manifest_url
-    except Exception as exc:
-        if prefer_local or not LOCAL_LATEST.is_file():
-            raise
-        print(f"Remote manifest unavailable ({exc}); falling back to local prebuilt firmware.")
-        latest = read_json_path(LOCAL_LATEST)
-        manifest_ref = text(latest.get("manifest"))
-        manifest_path = local_repo_path(manifest_ref)
-        if manifest_path and manifest_path.is_file():
-            return read_json_path(manifest_path), str(manifest_path)
-        raise
+    manifest_ref = text(latest.get("manifest"))
+    if not manifest_ref:
+        raise SystemExit("Native firmware latest.json is missing manifest.")
+    manifest_path = local_ref_path(manifest_ref, latest_source)
+    if manifest_path and manifest_path.is_file():
+        return read_json_path(manifest_path), str(manifest_path)
+    manifest_url = raw_url(manifest_ref, latest_source)
+    return read_json_url(manifest_url), manifest_url
 
 
 def normalize_board_key(board: str) -> str:
@@ -109,6 +106,10 @@ def normalize_board_key(board: str) -> str:
         "respeaker-xvf3800": "respeaker_xvf3800",
         "respeaker_xvf3800": "respeaker_xvf3800",
         "xvf3800": "respeaker_xvf3800",
+        "s3-box": "s3_box",
+        "s3box": "s3_box",
+        "esp32-s3-box": "s3_box",
+        "esp32-s3-box-3": "s3_box",
     }
     return aliases.get(clean, clean)
 
@@ -131,7 +132,7 @@ def find_factory_artifact(manifest: dict[str, Any], board: str) -> dict[str, Any
 
 def download_or_copy_artifact(artifact: dict[str, Any], manifest_source: str) -> Path:
     path_ref = text(artifact.get("path"))
-    local_path = local_repo_path(path_ref)
+    local_path = local_ref_path(path_ref, manifest_source)
     if local_path and local_path.is_file():
         path = local_path
     else:
@@ -216,7 +217,7 @@ def main() -> int:
     parser.add_argument("--app-offsets", default="all", help="Comma-separated app offsets for --app-image. Default: all app slots.")
     parser.add_argument("--flash-size", default="", help="Flash size for local --image/--app-image, for example 8MB or 16MB.")
     parser.add_argument("--latest-url", default=os.getenv("TATER_NATIVE_FIRMWARE_LATEST_URL", DEFAULT_LATEST_URL))
-    parser.add_argument("--local", action="store_true", help="Use this repo's local prebuilt_firmware folder instead of the GitHub release manifest.")
+    parser.add_argument("--latest-file", help="Use a local release_assets/latest.json file instead of the GitHub release manifest.")
     parser.add_argument("--baud", default="921600")
     parser.add_argument("--no-erase", action="store_true", help="Do not erase flash before writing the factory image.")
     args = parser.parse_args()
@@ -263,7 +264,7 @@ def main() -> int:
         board = text(args.board)
         if not board:
             raise SystemExit("Pass the board to flash, for example: --board satellite1 or --board voicepe.")
-        manifest, manifest_source = load_manifest(text(args.latest_url) or DEFAULT_LATEST_URL, prefer_local=bool(args.local))
+        manifest, manifest_source = load_manifest(text(args.latest_url) or DEFAULT_LATEST_URL, latest_file=text(args.latest_file))
         artifact = find_factory_artifact(manifest, board)
         image = download_or_copy_artifact(artifact, manifest_source)
 

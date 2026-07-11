@@ -1,6 +1,7 @@
 .pio/
 build/
 release_assets/
+prebuilt_firmware/
 managed_components/
 sdkconfig
 sdkconfig.*
