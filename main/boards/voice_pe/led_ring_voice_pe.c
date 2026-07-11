@@ -14,9 +14,16 @@
 #include "led_strip.h"
 #include "native_settings.h"
 
+#if !TATER_BOARD_S3_BOX
+
 static const char *TAG = "tater_leds";
 
+static bool s_led_ready;
+#if TATER_BOARD_RESPEAKER_XVF3800
+static uint8_t s_xvf_pixels[TATER_LED_COUNT * 3];
+#else
 static led_strip_handle_t s_strip;
+#endif
 static volatile tater_state_t s_state = TATER_STATE_DISCONNECTED;
 static uint8_t s_brightness = 64;
 static uint32_t s_state_epoch;
@@ -120,10 +127,33 @@ static int map_led_index(int logical_index)
 static void set_pixel(int index, uint8_t r, uint8_t g, uint8_t b)
 {
     int physical = map_led_index(index);
-    if (!s_strip || physical < 0) {
+    if (!s_led_ready || physical < 0) {
         return;
     }
+#if TATER_BOARD_RESPEAKER_XVF3800
+    size_t offset = (size_t)physical * 3U;
+    if (offset + 2U >= sizeof(s_xvf_pixels)) {
+        return;
+    }
+    s_xvf_pixels[offset + 0U] = scale(r);
+    s_xvf_pixels[offset + 1U] = scale(g);
+    s_xvf_pixels[offset + 2U] = scale(b);
+#else
     led_strip_set_pixel(s_strip, physical, scale(r), scale(g), scale(b));
+#endif
+}
+
+static void refresh_leds(void)
+{
+#if TATER_BOARD_RESPEAKER_XVF3800
+    if (s_led_ready) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(tater_audio_xvf3800_set_led_ring(s_xvf_pixels, TATER_LED_COUNT));
+    }
+#else
+    if (s_strip) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(led_strip_refresh(s_strip));
+    }
+#endif
 }
 
 static void fill(uint8_t r, uint8_t g, uint8_t b)
@@ -381,6 +411,16 @@ static bool current_doa_position(float *position, uint8_t *confidence)
     if (!tater_audio_doa_snapshot(&doa)) {
         return false;
     }
+#if TATER_BOARD_RESPEAKER_XVF3800
+    if (!doa.valid || doa.age_ms > 450) {
+        return false;
+    }
+    *position = wrap_position((float)(doa.angle_index % TATER_LED_COUNT));
+    if (confidence) {
+        *confidence = doa.confidence;
+    }
+    return true;
+#endif
 #if TATER_BOARD_SAT1
     if (doa.age_ms > 300) {
         return false;
@@ -1096,19 +1136,19 @@ static void render(void)
     }
 
     if (render_setup_reset_feedback()) {
-        led_strip_refresh(s_strip);
+        refresh_leds();
         s_animation_tick++;
         return;
     }
 
     if (render_xmos_update_feedback()) {
-        led_strip_refresh(s_strip);
+        refresh_leds();
         s_animation_tick++;
         return;
     }
 
     if (render_button_feedback()) {
-        led_strip_refresh(s_strip);
+        refresh_leds();
         s_animation_tick++;
         return;
     }
@@ -1117,7 +1157,7 @@ static void render(void)
     rgb_t voice_color = configured_voice_color(settings);
 
     if (render_idle_mute_indicator(settings)) {
-        led_strip_refresh(s_strip);
+        refresh_leds();
         s_animation_tick++;
         return;
     }
@@ -1155,14 +1195,14 @@ static void render(void)
         twinkle(s_animation_tick, TATER_ORANGE);
         break;
     }
-    led_strip_refresh(s_strip);
+    refresh_leds();
     s_animation_tick++;
 }
 
 static void led_task(void *arg)
 {
     while (true) {
-        if (s_strip) {
+        if (s_led_ready) {
             render();
         }
         uint32_t delay_ms = 80;
@@ -1181,6 +1221,18 @@ static void led_task(void *arg)
 
 esp_err_t tater_leds_init(void)
 {
+#if TATER_BOARD_RESPEAKER_XVF3800
+    esp_err_t err = tater_audio_xvf3800_control_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "xvf3800 led control init failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    memset(s_xvf_pixels, 0, sizeof(s_xvf_pixels));
+    s_led_ready = true;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(tater_audio_xvf3800_set_led_ring(s_xvf_pixels, TATER_LED_COUNT));
+    xTaskCreatePinnedToCore(led_task, "tater_leds", 4096, NULL, 4, NULL, 0);
+    return ESP_OK;
+#else
     gpio_config_t power_config = {
         .pin_bit_mask = 1ULL << TATER_LED_POWER_EN,
         .mode = GPIO_MODE_OUTPUT,
@@ -1218,8 +1270,10 @@ esp_err_t tater_leds_init(void)
         return err;
     }
     led_strip_clear(s_strip);
+    s_led_ready = true;
     xTaskCreatePinnedToCore(led_task, "tater_leds", 4096, NULL, 4, NULL, 0);
     return ESP_OK;
+#endif
 }
 
 void tater_leds_set_state(tater_state_t state)
@@ -1279,3 +1333,5 @@ void tater_leds_show_mute(bool muted)
     s_button_feedback_until_us = esp_timer_get_time() + 1600000;
     s_button_feedback_mode = 2;
 }
+
+#endif

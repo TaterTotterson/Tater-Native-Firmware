@@ -39,6 +39,12 @@ def main() -> int:
         "",
         "Tater Native Satellite firmware release.",
         "",
+        "## Highlights",
+        "",
+        "- Ships one shared native firmware version across all supported satellite targets.",
+        "- Includes OTA images for Tater-managed updates and factory images for USB recovery/first flash.",
+        "- Includes bundled XMOS update payloads for boards that use XMOS audio firmware.",
+        "",
         "## Devices",
         "",
     ]

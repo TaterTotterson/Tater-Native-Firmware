@@ -57,3 +57,7 @@ float tater_audio_speaker_level(void);
 bool tater_audio_doa_snapshot(tater_audio_doa_t *out);
 bool tater_audio_xmos_status_snapshot(tater_audio_xmos_status_t *out);
 esp_err_t tater_audio_sat1_read_buttons(uint8_t *buttons);
+esp_err_t tater_audio_xvf3800_control_init(void);
+esp_err_t tater_audio_xvf3800_set_led_ring(const uint8_t *rgb, size_t led_count);
+esp_err_t tater_audio_xvf3800_set_mute(bool muted);
+esp_err_t tater_audio_xvf3800_read_mute(bool *muted);

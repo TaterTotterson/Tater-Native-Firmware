@@ -7,6 +7,7 @@
 #include <strings.h>
 
 #include "board.h"
+#include "audio_i2s.h"
 #include "esp_log.h"
 #include "leds.h"
 
@@ -149,6 +150,9 @@ uint8_t tater_live_settings_adjust_volume(int delta_percent)
 bool tater_live_settings_set_muted(bool muted)
 {
     s_settings.muted = muted;
+#if TATER_BOARD_RESPEAKER_XVF3800
+    ESP_ERROR_CHECK_WITHOUT_ABORT(tater_audio_xvf3800_set_mute(muted));
+#endif
     return s_settings.muted;
 }
 
@@ -223,7 +227,8 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     s_settings.continued_chat = json_bool(continued_chat, s_settings.continued_chat);
     s_settings.barge_in_enabled = json_bool(barge_in_enabled, s_settings.barge_in_enabled);
     s_settings.volume_percent = json_u8_range(volume_percent, s_settings.volume_percent, 0, 100);
-    s_settings.muted = json_bool(muted, s_settings.muted);
+    bool next_muted = json_bool(muted, s_settings.muted);
+    tater_live_settings_set_muted(next_muted);
     s_settings.led_brightness = json_u8_range(led_brightness, s_settings.led_brightness, 0, 255);
     if (cJSON_IsString(led_color) && led_color->valuestring && led_color->valuestring[0]) {
         strlcpy_or_empty(s_settings.led_color, led_color->valuestring, sizeof(s_settings.led_color));

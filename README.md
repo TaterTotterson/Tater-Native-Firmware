@@ -17,9 +17,11 @@ of configurable ESPHome nodes:
 
 - Voice PE: `voicepe`
 - Satellite1 / Sat1: `sat1` build environment, `satellite1` release key
+- ReSpeaker XVF3800: `respeaker_xvf3800`
 
-Both targets are ESP32-S3 native firmware images that connect directly to Tater
-over the native satellite WebSocket protocol.
+All targets are ESP32-S3 native firmware images that connect directly to Tater
+over the native satellite WebSocket protocol. ReSpeaker XVF3800 uses an 8MB
+flash layout; Voice PE and Sat1 use the 16MB layout.
 
 ### Provisioning And Pairing
 
@@ -34,7 +36,8 @@ over the native satellite WebSocket protocol.
 - Unpaired native satellites rejected by Tater by default
 - Wi-Fi failure fallback into setup mode on the next boot
 - Setup mode can also be triggered from Tater
-- Physical setup reset gesture: 5 quick clicks, then hold the sixth press for 5 seconds
+- Physical setup reset gesture on boards with a center/action button: 5 quick
+  clicks, then hold the sixth press for 5 seconds
 
 ### Native Tater Connection
 
@@ -110,6 +113,18 @@ Satellite1 / Sat1:
 - XMOS DoA telemetry and firmware version/status reporting
 - Line-out capability advertised to Tater
 
+ReSpeaker XVF3800:
+
+- 12 LED ring driven through the XVF3800 I2C control interface
+- 48 kHz stereo I2S slave capture from the XVF3800, downsampled into the 16 kHz
+  wake/STT path
+- Shared-duplex I2S playback back into the XVF3800 speaker/line-out path
+- XVF3800 DoA telemetry for directional listening LEDs
+- XVF3800 firmware auto-update to the included `1.0.7` I2S host firmware when
+  the installed version differs
+- Mute state bridged through the XVF3800 control interface
+- 8MB flash layout with two OTA app slots
+
 ### Current Limits
 
 - S3 Box/display targets are not implemented yet.
@@ -117,6 +132,8 @@ Satellite1 / Sat1:
   need for them.
 - Sat1 XMOS direct-flash recovery is newer than the Voice PE DFU path and still
   needs more real-device testing across factory XMOS versions.
+- ReSpeaker XVF3800 support is first-pass native firmware and still needs
+  hands-on wake, playback, DoA, and physical mute validation after provisioning.
 
 ## How To Set Up
 
@@ -171,6 +188,12 @@ Satellite1 / Sat1:
 ./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101 --board sat1
 ```
 
+ReSpeaker XVF3800:
+
+```sh
+./scripts/flash_native_satellite_usb.py /dev/cu.usbmodem4101 --board respeaker_xvf3800
+```
+
 Factory images rewrite the full boot/partition/app layout and the device will
 need provisioning afterward. For local development on an already-provisioned
 device, flash the app image instead:
@@ -219,7 +242,8 @@ WebSocket connections.
 
 ### Setup Reset From The Device
 
-Use this if the saved Wi-Fi/server settings are wrong.
+Use this if the saved Wi-Fi/server settings are wrong on a board with a
+center/action button.
 
 1. Click the center/action button 5 times quickly.
 2. On the sixth press, hold for 5 seconds.
@@ -229,6 +253,8 @@ Use this if the saved Wi-Fi/server settings are wrong.
 
 Do not hold the center button while plugging in or resetting the board. On these
 ESP32-S3 boards, GPIO0 is also a bootloader strap pin.
+
+For ReSpeaker XVF3800, use Tater setup reset or USB recovery for now.
 
 ### Bench Testing Unpaired Devices
 
@@ -256,6 +282,7 @@ main/
   boards/
     voice_pe/                 Voice PE board implementation
     sat1/                     Satellite1 board implementation
+    respeaker_xvf3800/        ReSpeaker XVF3800 board implementation
 scripts/
   build_native_firmware_manifest.py
   flash_native_satellite_usb.py
@@ -278,7 +305,7 @@ platformio run
 Build both official targets:
 
 ```sh
-platformio run -e voicepe -e sat1
+platformio run -e voicepe -e sat1 -e respeaker_xvf3800
 ```
 
 Build outputs:
@@ -288,6 +315,8 @@ Build outputs:
 .pio/build/voicepe/firmware.factory.bin
 .pio/build/sat1/firmware.bin
 .pio/build/sat1/firmware.factory.bin
+.pio/build/respeaker_xvf3800/firmware.bin
+.pio/build/respeaker_xvf3800/firmware.factory.bin
 ```
 
 Flash from source with PlatformIO:
@@ -307,7 +336,8 @@ After a successful build:
 ./scripts/build_native_firmware_manifest.py --board all --skip-build
 ```
 
-Use `--board voicepe` or `--board satellite1` to package a single board.
+Use `--board voicepe`, `--board satellite1`, `--board respeaker_xvf3800`, or
+`--board s3_box` to package a single board.
 
 This writes:
 
@@ -332,8 +362,9 @@ git tag native-0.1.33
 git push origin native-0.1.33
 ```
 
-The release workflow builds `voicepe` and `sat1`, packages release assets,
-writes URL-backed manifests, and creates or updates the GitHub Release with:
+The release workflow builds `voicepe`, `sat1`, `respeaker_xvf3800`, and
+`s3_box`, packages release assets, writes URL-backed manifests, and creates or
+updates the GitHub Release with:
 
 - `latest.json`
 - `native-x.y.z-manifest.json`
@@ -341,6 +372,10 @@ writes URL-backed manifests, and creates or updates the GitHub Release with:
 - `native-voicepe-x.y.z-voicepe-factory.bin`
 - `native-satellite1-x.y.z-satellite1-ota.bin`
 - `native-satellite1-x.y.z-satellite1-factory.bin`
+- `native-respeaker-xvf3800-x.y.z-respeaker_xvf3800-ota.bin`
+- `native-respeaker-xvf3800-x.y.z-respeaker_xvf3800-factory.bin`
+- `native-s3-box-x.y.z-s3_box-ota.bin`
+- `native-s3-box-x.y.z-s3_box-factory.bin`
 - `RELEASE_NOTES.md`
 
 The release title is:

@@ -20,6 +20,10 @@ DEFAULT_LATEST_URL = "https://github.com/TaterTotterson/Tater-Native-Firmware/re
 CACHE_ROOT = Path.home() / ".taterassistant" / "native_firmware_cache"
 APP_PARTITION_OFFSETS = ["0x20000", "0x320000", "0x620000"]
 APP_PARTITION_SIZE = 0x300000
+APP_PARTITION_OFFSETS_BY_FLASH_SIZE = {
+    "8mb": ["0x20000", "0x320000"],
+    "16mb": APP_PARTITION_OFFSETS,
+}
 
 
 def text(value: Any) -> str:
@@ -101,6 +105,10 @@ def normalize_board_key(board: str) -> str:
         "satellite-1": "satellite1",
         "voice-pe": "voicepe",
         "voice-pe-s3": "voicepe",
+        "respeaker": "respeaker_xvf3800",
+        "respeaker-xvf3800": "respeaker_xvf3800",
+        "respeaker_xvf3800": "respeaker_xvf3800",
+        "xvf3800": "respeaker_xvf3800",
     }
     return aliases.get(clean, clean)
 
@@ -171,10 +179,10 @@ def find_esptool_python() -> list[str]:
     raise SystemExit("Could not find esptool. Install PlatformIO or run: python3 -m pip install esptool")
 
 
-def parse_offsets(value: str) -> list[str]:
+def parse_offsets(value: str, flash_size: str = "16MB") -> list[str]:
     clean = text(value)
     if not clean or clean.lower() == "all":
-        return list(APP_PARTITION_OFFSETS)
+        return list(APP_PARTITION_OFFSETS_BY_FLASH_SIZE.get(text(flash_size).lower(), APP_PARTITION_OFFSETS))
     offsets: list[str] = []
     for item in clean.split(","):
         offset = text(item).lower()
@@ -189,6 +197,16 @@ def parse_offsets(value: str) -> list[str]:
     return offsets
 
 
+def infer_local_flash_size(path: Path, explicit_flash_size: str = "") -> str:
+    clean = text(explicit_flash_size)
+    if clean:
+        return clean
+    name = str(path).lower()
+    if "respeaker" in name or "xvf3800" in name:
+        return "8MB"
+    return "16MB"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Flash Tater Native satellite firmware over USB without a browser.")
     parser.add_argument("port", nargs="?", help="Serial port, for example /dev/cu.usbmodem4101.")
@@ -196,6 +214,7 @@ def main() -> int:
     parser.add_argument("--image", help="Use a local factory image instead of the manifest artifact.")
     parser.add_argument("--app-image", help="Use a local app/OTA image and write app partitions only, preserving setup data.")
     parser.add_argument("--app-offsets", default="all", help="Comma-separated app offsets for --app-image. Default: all app slots.")
+    parser.add_argument("--flash-size", default="", help="Flash size for local --image/--app-image, for example 8MB or 16MB.")
     parser.add_argument("--latest-url", default=os.getenv("TATER_NATIVE_FIRMWARE_LATEST_URL", DEFAULT_LATEST_URL))
     parser.add_argument("--local", action="store_true", help="Use this repo's local prebuilt_firmware folder instead of the GitHub release manifest.")
     parser.add_argument("--baud", default="921600")
@@ -230,13 +249,14 @@ def main() -> int:
             raise SystemExit("--app-image expects firmware.bin, not firmware.factory.bin.")
         if image.stat().st_size > APP_PARTITION_SIZE:
             raise SystemExit(f"App image is too large for the app partition: {image.stat().st_size} > {APP_PARTITION_SIZE}.")
-        artifact = {"flash_size": "16MB", "flash_mode": "dio", "flash_freq": "80m"}
-        app_offsets = parse_offsets(args.app_offsets)
+        local_flash_size = infer_local_flash_size(image, args.flash_size)
+        artifact = {"flash_size": local_flash_size, "flash_mode": "dio", "flash_freq": "80m"}
+        app_offsets = parse_offsets(args.app_offsets, local_flash_size)
     elif args.image:
         image = Path(args.image).expanduser().resolve()
         if not image.is_file():
             raise SystemExit(f"Image not found: {image}")
-        artifact = {"flash_size": "16MB", "flash_mode": "dio", "flash_freq": "40m"}
+        artifact = {"flash_size": infer_local_flash_size(image, args.flash_size), "flash_mode": "dio", "flash_freq": "40m"}
         if "factory" not in image.name:
             raise SystemExit("Local --image expects a factory image. Use --app-image for .pio/build/<env>/firmware.bin.")
     else:

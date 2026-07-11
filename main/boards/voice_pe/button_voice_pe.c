@@ -34,6 +34,8 @@ static const char *TAG = "tater_button";
 #define SETUP_RESET_SOUND_ID "short-definite-fart"
 #define BUTTON_INTERCOM_WAKE_WORD "push to intercom"
 
+static void enter_setup_mode(const char *source, bool play_sound);
+
 #if TATER_BOARD_VOICE_PE
 #define VOICE_PE_VOLUME_STEP_PERCENT 5
 #define VOICE_PE_ENCODER_POLL_MS 5
@@ -333,8 +335,227 @@ static void sat1_poll_extra_buttons(
 }
 #endif
 
+#if TATER_BOARD_RESPEAKER_XVF3800
+#define XVF_SETUP_RESET_TOGGLE_COUNT 8
+#define XVF_SETUP_RESET_TOGGLE_WINDOW_TICKS (8000 / BUTTON_POLL_MS)
+#define XVF_SETUP_RESET_HOLD_TICKS (5000 / BUTTON_POLL_MS)
+
+typedef struct {
+    bool stable_on;
+    bool last_raw_on;
+    int stable_count;
+} xvf_switch_t;
+
+typedef struct {
+    int toggle_count;
+    int window_ticks;
+    int hold_ticks;
+    bool counting_down;
+} xvf_setup_reset_t;
+
+static void xvf_switch_init(xvf_switch_t *sw, bool on)
+{
+    if (!sw) {
+        return;
+    }
+    sw->stable_on = on;
+    sw->last_raw_on = on;
+    sw->stable_count = BUTTON_DEBOUNCE_TICKS;
+}
+
+static bool xvf_switch_update(xvf_switch_t *sw, bool raw_on, bool *changed)
+{
+    if (changed) {
+        *changed = false;
+    }
+    if (!sw) {
+        return raw_on;
+    }
+    if (raw_on == sw->last_raw_on) {
+        if (sw->stable_count < BUTTON_DEBOUNCE_TICKS) {
+            sw->stable_count++;
+        }
+    } else {
+        sw->stable_count = 0;
+        sw->last_raw_on = raw_on;
+    }
+    if (sw->stable_count >= BUTTON_DEBOUNCE_TICKS && raw_on != sw->stable_on) {
+        sw->stable_on = raw_on;
+        if (changed) {
+            *changed = true;
+        }
+    }
+    return sw->stable_on;
+}
+
+static void xvf_send_setting_feedback(const char *message)
+{
+    if (message && message[0]) {
+        tater_protocol_send_log("info", message);
+    }
+    tater_protocol_send_status(tater_protocol_timer_is_active() ? "timer" : "idle");
+}
+
+static void xvf_apply_mute_state(bool muted)
+{
+    bool current = tater_live_settings_set_muted(muted);
+    tater_leds_show_mute(current);
+    char message[96] = {0};
+    snprintf(message, sizeof(message), "ReSpeaker microphones %s", current ? "muted" : "unmuted");
+    ESP_LOGI(TAG, "respeaker microphones %s", current ? "muted" : "unmuted");
+    if (current && tater_protocol_voice_active()) {
+        tater_protocol_stop_voice(true);
+    }
+    xvf_send_setting_feedback(message);
+}
+
+static void xvf_setup_reset_clear(xvf_setup_reset_t *reset, bool clear_leds)
+{
+    if (!reset) {
+        return;
+    }
+    reset->toggle_count = 0;
+    reset->window_ticks = 0;
+    reset->hold_ticks = 0;
+    reset->counting_down = false;
+    if (clear_leds) {
+        tater_leds_clear_setup_reset_feedback();
+    }
+}
+
+static void xvf_setup_reset_start_countdown(xvf_setup_reset_t *reset)
+{
+    if (!reset) {
+        return;
+    }
+    reset->counting_down = true;
+    reset->hold_ticks = 0;
+    reset->window_ticks = 0;
+    ESP_LOGW(TAG, "respeaker setup reset armed; leave mute on for 5 seconds");
+    tater_protocol_send_log("warn", "ReSpeaker setup reset armed; leave mute on for 5 seconds.");
+    tater_leds_show_setup_reset_countdown(SETUP_RESET_COUNTDOWN_STEPS, SETUP_RESET_COUNTDOWN_STEPS);
+}
+
+static void xvf_setup_reset_handle_toggle(xvf_setup_reset_t *reset, bool muted)
+{
+    if (!reset) {
+        return;
+    }
+    if (tater_ota_is_running()) {
+        xvf_setup_reset_clear(reset, true);
+        ESP_LOGW(TAG, "respeaker setup reset gesture ignored during OTA");
+        return;
+    }
+    if (reset->counting_down) {
+        ESP_LOGI(TAG, "respeaker setup reset countdown cancelled by mute toggle");
+        xvf_setup_reset_clear(reset, true);
+        return;
+    }
+    if (reset->window_ticks <= 0) {
+        reset->toggle_count = 0;
+    }
+    if (reset->toggle_count < XVF_SETUP_RESET_TOGGLE_COUNT) {
+        reset->toggle_count++;
+    }
+    reset->window_ticks = XVF_SETUP_RESET_TOGGLE_WINDOW_TICKS;
+    ESP_LOGI(TAG, "respeaker setup reset toggle %d/%d", reset->toggle_count, XVF_SETUP_RESET_TOGGLE_COUNT);
+
+    if (reset->toggle_count >= XVF_SETUP_RESET_TOGGLE_COUNT && muted) {
+        xvf_setup_reset_start_countdown(reset);
+        return;
+    }
+
+    tater_leds_show_setup_reset_clicks((uint8_t)reset->toggle_count, XVF_SETUP_RESET_TOGGLE_COUNT);
+    if (reset->toggle_count >= XVF_SETUP_RESET_TOGGLE_COUNT) {
+        ESP_LOGW(TAG, "respeaker setup reset ready; toggle mute on to start countdown");
+        tater_protocol_send_log("warn", "ReSpeaker setup reset ready; toggle mute on to start countdown.");
+    }
+}
+
+static void xvf_setup_reset_tick(xvf_setup_reset_t *reset, bool muted)
+{
+    if (!reset) {
+        return;
+    }
+    if (tater_ota_is_running()) {
+        if (reset->toggle_count > 0 || reset->counting_down) {
+            xvf_setup_reset_clear(reset, true);
+        }
+        return;
+    }
+    if (reset->counting_down) {
+        if (!muted) {
+            ESP_LOGI(TAG, "respeaker setup reset countdown cancelled because mute is off");
+            xvf_setup_reset_clear(reset, true);
+            return;
+        }
+        reset->hold_ticks++;
+        uint8_t remaining_steps = (uint8_t)(
+            SETUP_RESET_COUNTDOWN_STEPS
+            - ((reset->hold_ticks * SETUP_RESET_COUNTDOWN_STEPS) / XVF_SETUP_RESET_HOLD_TICKS)
+        );
+        if (remaining_steps > SETUP_RESET_COUNTDOWN_STEPS) {
+            remaining_steps = 0;
+        }
+        tater_leds_show_setup_reset_countdown(remaining_steps, SETUP_RESET_COUNTDOWN_STEPS);
+        if (reset->hold_ticks >= XVF_SETUP_RESET_HOLD_TICKS) {
+            enter_setup_mode("respeaker mute gesture", false);
+        }
+        return;
+    }
+
+    if (reset->window_ticks > 0) {
+        reset->window_ticks--;
+        if (reset->window_ticks <= 0) {
+            ESP_LOGI(TAG, "respeaker setup reset gesture expired");
+            xvf_setup_reset_clear(reset, true);
+        }
+    }
+}
+
+static void xvf_poll_mute_switch(bool *initialized, xvf_switch_t *mute_switch, xvf_setup_reset_t *reset)
+{
+    bool muted = false;
+    static bool had_read_failure = false;
+    if (tater_audio_xvf3800_read_mute(&muted) != ESP_OK) {
+        static uint32_t read_failures = 0;
+        read_failures++;
+        if (read_failures == 1 || (read_failures % 100) == 0) {
+            char message[96] = {0};
+            snprintf(message, sizeof(message), "ReSpeaker mute status read failed count=%lu", (unsigned long)read_failures);
+            ESP_LOGW(TAG, "%s", message);
+            tater_protocol_send_log("warn", message);
+        }
+        had_read_failure = true;
+        return;
+    }
+    if (had_read_failure) {
+        ESP_LOGI(TAG, "ReSpeaker mute status read recovered");
+        tater_protocol_send_log("info", "ReSpeaker mute status read recovered");
+        had_read_failure = false;
+    }
+
+    if (initialized && !*initialized) {
+        xvf_switch_init(mute_switch, muted);
+        tater_live_settings_set_muted(muted);
+        ESP_LOGI(TAG, "respeaker mute status ready muted=%d", muted);
+        *initialized = true;
+        return;
+    }
+
+    bool changed = false;
+    bool stable_muted = xvf_switch_update(mute_switch, muted, &changed);
+    if (changed) {
+        xvf_apply_mute_state(stable_muted);
+        xvf_setup_reset_handle_toggle(reset, stable_muted);
+    }
+    xvf_setup_reset_tick(reset, stable_muted);
+}
+#endif
+
 esp_err_t tater_button_init(void)
 {
+#if TATER_HAS_CENTER_BUTTON
     gpio_config_t cfg = {
         .pin_bit_mask = 1ULL << TATER_CENTER_BUTTON,
         .mode = GPIO_MODE_INPUT,
@@ -346,6 +567,9 @@ esp_err_t tater_button_init(void)
     if (err != ESP_OK) {
         return err;
     }
+#else
+    esp_err_t err = ESP_OK;
+#endif
 #if TATER_BOARD_VOICE_PE
     gpio_config_t encoder_cfg = {
         .pin_bit_mask = (1ULL << TATER_ENCODER_A) | (1ULL << TATER_ENCODER_B),
@@ -370,10 +594,16 @@ esp_err_t tater_button_init(void)
         return err;
     }
 #endif
+#if TATER_BOARD_RESPEAKER_XVF3800
+    err = tater_audio_xvf3800_control_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+#endif
     return ESP_OK;
 }
 
-static void enter_setup_mode(const char *source)
+static void enter_setup_mode(const char *source, bool play_sound)
 {
     ESP_LOGW(TAG, "setup reset requested by %s; clearing provisioning", source ? source : "button");
     tater_protocol_send_log("warn", "Setup reset requested; clearing provisioning and rebooting into setup mode.");
@@ -385,26 +615,28 @@ static void enter_setup_mode(const char *source)
     }
     tater_leds_show_setup_reset_success();
     tater_protocol_send_status("provisioning");
-    const tater_wake_sound_asset_t *sound = tater_wake_sound_asset_lookup(SETUP_RESET_SOUND_ID);
-    if (sound) {
-        esp_err_t sound_err = tater_playback_play_wav_data_local(
-            sound->data,
-            (size_t)(sound->end - sound->data),
-            SETUP_RESET_SOUND_ID
-        );
-        if (sound_err != ESP_OK) {
-            ESP_LOGW(TAG, "setup reset sound failed: %s", esp_err_to_name(sound_err));
-        }
-    } else {
-        ESP_LOGW(TAG, "setup reset sound asset not found: %s", SETUP_RESET_SOUND_ID);
-    }
     bool sound_started = false;
-    for (int i = 0; i < 25; i++) {
-        if (tater_playback_is_playing()) {
-            sound_started = true;
-            break;
+    if (play_sound) {
+        const tater_wake_sound_asset_t *sound = tater_wake_sound_asset_lookup(SETUP_RESET_SOUND_ID);
+        if (sound) {
+            esp_err_t sound_err = tater_playback_play_wav_data_local(
+                sound->data,
+                (size_t)(sound->end - sound->data),
+                SETUP_RESET_SOUND_ID
+            );
+            if (sound_err != ESP_OK) {
+                ESP_LOGW(TAG, "setup reset sound failed: %s", esp_err_to_name(sound_err));
+            }
+        } else {
+            ESP_LOGW(TAG, "setup reset sound asset not found: %s", SETUP_RESET_SOUND_ID);
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        for (int i = 0; i < 25; i++) {
+            if (tater_playback_is_playing()) {
+                sound_started = true;
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
     }
     for (int i = 0; sound_started && i < 150 && tater_playback_is_playing(); i++) {
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -440,9 +672,17 @@ static void button_task(void *arg)
     bool voicepe_mute_initialized = false;
     voicepe_switch_t voicepe_mute_switch = {0};
 #endif
+#if TATER_BOARD_RESPEAKER_XVF3800
+    bool xvf_mute_initialized = false;
+    xvf_switch_t xvf_mute_switch = {0};
+    xvf_setup_reset_t xvf_setup_reset = {0};
+#endif
 
     while (true) {
-        bool raw_pressed = gpio_get_level(TATER_CENTER_BUTTON) == 0;
+        bool raw_pressed = false;
+#if TATER_HAS_CENTER_BUTTON
+        raw_pressed = gpio_get_level(TATER_CENTER_BUTTON) == 0;
+#endif
         if (raw_pressed == last_raw_pressed) {
             stable_count++;
         } else {
@@ -541,7 +781,7 @@ static void button_task(void *arg)
                 }
                 tater_leds_show_setup_reset_countdown(remaining_steps, SETUP_RESET_COUNTDOWN_STEPS);
                 if (setup_hold_ticks >= SETUP_RESET_HOLD_TICKS) {
-                    enter_setup_mode("button gesture");
+                    enter_setup_mode("button gesture", true);
                 }
             } else if (!button_consumed_for_press && !intercom_started_for_press && press_ticks >= INTERCOM_START_TICKS) {
                 if (tater_ota_is_running()) {
@@ -592,6 +832,9 @@ static void button_task(void *arg)
 #endif
 #if TATER_BOARD_VOICE_PE
         voicepe_poll_mute_switch(&voicepe_mute_initialized, &voicepe_mute_switch);
+#endif
+#if TATER_BOARD_RESPEAKER_XVF3800
+        xvf_poll_mute_switch(&xvf_mute_initialized, &xvf_mute_switch, &xvf_setup_reset);
 #endif
         vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
     }

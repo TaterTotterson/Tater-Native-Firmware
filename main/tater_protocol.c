@@ -1289,7 +1289,7 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "microphone", true);
     cJSON_AddBoolToObject(caps, "speaker", true);
     cJSON_AddBoolToObject(caps, "led_ring", true);
-    cJSON_AddBoolToObject(caps, "display", false);
+    cJSON_AddBoolToObject(caps, "display", TATER_BOARD_S3_BOX);
     cJSON_AddBoolToObject(caps, "buttons", true);
     cJSON_AddBoolToObject(caps, "touch", false);
     cJSON_AddBoolToObject(caps, "line_out", TATER_CAP_LINE_OUT);
@@ -1718,9 +1718,19 @@ const char *tater_protocol_device_name(void)
     return s_config.device_name[0] ? s_config.device_name : s_device_id;
 }
 
+const char *tater_protocol_room(void)
+{
+    return s_config.room;
+}
+
 const char *tater_protocol_server_url(void)
 {
     return s_config.server_url;
+}
+
+const char *tater_protocol_token(void)
+{
+    return s_config.token;
 }
 
 void tater_protocol_send_status(const char *state)

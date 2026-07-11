@@ -41,6 +41,31 @@ BOARDS: dict[str, dict[str, Any]] = {
             "repo_path": "main/boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin",
         },
     },
+    "respeaker_xvf3800": {
+        "env": "respeaker_xvf3800",
+        "build_dir": "respeaker_xvf3800",
+        "prebuilt_dir": "respeaker_xvf3800",
+        "key": "respeaker_xvf3800",
+        "label": "ReSpeaker XVF3800",
+        "board": "respeaker-xvf3800",
+        "header": FIRMWARE_ROOT / "main" / "boards" / "respeaker_xvf3800" / "board_respeaker_xvf3800.h",
+        "flash_size": "8MB",
+        "xmos_firmware": {
+            "version": "1.0.7",
+            "source": FIRMWARE_ROOT / "main" / "boards" / "respeaker_xvf3800" / "xmos" / "xvf3800_i2s_1_0_7.bin",
+            "repo_path": "main/boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin",
+        },
+    },
+    "s3_box": {
+        "env": "s3_box",
+        "build_dir": "s3_box",
+        "prebuilt_dir": "s3_box",
+        "key": "s3_box",
+        "label": "ESP32-S3-BOX-3 Display",
+        "board": "s3-box",
+        "header": FIRMWARE_ROOT / "main" / "boards" / "s3_box" / "board_s3_box.h",
+        "flash_size": "16MB",
+    },
 }
 
 

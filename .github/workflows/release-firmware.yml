@@ -37,7 +37,7 @@ jobs:
         run: python -m pip install --upgrade pip platformio
 
       - name: Build firmware
-        run: platformio run -e voicepe -e sat1
+        run: platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
 
       - name: Package release assets
         id: package
