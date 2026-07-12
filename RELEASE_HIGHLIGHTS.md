@@ -1,3 +1,5 @@
-- Improves native Tater OTA reliability by reducing the firmware HTTP download memory footprint.
-- Adds OTA stage-specific failure logs with heap diagnostics so update failures are easier to diagnose.
-- Pauses S3 Box display-feed HTTP polling while OTA is running to avoid memory contention during updates.
+- Updates all supported native satellite targets to firmware version 0.2.0.
+- Replaces the embedded Hey Tater wake model with the new high-accuracy int8 trainer output.
+- Aligns built-in Hey Tater defaults with the trainer JSON: threshold 0.88, sliding window 4, close-miss threshold 0.71.
+- Redownloads custom wake models whenever satellite settings are saved, even when the URL is unchanged.
+- Adds SPIFFS wake-model cache recovery so larger custom wake models can replace older cached models reliably.

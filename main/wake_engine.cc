@@ -193,6 +193,7 @@ uint32_t s_custom_cache_hits = 0;
 uint32_t s_custom_cache_writes = 0;
 uint32_t s_custom_cache_failures = 0;
 uint32_t s_custom_download_generation = 0;
+uint32_t s_observed_wake_settings_generation = 0;
 int64_t s_custom_download_started_us = 0;
 char s_requested_wake_sound_url[192] = "";
 char s_downloading_wake_sound_url[192] = "";
@@ -622,6 +623,7 @@ bool write_cache_file_atomic(const char *path, const uint8_t *data, size_t size)
 
     char tmp_path[96];
     std::snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    std::remove(tmp_path);
     FILE *file = std::fopen(tmp_path, "wb");
     if (!file) {
         ESP_LOGW(TAG, "cache open failed path=%s", tmp_path);
@@ -1461,8 +1463,16 @@ bool save_cached_custom_wake_model(const DownloadedWakeModel *model)
     cJSON_AddStringToObject(meta, "label", model->label);
     cJSON_AddNumberToObject(meta, "size", (double)model->size);
 
-    bool ok = write_cache_file_atomic(kWakeModelCacheDataPath, model->data, model->size) &&
-        write_cache_json_atomic(kWakeModelCacheMetaPath, meta);
+    std::remove(kWakeModelCacheDataPath);
+    std::remove(kWakeModelCacheMetaPath);
+    bool data_ok = write_cache_file_atomic(kWakeModelCacheDataPath, model->data, model->size);
+    if (!data_ok) {
+        ESP_LOGW(TAG, "wake model cache data write failed; formatting cache and retrying");
+        if (tater_cache_format() == ESP_OK) {
+            data_ok = write_cache_file_atomic(kWakeModelCacheDataPath, model->data, model->size);
+        }
+    }
+    bool ok = data_ok && write_cache_json_atomic(kWakeModelCacheMetaPath, meta);
     cJSON_Delete(meta);
     if (ok) {
         s_custom_cache_writes++;
@@ -1753,6 +1763,7 @@ void wake_model_download_task(void *arg)
     DownloadedWakeModel model = {};
     uint8_t *json_data = nullptr;
     size_t json_size = 0;
+    size_t downloaded_size = 0;
     bool ok = false;
 
     ESP_LOGI(TAG, "wake model custom download starting url=%s", requested_url);
@@ -1784,10 +1795,11 @@ void wake_model_download_task(void *arg)
         ok = false;
         goto done;
     }
+    downloaded_size = model.size;
     (void)save_cached_custom_wake_model(&model);
     queue_pending_custom_model(&model);
     set_last_error("wake model download ready");
-    ESP_LOGI(TAG, "wake model custom download ready id=%s source=%s model=%s bytes=%u", model.id, model.source_url, model.model_url, (unsigned)model.size);
+    ESP_LOGI(TAG, "wake model custom download ready id=%s source=%s model=%s bytes=%u", model.id, model.source_url, model.model_url, (unsigned)downloaded_size);
     tater_protocol_send_log("info", "wake model download ready");
 
 done:
@@ -1835,23 +1847,13 @@ void consume_pending_custom_model(const tater_live_settings_t *settings)
     }
 }
 
-bool start_custom_wake_model_download(const char *url)
+bool start_custom_wake_model_download(const char *url, bool force_download)
 {
     if (!url || !url[0]) {
         set_last_error("custom wake url missing");
         return false;
     }
-    if (s_ready && std::strcmp(s_active_model_source, "url") == 0 && std::strcmp(s_active_model_url, url) == 0) {
-        return true;
-    }
-    if (load_cached_custom_wake_model(url)) {
-        if (s_custom_model_lock) {
-            xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
-        }
-        std::snprintf(s_requested_custom_url, sizeof(s_requested_custom_url), "%s", url);
-        if (s_custom_model_lock) {
-            xSemaphoreGive(s_custom_model_lock);
-        }
+    if (!force_download && s_ready && std::strcmp(s_active_model_source, "url") == 0 && std::strcmp(s_active_model_url, url) == 0) {
         return true;
     }
     uint32_t request_generation = 0;
@@ -1867,6 +1869,28 @@ bool start_custom_wake_model_download(const char *url)
             xSemaphoreGive(s_custom_model_lock);
         }
         return s_ready;
+    }
+    if (s_custom_model_lock) {
+        xSemaphoreGive(s_custom_model_lock);
+    }
+
+    if (!force_download && load_cached_custom_wake_model(url)) {
+        if (s_custom_model_lock) {
+            xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
+        }
+        std::snprintf(s_requested_custom_url, sizeof(s_requested_custom_url), "%s", url);
+        if (s_custom_model_lock) {
+            xSemaphoreGive(s_custom_model_lock);
+        }
+        return true;
+    }
+
+    if (s_custom_model_lock) {
+        xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
+    }
+    if (force_download) {
+        ESP_LOGI(TAG, "wake model custom reload requested url=%s", url);
+        tater_protocol_send_log("info", "wake model reload requested");
     }
     std::snprintf(s_requested_custom_url, sizeof(s_requested_custom_url), "%s", url);
     s_custom_download_generation++;
@@ -1901,7 +1925,13 @@ bool ensure_selected_wake_model(const tater_live_settings_t *settings)
 {
     const char *wake_word = settings ? settings->wake_word : "hey_tater";
     if (is_custom_wake_word(wake_word)) {
-        return start_custom_wake_model_download(settings ? settings->wake_word_url : "");
+        uint32_t generation = settings ? settings->wake_settings_generation : 0;
+        bool force_download = generation != s_observed_wake_settings_generation;
+        bool ok = start_custom_wake_model_download(settings ? settings->wake_word_url : "", force_download);
+        if (ok) {
+            s_observed_wake_settings_generation = generation;
+        }
+        return ok;
     }
 
     const tater_wake_model_asset_t *asset = tater_wake_model_asset_lookup(wake_word);

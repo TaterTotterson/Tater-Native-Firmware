@@ -9,6 +9,7 @@ typedef struct {
     char wake_engine[32];
     char wake_word[32];
     char wake_word_url[256];
+    uint32_t wake_settings_generation;
     char wake_sensitivity[24];
     char wake_environment[32];
     float wake_threshold;

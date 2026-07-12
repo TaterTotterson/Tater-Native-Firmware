@@ -85,6 +85,7 @@ void tater_live_settings_init_defaults(void)
     strlcpy_or_empty(s_settings.wake_engine, "micro_wake_word", sizeof(s_settings.wake_engine));
     strlcpy_or_empty(s_settings.wake_word, "hey_tater", sizeof(s_settings.wake_word));
     strlcpy_or_empty(s_settings.wake_word_url, "", sizeof(s_settings.wake_word_url));
+    s_settings.wake_settings_generation = 0;
 #if TATER_BOARD_SAT1
     strlcpy_or_empty(s_settings.wake_sensitivity, "high", sizeof(s_settings.wake_sensitivity));
 #else
@@ -92,15 +93,14 @@ void tater_live_settings_init_defaults(void)
 #endif
 #if TATER_BOARD_SAT1
     strlcpy_or_empty(s_settings.wake_environment, "far_field", sizeof(s_settings.wake_environment));
-    s_settings.wake_threshold = 0.88f;
 #else
     strlcpy_or_empty(s_settings.wake_environment, "balanced", sizeof(s_settings.wake_environment));
-    s_settings.wake_threshold = 0.97f;
 #endif
-    s_settings.wake_sliding_window = 5;
+    s_settings.wake_threshold = 0.88f;
+    s_settings.wake_sliding_window = 4;
     s_settings.capture_wake_audio = false;
     s_settings.capture_close_misses = false;
-    s_settings.close_miss_threshold = 0.78f;
+    s_settings.close_miss_threshold = 0.71f;
     strlcpy_or_empty(s_settings.trainer_app_url, "http://trainer.local:8789", sizeof(s_settings.trainer_app_url));
     s_settings.wake_sound_enabled = false;
     strlcpy_or_empty(s_settings.wake_sound, "no_sound", sizeof(s_settings.wake_sound));
@@ -249,13 +249,15 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     if (cJSON_IsString(logging_level) && logging_level->valuestring && logging_level->valuestring[0]) {
         strlcpy_or_empty(s_settings.logging_level, logging_level->valuestring, sizeof(s_settings.logging_level));
     }
+    s_settings.wake_settings_generation++;
 
     ESP_LOGI(
         TAG,
-        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d led=%u color=%s animations=%s/%s/%s/%s logging=%s",
+        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s wake_gen=%u sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d led=%u color=%s animations=%s/%s/%s/%s logging=%s",
         s_settings.wake_engine,
         s_settings.wake_word,
         s_settings.wake_word_url,
+        (unsigned)s_settings.wake_settings_generation,
         s_settings.wake_sensitivity,
         s_settings.wake_environment,
         (double)s_settings.wake_threshold,
@@ -292,6 +294,7 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddStringToObject(settings, "wake_engine", s_settings.wake_engine);
     cJSON_AddStringToObject(settings, "wake_word", s_settings.wake_word);
     cJSON_AddStringToObject(settings, "wake_word_url", s_settings.wake_word_url);
+    cJSON_AddNumberToObject(settings, "wake_settings_generation", s_settings.wake_settings_generation);
     cJSON_AddStringToObject(settings, "wake_sensitivity", s_settings.wake_sensitivity);
     cJSON_AddStringToObject(settings, "wake_environment", s_settings.wake_environment);
     cJSON_AddNumberToObject(settings, "wake_threshold", s_settings.wake_threshold);
