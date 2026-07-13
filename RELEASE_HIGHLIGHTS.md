@@ -1,5 +1,4 @@
-- Updates all supported native satellite targets to firmware version 0.2.0.
-- Replaces the embedded Hey Tater wake model with the new high-accuracy int8 trainer output.
-- Aligns built-in Hey Tater defaults with the trainer JSON: threshold 0.88, sliding window 4, close-miss threshold 0.71.
-- Redownloads custom wake models whenever satellite settings are saved, even when the URL is unchanged.
-- Adds SPIFFS wake-model cache recovery so larger custom wake models can replace older cached models reliably.
+- Updates all supported native satellite targets to firmware version 0.2.1.
+- Fixes S3 Box display feed identity so displays send their stable native device selector instead of reusing the room target.
+- Improves S3 Box display sensor matching when room targets or saved display profiles change.
+- Keeps OTA and USB recovery images synchronized across Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box targets.

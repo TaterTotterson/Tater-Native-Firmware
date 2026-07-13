@@ -745,19 +745,27 @@ static void display_target_label(char *out, size_t out_len)
 static bool build_display_feed_url(char *out, size_t out_len, const char *target)
 {
     char base[180] = {0};
+    char selector[80] = {0};
     display_http_base(base, sizeof(base));
     if (!base[0]) {
         return false;
     }
+    const char *device_id = tater_protocol_device_id();
+    if (device_id && device_id[0]) {
+        snprintf(selector, sizeof(selector), "native:%s", device_id);
+    }
+
     int written = snprintf(out, out_len, "%s/tater-ha/v1/display/feed", base);
     if (written < 0 || (size_t)written >= out_len) {
         return false;
     }
     size_t pos = (size_t)written;
+    bool has_query = false;
     if (target && target[0]) {
         if (!append_char(out, out_len, &pos, '?')) {
             return false;
         }
+        has_query = true;
         written = snprintf(out + pos, out_len - pos, "target=");
         if (written < 0 || (size_t)written >= out_len - pos) {
             return false;
@@ -766,18 +774,22 @@ static bool build_display_feed_url(char *out, size_t out_len, const char *target
         if (!append_url_encoded(out, out_len, &pos, target)) {
             return false;
         }
-        written = snprintf(out + pos, out_len - pos, "&selector=");
+    }
+    if (selector[0]) {
+        if (!append_char(out, out_len, &pos, has_query ? '&' : '?')) {
+            return false;
+        }
+        has_query = true;
+        written = snprintf(out + pos, out_len - pos, "selector=");
         if (written < 0 || (size_t)written >= out_len - pos) {
             return false;
         }
         pos += (size_t)written;
-        if (!append_url_encoded(out, out_len, &pos, target)) {
+        if (!append_url_encoded(out, out_len, &pos, selector)) {
             return false;
         }
-        written = snprintf(out + pos, out_len - pos, "&format=compact");
-    } else {
-        written = snprintf(out + pos, out_len - pos, "?format=compact");
     }
+    written = snprintf(out + pos, out_len - pos, "%sformat=compact", has_query ? "&" : "?");
     return written >= 0 && (size_t)written < out_len - pos;
 }
 
