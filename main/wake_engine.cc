@@ -447,6 +447,20 @@ bool is_custom_wake_word(const char *wake_word)
     );
 }
 
+const char *active_detection_wake_word(const tater_live_settings_t *settings)
+{
+    // Capture and voice metadata must identify the model that produced the
+    // detection. For URL-backed models, settings->wake_word is only the
+    // "custom_url" selector while s_active_wake_word comes from the model JSON.
+    if (s_active_wake_word[0]) {
+        return s_active_wake_word;
+    }
+    if (settings && settings->wake_word[0]) {
+        return settings->wake_word;
+    }
+    return "hey_tater";
+}
+
 bool is_absolute_url(const char *url)
 {
     return url && (
@@ -2230,7 +2244,7 @@ void handle_feature_frame(const int8_t *feature)
         }
     }
     if (!triggered) {
-        const char *wake_word = settings ? settings->wake_word : "hey_tater";
+        const char *wake_word = active_detection_wake_word(settings);
         float threshold = settings ? settings->wake_threshold : 0.97f;
         char probability_history[128];
         format_probability_history(probability_history, sizeof(probability_history));
@@ -2250,7 +2264,7 @@ void handle_feature_frame(const int8_t *feature)
         return;
     }
 
-    const char *wake_word = settings ? settings->wake_word : "hey_tater";
+    const char *wake_word = active_detection_wake_word(settings);
     float threshold = settings ? settings->wake_threshold : 0.97f;
     char probability_history[128];
     format_probability_history(probability_history, sizeof(probability_history));

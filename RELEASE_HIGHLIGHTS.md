@@ -1,4 +1,5 @@
-- Updates all supported native satellite targets to firmware version 0.2.2.
+- Updates all supported native satellite targets to firmware version 0.2.3.
 - Upgrades the built-in Hey Tater wake word to the new v2 int8 model.
 - Aligns the built-in wake defaults with the v2 calibration: threshold 0.99, sliding window 5, and close-miss threshold 0.82.
 - Improves validation recall while maintaining zero false accepts across the ambient calibration set.
+- Reports the active model's wake word in trainer captures and voice sessions so custom URL models are classified correctly.
