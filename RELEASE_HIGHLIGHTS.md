@@ -1,4 +1,4 @@
-- Updates all supported native satellite targets to firmware version 0.2.1.
-- Fixes S3 Box display feed identity so displays send their stable native device selector instead of reusing the room target.
-- Improves S3 Box display sensor matching when room targets or saved display profiles change.
-- Keeps OTA and USB recovery images synchronized across Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box targets.
+- Updates all supported native satellite targets to firmware version 0.2.2.
+- Upgrades the built-in Hey Tater wake word to the new v2 int8 model.
+- Aligns the built-in wake defaults with the v2 calibration: threshold 0.99, sliding window 5, and close-miss threshold 0.82.
+- Improves validation recall while maintaining zero false accepts across the ambient calibration set.

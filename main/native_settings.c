@@ -96,11 +96,11 @@ void tater_live_settings_init_defaults(void)
 #else
     strlcpy_or_empty(s_settings.wake_environment, "balanced", sizeof(s_settings.wake_environment));
 #endif
-    s_settings.wake_threshold = 0.88f;
-    s_settings.wake_sliding_window = 4;
+    s_settings.wake_threshold = 0.99f;
+    s_settings.wake_sliding_window = 5;
     s_settings.capture_wake_audio = false;
     s_settings.capture_close_misses = false;
-    s_settings.close_miss_threshold = 0.71f;
+    s_settings.close_miss_threshold = 0.82f;
     strlcpy_or_empty(s_settings.trainer_app_url, "http://trainer.local:8789", sizeof(s_settings.trainer_app_url));
     s_settings.wake_sound_enabled = false;
     strlcpy_or_empty(s_settings.wake_sound, "no_sound", sizeof(s_settings.wake_sound));
