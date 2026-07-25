@@ -17,6 +17,12 @@ void tater_wake_engine_reset(void);
 void tater_wake_engine_note_audio(const int16_t *pcm, size_t sample_count);
 void tater_wake_engine_process(const int16_t *pcm, size_t sample_count);
 void tater_wake_engine_add_status(cJSON *payload);
+void tater_wake_engine_verification_result(
+    uint32_t request_id,
+    bool accepted,
+    bool fail_open,
+    const char *reason
+);
 
 #ifdef __cplusplus
 }

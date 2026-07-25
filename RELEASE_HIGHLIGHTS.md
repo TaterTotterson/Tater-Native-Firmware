@@ -1,5 +1,10 @@
-- Updates all supported native satellite targets to firmware version 0.2.3.
-- Upgrades the built-in Hey Tater wake word to the new v2 int8 model.
-- Aligns the built-in wake defaults with the v2 calibration: threshold 0.99, sliding window 5, and close-miss threshold 0.82.
-- Improves validation recall while maintaining zero false accepts across the ambient calibration set.
-- Reports the active model's wake word in trainer captures and voice sessions so custom URL models are classified correctly.
+- Updates all supported native satellite targets to firmware version 0.2.4.
+- Adds optional low-latency Tater STT wake verification with off, observe, and enforce modes plus fail-open timeout handling.
+- Keeps saved Wi-Fi credentials during temporary outages and reconnects indefinitely with capped exponential backoff and jitter.
+- Adds WebSocket lifecycle recovery, reconnect-aware audio handling, and Sat1-safe frame fragmentation to prevent satellites from remaining disconnected after a Tater restart or interrupted voice session.
+- Upgrades the bundled Sat1 XMOS firmware to 1.0.8 with four-microphone DoA estimation, adaptive noise gating, confidence filtering, and smoother direction tracking.
+- Corrects ReSpeaker XVF3800 DoA and speech-detector handling so directional LEDs ignore silent or noise-only updates.
+- Holds the most recent valid Sat1/ReSpeaker direction briefly after speech, then returns the ring to a calm neutral listening glow.
+- Normalizes LED brightness to a true 0-100% scale, raises the default to 80%, and replaces random disconnected twinkles with a stable low-glow state.
+- Improves custom wake-word and wake-sound download, cache, refresh, retry, and diagnostic behavior.
+- Adds host-side regression tests for network recovery and Sat1/ReSpeaker DoA processing.

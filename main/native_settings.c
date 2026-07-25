@@ -80,6 +80,12 @@ static uint8_t json_u8_range(const cJSON *value, uint8_t fallback, uint8_t min_v
     return (uint8_t)(out + 0.5f);
 }
 
+static uint16_t json_u16_range(const cJSON *value, uint16_t fallback, uint16_t min_value, uint16_t max_value)
+{
+    float out = json_float_range(value, fallback, min_value, max_value);
+    return (uint16_t)(out + 0.5f);
+}
+
 void tater_live_settings_init_defaults(void)
 {
     strlcpy_or_empty(s_settings.wake_engine, "micro_wake_word", sizeof(s_settings.wake_engine));
@@ -102,6 +108,9 @@ void tater_live_settings_init_defaults(void)
     s_settings.capture_close_misses = false;
     s_settings.close_miss_threshold = 0.82f;
     strlcpy_or_empty(s_settings.trainer_app_url, "http://trainer.local:8789", sizeof(s_settings.trainer_app_url));
+    strlcpy_or_empty(s_settings.wake_verifier_mode, "off", sizeof(s_settings.wake_verifier_mode));
+    s_settings.wake_verifier_window_ms = 1000;
+    s_settings.wake_verifier_timeout_ms = 500;
     s_settings.wake_sound_enabled = false;
     strlcpy_or_empty(s_settings.wake_sound, "no_sound", sizeof(s_settings.wake_sound));
     strlcpy_or_empty(s_settings.wake_sound_url, "", sizeof(s_settings.wake_sound_url));
@@ -112,7 +121,7 @@ void tater_live_settings_init_defaults(void)
     s_settings.barge_in_enabled = false;
     s_settings.volume_percent = 80;
     s_settings.muted = false;
-    s_settings.led_brightness = 64;
+    s_settings.led_brightness = 80;
     strlcpy_or_empty(s_settings.led_color, "#ff5a1f", sizeof(s_settings.led_color));
     strlcpy_or_empty(s_settings.led_listening_animation, "directional", sizeof(s_settings.led_listening_animation));
     strlcpy_or_empty(s_settings.led_thinking_animation, "sparkle", sizeof(s_settings.led_thinking_animation));
@@ -173,6 +182,9 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *capture_close_misses = cJSON_GetObjectItem(payload, "capture_close_misses");
     const cJSON *close_miss_threshold = cJSON_GetObjectItem(payload, "close_miss_threshold");
     const cJSON *trainer_app_url = cJSON_GetObjectItem(payload, "trainer_app_url");
+    const cJSON *wake_verifier_mode = cJSON_GetObjectItem(payload, "wake_verifier_mode");
+    const cJSON *wake_verifier_window_ms = cJSON_GetObjectItem(payload, "wake_verifier_window_ms");
+    const cJSON *wake_verifier_timeout_ms = cJSON_GetObjectItem(payload, "wake_verifier_timeout_ms");
     const cJSON *wake_sound_enabled = cJSON_GetObjectItem(payload, "wake_sound_enabled");
     const cJSON *wake_sound = cJSON_GetObjectItem(payload, "wake_sound");
     const cJSON *wake_sound_url = cJSON_GetObjectItem(payload, "wake_sound_url");
@@ -214,6 +226,26 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     if (cJSON_IsString(trainer_app_url) && trainer_app_url->valuestring) {
         strlcpy_or_empty(s_settings.trainer_app_url, trainer_app_url->valuestring, sizeof(s_settings.trainer_app_url));
     }
+    if (cJSON_IsString(wake_verifier_mode) && wake_verifier_mode->valuestring) {
+        const char *mode = wake_verifier_mode->valuestring;
+        if (strcmp(mode, "observe") == 0 || strcmp(mode, "enforce") == 0) {
+            strlcpy_or_empty(s_settings.wake_verifier_mode, mode, sizeof(s_settings.wake_verifier_mode));
+        } else {
+            strlcpy_or_empty(s_settings.wake_verifier_mode, "off", sizeof(s_settings.wake_verifier_mode));
+        }
+    }
+    s_settings.wake_verifier_window_ms = json_u16_range(
+        wake_verifier_window_ms,
+        s_settings.wake_verifier_window_ms,
+        500,
+        2000
+    );
+    s_settings.wake_verifier_timeout_ms = json_u16_range(
+        wake_verifier_timeout_ms,
+        s_settings.wake_verifier_timeout_ms,
+        100,
+        2000
+    );
     s_settings.wake_sound_enabled = json_bool(wake_sound_enabled, s_settings.wake_sound_enabled);
     if (cJSON_IsString(wake_sound) && wake_sound->valuestring && wake_sound->valuestring[0]) {
         strlcpy_or_empty(s_settings.wake_sound, wake_sound->valuestring, sizeof(s_settings.wake_sound));
@@ -229,7 +261,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     s_settings.volume_percent = json_u8_range(volume_percent, s_settings.volume_percent, 0, 100);
     bool next_muted = json_bool(muted, s_settings.muted);
     tater_live_settings_set_muted(next_muted);
-    s_settings.led_brightness = json_u8_range(led_brightness, s_settings.led_brightness, 0, 255);
+    s_settings.led_brightness = json_u8_range(led_brightness, s_settings.led_brightness, 0, 100);
     if (cJSON_IsString(led_color) && led_color->valuestring && led_color->valuestring[0]) {
         strlcpy_or_empty(s_settings.led_color, led_color->valuestring, sizeof(s_settings.led_color));
     }
@@ -253,7 +285,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
 
     ESP_LOGI(
         TAG,
-        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s wake_gen=%u sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d led=%u color=%s animations=%s/%s/%s/%s logging=%s",
+        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s wake_gen=%u sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f verifier=%s/%ums/%ums wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d led=%u color=%s animations=%s/%s/%s/%s logging=%s",
         s_settings.wake_engine,
         s_settings.wake_word,
         s_settings.wake_word_url,
@@ -265,6 +297,9 @@ bool tater_live_settings_apply_json(const cJSON *payload)
         s_settings.capture_wake_audio,
         s_settings.capture_close_misses,
         (double)s_settings.close_miss_threshold,
+        s_settings.wake_verifier_mode,
+        s_settings.wake_verifier_window_ms,
+        s_settings.wake_verifier_timeout_ms,
         s_settings.wake_sound_enabled,
         s_settings.wake_sound,
         s_settings.aec_enabled,
@@ -303,6 +338,9 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddBoolToObject(settings, "capture_close_misses", s_settings.capture_close_misses);
     cJSON_AddNumberToObject(settings, "close_miss_threshold", s_settings.close_miss_threshold);
     cJSON_AddStringToObject(settings, "trainer_app_url", s_settings.trainer_app_url);
+    cJSON_AddStringToObject(settings, "wake_verifier_mode", s_settings.wake_verifier_mode);
+    cJSON_AddNumberToObject(settings, "wake_verifier_window_ms", s_settings.wake_verifier_window_ms);
+    cJSON_AddNumberToObject(settings, "wake_verifier_timeout_ms", s_settings.wake_verifier_timeout_ms);
     cJSON_AddBoolToObject(settings, "wake_sound_enabled", s_settings.wake_sound_enabled);
     cJSON_AddStringToObject(settings, "wake_sound", s_settings.wake_sound);
     cJSON_AddStringToObject(settings, "wake_sound_url", s_settings.wake_sound_url);

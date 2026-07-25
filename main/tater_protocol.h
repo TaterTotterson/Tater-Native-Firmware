@@ -48,6 +48,12 @@ void tater_protocol_start_voice(const char *wake_word, const char *source);
 void tater_protocol_start_voice_with_conversation(const char *wake_word, const char *source, const char *conversation_id);
 void tater_protocol_stop_voice(bool abort);
 void tater_protocol_send_audio(const int16_t *pcm, size_t sample_count);
+uint32_t tater_protocol_send_wake_verification(
+    uint32_t request_id,
+    const int16_t *pcm,
+    size_t sample_count,
+    bool enforce
+);
 void tater_protocol_send_log(const char *level, const char *message);
 void tater_protocol_send_playback_finished(void);
 void tater_protocol_send_playback_finished_status(bool ok, bool allow_reopen);

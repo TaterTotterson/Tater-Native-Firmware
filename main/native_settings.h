@@ -18,6 +18,9 @@ typedef struct {
     bool capture_close_misses;
     float close_miss_threshold;
     char trainer_app_url[128];
+    char wake_verifier_mode[12];
+    uint16_t wake_verifier_window_ms;
+    uint16_t wake_verifier_timeout_ms;
     bool wake_sound_enabled;
     char wake_sound[64];
     char wake_sound_url[192];

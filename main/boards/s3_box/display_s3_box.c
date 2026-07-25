@@ -79,7 +79,7 @@ static uint16_t *s_fb;
 static uint16_t *s_dma;
 static bool s_display_ready;
 static volatile tater_state_t s_state = TATER_STATE_DISCONNECTED;
-static uint8_t s_brightness = 64;
+static uint8_t s_brightness = 80;
 static uint32_t s_state_epoch;
 static uint32_t s_render_epoch;
 static uint32_t s_animation_tick;
@@ -1446,8 +1446,8 @@ void tater_leds_set_state(tater_state_t state)
 
 void tater_leds_set_brightness(uint8_t brightness)
 {
-    s_brightness = brightness;
-    gpio_set_level(TATER_LCD_BACKLIGHT, brightness > 0 ? 1 : 0);
+    s_brightness = brightness > 100 ? 100 : brightness;
+    gpio_set_level(TATER_LCD_BACKLIGHT, s_brightness > 0 ? 1 : 0);
 }
 
 void tater_leds_show_setup_reset_clicks(uint8_t clicks, uint8_t required_clicks)

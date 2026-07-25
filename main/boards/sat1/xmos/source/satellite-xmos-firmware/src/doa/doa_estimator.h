@@ -30,3 +30,4 @@ void doa_estimator_process_frame_4(const int32_t *east,
                                    size_t frame_count);
 
 void doa_estimator_get_state(doa_estimator_state_t *state);
+void doa_estimator_reset(void);

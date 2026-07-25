@@ -1,7 +1,6 @@
 #include "audio_i2s.h"
 
 #include <inttypes.h>
-#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -22,6 +21,7 @@
 #include "native_settings.h"
 #include "tater_protocol.h"
 #include "wake_engine.h"
+#include "boards/respeaker_xvf3800/xvf3800_doa.h"
 
 #if TATER_BOARD_RESPEAKER_XVF3800
 
@@ -59,14 +59,12 @@ extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_end[] asm("_binary_xvf3800_i2
 #define XVF_GPO_READ_VALUES 0
 #define XVF_GPO_WRITE_VALUE 1
 #define XVF_GPO_LED_RING_VALUE 18
+#define XVF_GPO_DOA_VALUE 18
+#define XVF_GPO_DOA_RESPONSE_LEN 5
 #define XVF_GPO_PIN_MUTE 30
 #define XVF_GPO_PIN_AMP_ENABLE 31
 #define XVF_GPO_PIN_LED_POWER 33
 #define XVF_GPO_COUNT 5
-
-#define XVF_AEC_RESID 33
-#define XVF_AEC_AZIMUTH_VALUES 75
-#define XVF_AEC_AZIMUTH_RESPONSE_LEN 17
 
 #define CTRL_DONE 0
 #define CTRL_WAIT 1
@@ -80,6 +78,8 @@ extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_end[] asm("_binary_xvf3800_i2
 #define RESPEAKER_XVF_SPK_WRITE_FRAMES RESPEAKER_XVF_SPK_DMA_FRAME_NUM
 #define RESPEAKER_XVF_WAKE_DIAG_PEAK_THRESHOLD 96U
 #define RESPEAKER_XVF_WAKE_DIAG_INTERVAL_US 2000000
+#define RESPEAKER_XVF_DOA_READ_ATTEMPTS 8
+#define RESPEAKER_XVF_DOA_LED_OFFSET 5
 
 static i2s_chan_handle_t s_rx_chan;
 static i2s_chan_handle_t s_tx_chan;
@@ -98,6 +98,7 @@ static portMUX_TYPE s_doa_lock = portMUX_INITIALIZER_UNLOCKED;
 static tater_audio_doa_t s_doa;
 static int64_t s_doa_update_us;
 static uint32_t s_doa_failed_reads;
+static uint32_t s_doa_frame_counter;
 static portMUX_TYPE s_xmos_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static tater_audio_xmos_status_t s_xmos_status = {
     .target_major = XVF_TARGET_MAJOR,
@@ -517,32 +518,49 @@ static esp_err_t xvf_read_doa(tater_audio_doa_t *out)
     if (!out) {
         return ESP_ERR_INVALID_ARG;
     }
-    const uint8_t request[] = {XVF_AEC_RESID, XVF_AEC_AZIMUTH_VALUES | 0x80, XVF_AEC_AZIMUTH_RESPONSE_LEN};
-    uint8_t response[XVF_AEC_AZIMUTH_RESPONSE_LEN] = {0};
-    ESP_RETURN_ON_ERROR(locked_i2c_write_read(request, sizeof(request), response, sizeof(response)), TAG, "azimuth read failed");
-    if (response[0] == CTRL_WAIT || response[0] == CTRL_RETRY) {
+    const uint8_t request[] = {
+        XVF_GPO_RESID,
+        XVF_GPO_DOA_VALUE | 0x80,
+        XVF_GPO_DOA_RESPONSE_LEN,
+    };
+    uint8_t response[XVF_GPO_DOA_RESPONSE_LEN] = {0};
+    bool ready = false;
+    for (uint8_t attempt = 0; attempt < RESPEAKER_XVF_DOA_READ_ATTEMPTS; attempt++) {
+        ESP_RETURN_ON_ERROR(
+            locked_i2c_write_read(request, sizeof(request), response, sizeof(response)),
+            TAG,
+            "doa value read failed"
+        );
+        if (response[0] == CTRL_DONE) {
+            ready = true;
+            break;
+        }
+        if (response[0] != CTRL_WAIT && response[0] != CTRL_RETRY) {
+            return ESP_FAIL;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    if (!ready) {
         return ESP_ERR_TIMEOUT;
     }
-    ESP_RETURN_ON_FALSE(response[0] == CTRL_DONE, ESP_FAIL, TAG, "azimuth status=0x%02x", response[0]);
-    float radians = 0.0f;
-    memcpy(&radians, &response[1 + (3 * sizeof(float))], sizeof(radians));
-    if (!isfinite(radians)) {
+
+    xvf3800_doa_value_t value = {0};
+    if (!xvf3800_doa_decode(
+            response,
+            sizeof(response),
+            TATER_LED_COUNT,
+            RESPEAKER_XVF_DOA_LED_OFFSET,
+            &value)) {
         return ESP_ERR_INVALID_RESPONSE;
     }
-    float degrees = radians * 180.0f / (float)M_PI;
-    while (degrees < 0.0f) {
-        degrees += 360.0f;
-    }
-    while (degrees >= 360.0f) {
-        degrees -= 360.0f;
-    }
-    int angle_index = (int)((degrees / 360.0f) * (float)TATER_LED_COUNT + 0.5f) % TATER_LED_COUNT;
+
     memset(out, 0, sizeof(*out));
-    out->valid = true;
+    out->valid = value.speech_detected;
     out->four_mic = true;
-    out->confidence = 12;
-    out->angle_index = (uint8_t)angle_index;
-    out->energy = 1;
+    out->confidence = value.speech_detected ? 32 : 0;
+    out->angle_index = value.angle_index;
+    out->energy = value.speech_detected ? 1 : 0;
+    out->frame_counter = ++s_doa_frame_counter;
     return ESP_OK;
 }
 

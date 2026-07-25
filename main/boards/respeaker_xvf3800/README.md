@@ -9,6 +9,8 @@ ESP32S3.
 - microphone audio is downsampled to 16 kHz mono for wake/STT streaming
 - LEDs, mute, amplifier, DoA, and XVF firmware update are controlled through
   the XVF3800 I2C command interface
+- directional LEDs use the XVF3800 speech detector to reject silent/noise-only
+  DoA updates, hold the last speech direction briefly, and then return neutral
 - bundled XVF3800 I2S firmware target: `1.0.7`
 - XVF3800 firmware binary and host protocol reference live under `xmos/`
 
@@ -32,3 +34,9 @@ main/boards/respeaker_xvf3800/xmos/host_reference/
 
 That folder is reference-only. It documents the XVF3800 I2C/DFU protocol we
 ported into the native implementation.
+
+Run the host-side DoA response checks with:
+
+```bash
+main/boards/respeaker_xvf3800/scripts/test_xvf3800_doa_host.sh
+```

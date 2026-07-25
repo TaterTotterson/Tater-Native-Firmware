@@ -1,3 +1,12 @@
+<div align="center">
+  <a href="https://taterassistant.com">
+    <img src="images/tater-native-firmware-logo.png" alt="Tater Native Firmware" width="460"/>
+  </a>
+</div>
+<h3 align="center">
+  <a href="https://taterassistant.com">taterassistant.com</a>
+</h3>
+
 # Tater Native Satellite Firmware
 
 Native firmware for Tater-managed voice satellites.
@@ -40,7 +49,8 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 - Device name and room setup
 - Persistent device credential saved after pairing
 - Unpaired native satellites rejected by Tater by default
-- Wi-Fi failure fallback into setup mode on the next boot
+- Saved Wi-Fi credentials are preserved through temporary outages
+- Wi-Fi reconnects indefinitely with capped exponential backoff and jitter
 - Setup mode can also be triggered from Tater
 - Physical setup reset gesture on boards with a center/action button: 5 quick
   clicks, then hold the sixth press for 5 seconds
@@ -53,6 +63,8 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 - Streams mic audio as 16 kHz, 16-bit, mono PCM binary WebSocket frames
 - Uses an audio transmit queue and reconnect-aware send path to reduce random
   voice-session disconnects
+- Uses native WebSocket auto-reconnect plus a lifecycle watchdog that can
+  recover a stuck client without deadlocking an in-flight hello or audio send
 - Supports native firmware OTA commands from Tater
 - Sends logs, OTA status, playback-finished events, timer events, and trainer
   feedback events
@@ -62,6 +74,8 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 - Local embedded `hey_tater` microWakeWord model
 - Custom microWakeWord `.json` and `.tflite` URL support with persistent cache
 - Wake sensitivity, environment profile, threshold, and sliding-window settings
+- Optional low-latency Tater STT wake verification in observe or enforce mode,
+  with fail-open handling if verification is unavailable or times out
 - Optional good-wake and close-miss raw PCM upload hooks for the trainer
 - Continued-chat mic reopen
 - Optional wake-word barge-in during playback
@@ -83,8 +97,11 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 - Setup mode animation stays white
 - Listening, thinking, tool-call, replying, speaking, timer, OTA, provisioning,
   Wi-Fi, connecting, disconnected, and error states
-- Per-device LED color, brightness, and animation settings
-- Directional listening animation from XMOS DoA where available
+- Per-device LED color, true 0-100% brightness, and animation settings
+- Stable, low-glow disconnected state without random idle LED flashes
+- Directional listening animation from XMOS DoA where available, with
+  speech/confidence gating, a brief direction hold, and a neutral listening
+  state on Sat1 and ReSpeaker
 - Tool-call visual hold until the final response
 - Display targets render Tater state, clock/date, assistant name, volume/mute,
   and Tater-provided status/stat cards instead of LED-ring animations
@@ -118,7 +135,9 @@ Satellite1 / Sat1:
 - Shared-duplex I2S speaker playback
 - PCM5122/TAS2780 speaker path setup
 - FUSB302B USB-C PD setup path
-- XMOS DoA telemetry and firmware version/status reporting
+- Four-microphone XMOS DoA estimation with noise calibration, confidence
+  filtering, smoothing, and firmware version/status reporting
+- XMOS firmware auto-update to `1.0.8` when the installed version differs
 - Line-out capability advertised to Tater
 
 ReSpeaker XVF3800:
@@ -127,7 +146,8 @@ ReSpeaker XVF3800:
 - 48 kHz stereo I2S slave capture from the XVF3800, downsampled into the 16 kHz
   wake/STT path
 - Shared-duplex I2S playback back into the XVF3800 speaker/line-out path
-- XVF3800 DoA telemetry for directional listening LEDs
+- XVF3800 DoA and speech-detector telemetry for stable directional listening
+  LEDs that ignore silent/noise-only direction updates
 - XVF3800 firmware auto-update to the included `1.0.7` I2S host firmware when
   the installed version differs
 - Mute state bridged through the XVF3800 control interface
@@ -302,7 +322,7 @@ main/
   app_main.c                  Shared app startup
   tater_protocol.c            Native WebSocket protocol
   playback.c                  WAV/MP3/FLAC playback and tones
-  wake_engine.c               microWakeWord integration
+  wake_engine.cc              microWakeWord integration
   native_settings.c           Live settings from Tater
   audio_aec.c                 Firmware-side adaptive AEC
   provisioning.c              Setup AP, captive DNS, setup web UI

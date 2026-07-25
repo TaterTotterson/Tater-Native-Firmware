@@ -13,8 +13,11 @@ Current status:
 - shared-duplex I2S speaker playback
 - PCM5122/TAS2780 speaker path setup
 - FUSB302B USB-C PD setup path
-- XMOS DoA telemetry
-- bundled XMOS factory image `1.0.6`
+- four-microphone XMOS DoA estimation with adaptive room-noise calibration,
+  confidence filtering, and directional smoothing
+- directional LEDs reject weak/noise-only updates, hold the last speech
+  direction briefly, and then return to a neutral listening glow
+- bundled XMOS factory image `1.0.8`
 - boot-time XMOS auto-update when the installed image does not match the bundled image
 - line-out capability advertised to Tater
 - firmware-side AEC shared with Voice PE

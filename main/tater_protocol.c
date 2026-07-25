@@ -1,5 +1,6 @@
 #include "tater_protocol.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@
 #include "esp_wifi.h"
 #include "esp_websocket_client.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "audio_aec.h"
@@ -28,6 +30,22 @@
 
 static const char *TAG = "tater_proto";
 static const char *NATIVE_WS_PATH = "/api/tater/satellite/v1/ws";
+
+#if TATER_BOARD_SAT1
+/*
+ * The Espressif websocket transport doesn't retry a partial payload write
+ * within the same frame, so larger frames can become malformed even though
+ * the API reports the full message length. Keep enough receive space for
+ * settings and command messages; outbound messages are explicitly fragmented.
+ */
+#define TATER_WS_BUFFER_SIZE 1024
+#define TATER_WS_TX_FRAGMENT_SIZE 256
+#define TATER_WAKE_VERIFY_TX_FRAGMENT_SIZE 512
+#else
+#define TATER_WS_BUFFER_SIZE 4096
+#define TATER_WS_TX_FRAGMENT_SIZE 4096
+#define TATER_WAKE_VERIFY_TX_FRAGMENT_SIZE 4096
+#endif
 
 #ifndef TATER_CAP_LINE_OUT
 #define TATER_CAP_LINE_OUT false
@@ -61,6 +79,7 @@ static uint32_t s_voice_generation;
 static int64_t s_voice_started_us;
 static char s_voice_source[24];
 static int64_t s_last_link_down_us;
+static int64_t s_link_down_started_us;
 static int64_t s_last_reconnect_attempt_us;
 static int64_t s_last_hello_us;
 static bool s_hello_acked;
@@ -86,6 +105,9 @@ static int s_last_audio_send_result;
 static uint32_t s_last_audio_send_samples;
 static uint32_t s_audio_send_failure_total;
 static bool s_recreate_client_on_reconnect;
+static volatile bool s_ws_lifecycle_restart;
+static uint32_t s_ws_restart_count;
+static uint32_t s_ws_restart_failures;
 
 static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 static int send_audio_locked(const int16_t *pcm, size_t sample_count, TickType_t timeout);
@@ -114,15 +136,18 @@ static tater_reset_diag_t s_reset_diag;
 
 typedef struct {
     char conversation_id[sizeof(s_pending_reopen_conversation_id)];
+    bool task_with_caps;
 } tater_reopen_args_t;
 
 typedef struct {
     uint32_t generation;
+    bool task_with_caps;
 } tater_voice_watchdog_args_t;
 
-#define TATER_WS_RECONNECT_AFTER_MS 7000
-#define TATER_WS_RECONNECT_MIN_INTERVAL_MS 7000
+#define TATER_WS_RECONNECT_AFTER_MS 30000
+#define TATER_WS_RECONNECT_MIN_INTERVAL_MS 10000
 #define TATER_WS_HELLO_ACK_TIMEOUT_MS 5000
+#define TATER_WS_RESTART_FAILURE_LIMIT 3
 #define TATER_PLAYBACK_VISUAL_HOLD_MS 30000
 
 #define TATER_AUDIO_PREROLL_SAMPLES (TATER_MIC_SAMPLE_RATE)
@@ -140,12 +165,21 @@ typedef struct {
 #define TATER_AUDIO_TX_CONGESTED_DEPTH 64
 #define TATER_AUDIO_TX_RECOVERY_DEPTH 24
 #define TATER_AUDIO_TX_SLOW_SEND_MS 1200
+#define TATER_VOICE_START_ACK_GRACE_MS 500
 #define TATER_CONTINUED_REOPEN_HARD_TIMEOUT_MS 12000
 
 typedef struct {
     uint16_t samples;
     int16_t pcm[TATER_AUDIO_TX_BATCH_FRAMES];
 } tater_audio_tx_chunk_t;
+
+typedef struct {
+    uint8_t *packet;
+    size_t packet_size;
+    uint32_t request_id;
+    bool enforce;
+    bool task_with_caps;
+} tater_wake_verify_tx_args_t;
 
 static int16_t s_audio_preroll[TATER_AUDIO_PREROLL_SAMPLES];
 static size_t s_audio_preroll_start;
@@ -168,6 +202,54 @@ static int64_t s_status_deferred_log_us;
 static double now_seconds(void)
 {
     return (double)esp_timer_get_time() / 1000000.0;
+}
+
+static BaseType_t create_transient_task(
+    TaskFunction_t task,
+    const char *name,
+    uint32_t stack_depth,
+    void *arg,
+    UBaseType_t priority,
+    bool *task_with_caps
+)
+{
+    if (task_with_caps) {
+        *task_with_caps = false;
+    }
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    if (task_with_caps) {
+        *task_with_caps = true;
+    }
+    BaseType_t created = xTaskCreateWithCaps(
+        task,
+        name,
+        stack_depth,
+        arg,
+        priority,
+        NULL,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (created == pdPASS) {
+        return created;
+    }
+    if (task_with_caps) {
+        *task_with_caps = false;
+    }
+#endif
+    return xTaskCreate(task, name, stack_depth, arg, priority, NULL);
+}
+
+static void delete_transient_task(bool task_with_caps)
+{
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    if (task_with_caps) {
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+#else
+    (void)task_with_caps;
+#endif
+    vTaskDelete(NULL);
 }
 
 static const char *reset_reason_name(esp_reset_reason_t reason)
@@ -407,7 +489,11 @@ static void emit_state(tater_state_t state, const char *detail)
 static void mark_link_down(const char *detail)
 {
     bool changed = s_connected || s_voice_active;
-    s_last_link_down_us = esp_timer_get_time();
+    int64_t now_us = esp_timer_get_time();
+    s_last_link_down_us = now_us;
+    if (s_link_down_started_us <= 0) {
+        s_link_down_started_us = now_us;
+    }
     snprintf(s_last_link_down_detail, sizeof(s_last_link_down_detail), "%s", detail ? detail : "disconnected");
     s_connected = false;
     s_hello_acked = false;
@@ -428,12 +514,12 @@ static void mark_link_down(const char *detail)
 
 static bool websocket_ready(void)
 {
-    return s_client && s_connected && s_hello_acked && esp_websocket_client_is_connected(s_client);
+    return !s_ws_lifecycle_restart && s_client && s_connected && s_hello_acked;
 }
 
 static bool websocket_transport_ready(void)
 {
-    return s_client && s_connected && esp_websocket_client_is_connected(s_client);
+    return !s_ws_lifecycle_restart && s_client && s_connected;
 }
 
 static void remember_websocket_error(const esp_websocket_event_data_t *data)
@@ -454,17 +540,17 @@ static esp_err_t create_websocket_client(void)
         .uri = s_ws_url,
         .task_prio = 8,
         .task_stack = 8192,
-        .buffer_size = 4096,
+        .buffer_size = TATER_WS_BUFFER_SIZE,
         .ping_interval_sec = 30,
         .pingpong_timeout_sec = 30,
         .keep_alive_enable = true,
         .keep_alive_idle = 30,
         .keep_alive_interval = 10,
         .keep_alive_count = 3,
-        .disable_auto_reconnect = true,
+        .disable_auto_reconnect = false,
         .reconnect_timeout_ms = 3000,
         .network_timeout_ms = 15000,
-        .enable_close_reconnect = false,
+        .enable_close_reconnect = true,
         .headers = strlen(s_auth_header) > 0 ? s_auth_header : NULL,
     };
     esp_websocket_client_handle_t client = esp_websocket_client_init(&cfg);
@@ -480,22 +566,89 @@ static esp_err_t create_websocket_client(void)
     return ESP_OK;
 }
 
+static esp_err_t restart_websocket_client(bool recreate_client)
+{
+    s_ws_lifecycle_restart = true;
+    s_ws_restart_count++;
+    mark_link_down(recreate_client ? "websocket auth refresh" : "websocket lifecycle restart");
+
+    /*
+     * Stop new sends through websocket_ready(), then briefly acquire the send
+     * lock to let an in-flight frame finish. Never hold this lock while
+     * stopping the WebSocket task: its CONNECTED callback sends hello and may
+     * need the same lock.
+     */
+    if (s_send_lock) {
+        xSemaphoreTake(s_send_lock, portMAX_DELAY);
+        xSemaphoreGive(s_send_lock);
+    }
+
+    esp_websocket_client_handle_t client = s_client;
+    if (client) {
+        esp_err_t stop_err = esp_websocket_client_stop(client);
+        if (stop_err != ESP_OK) {
+            ESP_LOGW(TAG, "websocket lifecycle stop result=%s", esp_err_to_name(stop_err));
+        }
+    }
+
+    if (recreate_client || !client) {
+        if (client) {
+            s_client = NULL;
+            esp_err_t destroy_err = esp_websocket_client_destroy(client);
+            if (destroy_err != ESP_OK) {
+                ESP_LOGW(TAG, "websocket lifecycle destroy result=%s", esp_err_to_name(destroy_err));
+            }
+        }
+        esp_err_t create_err = create_websocket_client();
+        if (create_err != ESP_OK) {
+            s_ws_lifecycle_restart = false;
+            ESP_LOGE(TAG, "websocket lifecycle create result=%s", esp_err_to_name(create_err));
+            return create_err;
+        }
+        s_recreate_client_on_reconnect = false;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(250));
+
+    /*
+     * Clear the gate before start so WEBSOCKET_EVENT_CONNECTED can send hello.
+     * Other senders still see s_connected=false until that event arrives.
+     */
+    s_ws_lifecycle_restart = false;
+    esp_err_t start_err = esp_websocket_client_start(s_client);
+    if (start_err != ESP_OK) {
+        ESP_LOGW(TAG, "websocket lifecycle start result=%s", esp_err_to_name(start_err));
+    }
+    return start_err;
+}
+
 static void reconnect_watchdog_task(void *arg)
 {
     (void)arg;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        if (!s_client || websocket_ready()) {
+        if (s_ws_lifecycle_restart) {
             continue;
         }
 
         int64_t now_us = esp_timer_get_time();
         int64_t since_attempt_us = s_last_reconnect_attempt_us > 0 ? now_us - s_last_reconnect_attempt_us : INT64_MAX;
-        int64_t down_us = s_last_link_down_us > 0 ? now_us - s_last_link_down_us : now_us;
+        int64_t down_us = s_link_down_started_us > 0 ? now_us - s_link_down_started_us : now_us;
         int64_t hello_age_us = s_last_hello_us > 0 ? now_us - s_last_hello_us : INT64_MAX;
+        bool recreate_client = s_recreate_client_on_reconnect || !s_client;
         const char *reason = "down";
 
-        if (websocket_transport_ready() && !s_hello_acked) {
+        if (websocket_ready() && !recreate_client) {
+            s_ws_restart_failures = 0;
+            continue;
+        }
+
+        if (s_recreate_client_on_reconnect) {
+            if (since_attempt_us < (int64_t)TATER_WS_RECONNECT_MIN_INTERVAL_MS * 1000) {
+                continue;
+            }
+            reason = "auth_refresh";
+        } else if (websocket_transport_ready() && !s_hello_acked) {
             if (hello_age_us < (int64_t)TATER_WS_HELLO_ACK_TIMEOUT_MS * 1000
                 || since_attempt_us < (int64_t)TATER_WS_RECONNECT_MIN_INTERVAL_MS * 1000) {
                 continue;
@@ -510,56 +663,33 @@ static void reconnect_watchdog_task(void *arg)
         }
 
         s_last_reconnect_attempt_us = now_us;
-        bool client_connected = esp_websocket_client_is_connected(s_client);
         ESP_LOGW(
             TAG,
             "websocket reconnect watchdog reason=%s down_ms=%lld client_connected=%d hello_acked=%d",
             reason,
             (long long)(down_us / 1000),
-            client_connected,
+            s_connected,
             s_hello_acked
         );
 
-        if (s_send_lock) {
-            xSemaphoreTake(s_send_lock, portMAX_DELAY);
-        }
-        bool recreate_client = s_recreate_client_on_reconnect;
-        esp_err_t stop_err = esp_websocket_client_stop(s_client);
-        if (stop_err != ESP_OK) {
-            ESP_LOGW(TAG, "websocket watchdog stop result=%s", esp_err_to_name(stop_err));
-        }
-        if (recreate_client) {
-            ESP_LOGI(TAG, "websocket watchdog recreating client with updated auth header");
-            esp_err_t destroy_err = esp_websocket_client_destroy(s_client);
-            if (destroy_err != ESP_OK) {
-                ESP_LOGW(TAG, "websocket watchdog destroy result=%s", esp_err_to_name(destroy_err));
-            }
-            s_client = NULL;
-            esp_err_t create_err = create_websocket_client();
-            if (create_err != ESP_OK) {
-                ESP_LOGE(TAG, "websocket watchdog create result=%s", esp_err_to_name(create_err));
-                if (s_send_lock) {
-                    xSemaphoreGive(s_send_lock);
-                }
-                continue;
-            }
-            s_recreate_client_on_reconnect = false;
-        }
-        if (s_send_lock) {
-            xSemaphoreGive(s_send_lock);
+        esp_err_t restart_err = restart_websocket_client(recreate_client);
+        if (restart_err == ESP_OK) {
+            s_ws_restart_failures = 0;
+            continue;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(250));
-
-        if (s_send_lock) {
-            xSemaphoreTake(s_send_lock, portMAX_DELAY);
-        }
-        esp_err_t start_err = esp_websocket_client_start(s_client);
-        if (s_send_lock) {
-            xSemaphoreGive(s_send_lock);
-        }
-        if (start_err != ESP_OK) {
-            ESP_LOGW(TAG, "websocket watchdog start result=%s", esp_err_to_name(start_err));
+        s_ws_restart_failures++;
+        ESP_LOGE(
+            TAG,
+            "websocket lifecycle recovery failed count=%lu/%u err=%s",
+            (unsigned long)s_ws_restart_failures,
+            TATER_WS_RESTART_FAILURE_LIMIT,
+            esp_err_to_name(restart_err)
+        );
+        if (s_ws_restart_failures >= TATER_WS_RESTART_FAILURE_LIMIT) {
+            ESP_LOGE(TAG, "websocket client cannot restart; rebooting for network stack recovery");
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_restart();
         }
     }
 }
@@ -788,9 +918,11 @@ static void audio_tx_task(void *arg)
     (void)arg;
     tater_audio_tx_chunk_t chunk;
     tater_audio_tx_chunk_t next;
+    TickType_t next_send_tick = 0;
 
     while (true) {
         if (!audio_tx_pop(&chunk, NULL)) {
+            next_send_tick = 0;
             xSemaphoreTake(s_audio_tx_has_data, portMAX_DELAY);
             continue;
         }
@@ -847,15 +979,44 @@ static void audio_tx_task(void *arg)
             }
         }
 
+        /*
+         * A preroll flush can put roughly half a second of PCM in the queue at
+         * once. Sending that backlog in a tight loop fills the TCP window and
+         * makes esp_websocket_client abort the whole connection on its next
+         * write timeout. Pace queued PCM by its sample duration. Live capture
+         * remains naturally paced because its next batch is not ready before
+         * this deadline.
+         */
+        TickType_t now_tick = xTaskGetTickCount();
+        if (next_send_tick != 0 && now_tick < next_send_tick) {
+            vTaskDelay(next_send_tick - now_tick);
+        }
+        TickType_t send_tick = xTaskGetTickCount();
+
         int sent = -1;
+        bool attempted = false;
         int64_t start_us = esp_timer_get_time();
         xSemaphoreTake(s_send_lock, portMAX_DELAY);
         if (websocket_ready() && s_voice_active && !s_voice_start_pending) {
+            attempted = true;
             sent = send_audio_locked(chunk.pcm, chunk.samples, pdMS_TO_TICKS(TATER_AUDIO_TX_SEND_TIMEOUT_MS));
         }
         xSemaphoreGive(s_send_lock);
+        if (!attempted) {
+            /* The server may end VAD while this chunk is waiting for pacing. */
+            next_send_tick = 0;
+            continue;
+        }
         uint32_t elapsed_ms = (uint32_t)((esp_timer_get_time() - start_us) / 1000);
         record_audio_send_result(sent, chunk.samples, elapsed_ms, depth_after);
+        if (sent >= (int)(chunk.samples * sizeof(int16_t))) {
+            uint32_t audio_ms = ((uint32_t)chunk.samples * 1000U + (TATER_MIC_SAMPLE_RATE - 1U))
+                / TATER_MIC_SAMPLE_RATE;
+            TickType_t audio_ticks = pdMS_TO_TICKS(audio_ms);
+            next_send_tick = send_tick + (audio_ticks > 0 ? audio_ticks : 1);
+        } else {
+            next_send_tick = 0;
+        }
 
         if (sent >= (int)(chunk.samples * sizeof(int16_t))
             && elapsed_ms >= TATER_AUDIO_TX_SLOW_SEND_MS
@@ -929,9 +1090,179 @@ static void buffer_audio_preroll_locked(const int16_t *pcm, size_t sample_count)
     }
 }
 
+static int send_websocket_message_locked(
+    const char *data,
+    size_t len,
+    bool binary,
+    TickType_t timeout,
+    size_t fragment_size)
+{
+    if (!data || len == 0 || len > INT_MAX || fragment_size == 0 || fragment_size > INT_MAX) {
+        return -1;
+    }
+    if (len <= fragment_size) {
+        return binary
+            ? esp_websocket_client_send_bin(s_client, data, (int)len, timeout)
+            : esp_websocket_client_send_text(s_client, data, (int)len, timeout);
+    }
+
+    size_t offset = 0;
+    size_t chunk_len = fragment_size;
+    int sent = binary
+        ? esp_websocket_client_send_bin_partial(s_client, data, (int)chunk_len, timeout)
+        : esp_websocket_client_send_text_partial(s_client, data, (int)chunk_len, timeout);
+    if (sent != (int)chunk_len) {
+        return -1;
+    }
+    offset += chunk_len;
+
+    while (offset < len) {
+        chunk_len = len - offset;
+        if (chunk_len > fragment_size) {
+            chunk_len = fragment_size;
+        }
+        sent = esp_websocket_client_send_cont_msg(
+            s_client,
+            data + offset,
+            (int)chunk_len,
+            timeout
+        );
+        if (sent != (int)chunk_len) {
+            return -1;
+        }
+        offset += chunk_len;
+    }
+
+    if (esp_websocket_client_send_fin(s_client, timeout) < 0) {
+        return -1;
+    }
+    return (int)len;
+}
+
 static int send_audio_locked(const int16_t *pcm, size_t sample_count, TickType_t timeout)
 {
-    return esp_websocket_client_send_bin(s_client, (const char *)pcm, sample_count * sizeof(int16_t), timeout);
+    return send_websocket_message_locked(
+        (const char *)pcm,
+        sample_count * sizeof(int16_t),
+        true,
+        timeout,
+        TATER_WS_TX_FRAGMENT_SIZE
+    );
+}
+
+static void write_le32(uint8_t *dst, uint32_t value)
+{
+    dst[0] = (uint8_t)(value & 0xffU);
+    dst[1] = (uint8_t)((value >> 8) & 0xffU);
+    dst[2] = (uint8_t)((value >> 16) & 0xffU);
+    dst[3] = (uint8_t)((value >> 24) & 0xffU);
+}
+
+static void wake_verify_tx_task(void *arg)
+{
+    tater_wake_verify_tx_args_t *request = (tater_wake_verify_tx_args_t *)arg;
+    uint8_t *packet = request ? request->packet : NULL;
+    size_t packet_size = request ? request->packet_size : 0;
+    uint32_t request_id = request ? request->request_id : 0;
+    bool enforce = request && request->enforce;
+    bool task_with_caps = request && request->task_with_caps;
+    int sent = -1;
+    int64_t started_us = esp_timer_get_time();
+
+    if (request && packet && packet_size > 0) {
+        xSemaphoreTake(s_send_lock, portMAX_DELAY);
+        if (websocket_ready()) {
+            sent = send_websocket_message_locked(
+                (const char *)packet,
+                packet_size,
+                true,
+                pdMS_TO_TICKS(250),
+                TATER_WAKE_VERIFY_TX_FRAGMENT_SIZE
+            );
+        }
+        xSemaphoreGive(s_send_lock);
+    }
+    uint32_t elapsed_ms = (uint32_t)((esp_timer_get_time() - started_us) / 1000);
+    ESP_LOGI(
+        TAG,
+        "wake verifier upload request=%lu bytes=%u result=%d elapsed_ms=%u enforce=%d",
+        (unsigned long)request_id,
+        (unsigned)packet_size,
+        sent,
+        (unsigned)elapsed_ms,
+        enforce
+    );
+    if (packet) {
+        heap_caps_free(packet);
+    }
+    free(request);
+    if (sent != (int)packet_size && enforce) {
+        tater_wake_engine_verification_result(request_id, true, true, "upload_fail_open");
+    }
+    delete_transient_task(task_with_caps);
+}
+
+uint32_t tater_protocol_send_wake_verification(
+    uint32_t request_id,
+    const int16_t *pcm,
+    size_t sample_count,
+    bool enforce
+)
+{
+    const size_t header_size = 20;
+    if (
+        request_id == 0
+        || !websocket_ready()
+        || !pcm
+        || sample_count == 0
+        || sample_count > (size_t)(TATER_MIC_SAMPLE_RATE * 2)
+    ) {
+        return 0;
+    }
+    size_t pcm_size = sample_count * sizeof(int16_t);
+    size_t packet_size = header_size + pcm_size;
+    uint8_t *packet = (uint8_t *)heap_caps_malloc(packet_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!packet) {
+        packet = (uint8_t *)heap_caps_malloc(packet_size, MALLOC_CAP_8BIT);
+    }
+    if (!packet) {
+        ESP_LOGW(TAG, "wake verifier packet alloc failed bytes=%u", (unsigned)packet_size);
+        return 0;
+    }
+
+    memcpy(packet, "TWV1", 4);
+    packet[4] = 1;
+    packet[5] = 1;
+    packet[6] = enforce ? 1 : 0;
+    packet[7] = 0;
+    write_le32(packet + 8, request_id);
+    write_le32(packet + 12, TATER_MIC_SAMPLE_RATE);
+    write_le32(packet + 16, (uint32_t)sample_count);
+    memcpy(packet + header_size, pcm, pcm_size);
+
+    tater_wake_verify_tx_args_t *request = (tater_wake_verify_tx_args_t *)calloc(1, sizeof(tater_wake_verify_tx_args_t));
+    if (!request) {
+        heap_caps_free(packet);
+        return 0;
+    }
+    request->packet = packet;
+    request->packet_size = packet_size;
+    request->request_id = request_id;
+    request->enforce = enforce;
+    if (create_transient_task(
+            wake_verify_tx_task,
+            "wake_verify_tx",
+            4096,
+            request,
+            5,
+            &request->task_with_caps
+        ) != pdPASS) {
+        heap_caps_free(packet);
+        free(request);
+        ESP_LOGW(TAG, "wake verifier upload task create failed");
+        return 0;
+    }
+    return request_id;
 }
 
 static void flush_audio_preroll_locked(void)
@@ -1080,13 +1411,24 @@ static int send_json(cJSON *root)
         return -1;
     }
 
+    bool attempted = false;
+    int sent = -1;
     xSemaphoreTake(s_send_lock, portMAX_DELAY);
-    int sent = esp_websocket_client_send_text(s_client, wire, strlen(wire), pdMS_TO_TICKS(1000));
+    if (is_hello ? websocket_transport_ready() : websocket_ready()) {
+        attempted = true;
+        sent = send_websocket_message_locked(
+            wire,
+            strlen(wire),
+            false,
+            pdMS_TO_TICKS(1000),
+            TATER_WS_TX_FRAGMENT_SIZE
+        );
+    }
     xSemaphoreGive(s_send_lock);
-    if (should_log_send(type, sent)) {
+    if (attempted && should_log_send(type, sent)) {
         ESP_LOGI(TAG, "json send type=%s bytes=%u result=%d", type, (unsigned)strlen(wire), sent);
     }
-    if (sent < 0) {
+    if (attempted && sent < 0) {
         mark_link_down("websocket send failed");
     }
     cJSON_free(wire);
@@ -1416,6 +1758,20 @@ static void handle_text_message(const char *data, int len)
             }
             xSemaphoreGive(s_send_lock);
         }
+    } else if (strcmp(type, "wake.verify.result") == 0 && cJSON_IsObject(payload)) {
+        const cJSON *request_item = cJSON_GetObjectItem(payload, "request_id");
+        const cJSON *accepted_item = cJSON_GetObjectItem(payload, "accepted");
+        const cJSON *available_item = cJSON_GetObjectItem(payload, "available");
+        const cJSON *reason_item = cJSON_GetObjectItem(payload, "reason");
+        uint32_t request_id = cJSON_IsNumber(request_item)
+            ? (uint32_t)request_item->valuedouble
+            : 0;
+        bool accepted = json_truthy(accepted_item);
+        bool fail_open = cJSON_IsBool(available_item) && !cJSON_IsTrue(available_item);
+        const char *reason = cJSON_IsString(reason_item) && reason_item->valuestring
+            ? reason_item->valuestring
+            : "";
+        tater_wake_engine_verification_result(request_id, accepted, fail_open, reason);
     } else if (strcmp(type, "voice.event") == 0 && cJSON_IsObject(payload)) {
         const cJSON *event_item = cJSON_GetObjectItem(payload, "event");
         const cJSON *data = cJSON_GetObjectItem(payload, "data");
@@ -1556,6 +1912,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
     case WEBSOCKET_EVENT_CONNECTED:
         s_connected = true;
         s_hello_acked = false;
+        s_link_down_started_us = 0;
         s_last_reconnect_attempt_us = 0;
         clear_voice_capture_state();
         s_rx_text_logs = 0;
@@ -1800,9 +2157,27 @@ void tater_protocol_send_status(const char *state)
     cJSON_AddNumberToObject(transport, "last_ws_stack_err", s_last_ws_stack_err);
     cJSON_AddNumberToObject(transport, "last_ws_sock_errno", s_last_ws_sock_errno);
     cJSON_AddNumberToObject(transport, "last_ws_http_status", s_last_ws_http_status);
+    cJSON_AddBoolToObject(transport, "auto_reconnect", true);
+    cJSON_AddBoolToObject(transport, "lifecycle_restart_active", s_ws_lifecycle_restart);
+    cJSON_AddNumberToObject(transport, "lifecycle_restarts", s_ws_restart_count);
+    cJSON_AddNumberToObject(transport, "lifecycle_restart_failures", s_ws_restart_failures);
     cJSON_AddItemToObject(payload, "transport", transport);
     cJSON_AddItemToObject(payload, "reset", reset_diag_json());
+#if TATER_BOARD_SAT1
+    /*
+     * The server already owns and reports the desired live settings.  Echoing
+     * their URLs and animation names here pushed Sat1 status frames beyond
+     * 4096 bytes, which some websocket paths fail to consume.  Keep only the
+     * applied generation for drift diagnostics and leave room for crash and
+     * board diagnostics.
+     */
+    const tater_live_settings_t *applied_settings = tater_live_settings_get();
+    if (applied_settings) {
+        cJSON_AddNumberToObject(payload, "settings_generation", applied_settings->wake_settings_generation);
+    }
+#else
     tater_live_settings_add_status(payload);
+#endif
     tater_wake_engine_add_status(payload);
     tater_audio_aec_stats_t aec = {0};
     if (tater_audio_aec_stats_snapshot(&aec)) {
@@ -1943,7 +2318,14 @@ void tater_protocol_start_voice_with_conversation(const char *wake_word, const c
         tater_voice_watchdog_args_t *request = (tater_voice_watchdog_args_t *)calloc(1, sizeof(tater_voice_watchdog_args_t));
         if (request) {
             request->generation = generation;
-            if (xTaskCreate(continued_reopen_watchdog_task, "reopen_watchdog", 3072, request, 4, NULL) != pdPASS) {
+            if (create_transient_task(
+                    continued_reopen_watchdog_task,
+                    "reopen_watchdog",
+                    3072,
+                    request,
+                    4,
+                    &request->task_with_caps
+                ) != pdPASS) {
                 free(request);
                 ESP_LOGW(TAG, "continued chat reopen watchdog task create failed");
             }
@@ -1985,13 +2367,37 @@ void tater_protocol_send_audio(const int16_t *pcm, size_t sample_count)
         return;
     }
 
+    bool ack_grace_expired = false;
     xSemaphoreTake(s_send_lock, portMAX_DELAY);
     if (s_voice_start_pending) {
-        buffer_audio_preroll_locked(pcm, sample_count);
-        xSemaphoreGive(s_send_lock);
-        return;
+        int64_t pending_ms = s_voice_started_us > 0
+            ? (esp_timer_get_time() - s_voice_started_us) / 1000
+            : 0;
+        if (pending_ms < TATER_VOICE_START_ACK_GRACE_MS) {
+            buffer_audio_preroll_locked(pcm, sample_count);
+            xSemaphoreGive(s_send_lock);
+            return;
+        }
+
+        /*
+         * A voice.start text frame and the following binary frames share one
+         * ordered websocket connection, so audio cannot overtake voice.start.
+         * Do not let a slow or lost acknowledgement leave the microphone
+         * permanently gated: release the buffered audio after a short grace
+         * period and still honor a later negative acknowledgement.
+         */
+        s_voice_start_pending = false;
+        flush_audio_preroll_locked();
+        ack_grace_expired = true;
     }
     xSemaphoreGive(s_send_lock);
+    if (ack_grace_expired) {
+        ESP_LOGW(
+            TAG,
+            "voice.start ack delayed beyond %u ms; streaming audio",
+            (unsigned)TATER_VOICE_START_ACK_GRACE_MS
+        );
+    }
 
     size_t depth = audio_tx_queue_depth();
     if (depth >= TATER_AUDIO_TX_CONGESTED_DEPTH) {
@@ -2035,6 +2441,7 @@ static void continued_reopen_watchdog_task(void *arg)
 {
     tater_voice_watchdog_args_t *request = (tater_voice_watchdog_args_t *)arg;
     uint32_t generation = request ? request->generation : 0;
+    bool task_with_caps = request && request->task_with_caps;
     free(request);
 
     vTaskDelay(pdMS_TO_TICKS(TATER_CONTINUED_REOPEN_HARD_TIMEOUT_MS));
@@ -2054,12 +2461,13 @@ static void continued_reopen_watchdog_task(void *arg)
         tater_protocol_stop_voice(true);
     }
 
-    vTaskDelete(NULL);
+    delete_transient_task(task_with_caps);
 }
 
 static void continued_reopen_task(void *arg)
 {
     tater_reopen_args_t *request = (tater_reopen_args_t *)arg;
+    bool task_with_caps = request && request->task_with_caps;
     char conversation_id[sizeof(s_pending_reopen_conversation_id)] = {0};
     if (request) {
         snprintf(conversation_id, sizeof(conversation_id), "%s", request->conversation_id);
@@ -2071,13 +2479,13 @@ static void continued_reopen_task(void *arg)
         if (!websocket_ready()) {
             ESP_LOGW(TAG, "continued chat reopen skipped: websocket not ready");
             emit_state(s_connected ? TATER_STATE_IDLE : TATER_STATE_DISCONNECTED, "continued reopen skipped");
-            vTaskDelete(NULL);
+            delete_transient_task(task_with_caps);
             return;
         }
         ESP_LOGI(TAG, "continued chat reopening mic conversation_id=%s", conversation_id);
         tater_protocol_start_voice_with_conversation("", "continued_chat", conversation_id);
     }
-    vTaskDelete(NULL);
+    delete_transient_task(task_with_caps);
 }
 
 void tater_protocol_send_playback_finished_status(bool ok, bool allow_reopen)
@@ -2115,7 +2523,14 @@ void tater_protocol_send_playback_finished_status(bool ok, bool allow_reopen)
         tater_reopen_args_t *request = (tater_reopen_args_t *)calloc(1, sizeof(tater_reopen_args_t));
         if (request) {
             snprintf(request->conversation_id, sizeof(request->conversation_id), "%s", conversation_id);
-            if (xTaskCreate(continued_reopen_task, "tater_reopen", 4096, request, 5, NULL) != pdPASS) {
+            if (create_transient_task(
+                    continued_reopen_task,
+                    "tater_reopen",
+                    4096,
+                    request,
+                    5,
+                    &request->task_with_caps
+                ) != pdPASS) {
                 free(request);
                 ESP_LOGW(TAG, "continued chat reopen task create failed");
                 emit_state(websocket_ready() ? TATER_STATE_IDLE : TATER_STATE_DISCONNECTED, "continued reopen task failed");

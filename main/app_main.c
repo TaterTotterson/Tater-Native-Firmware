@@ -129,11 +129,12 @@ void app_main(void)
 
     err = tater_wifi_connect(&s_config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Wi-Fi connection failed; returning to setup mode on next boot");
-        tater_leds_set_state(TATER_STATE_ERROR);
-        ESP_ERROR_CHECK_WITHOUT_ABORT(tater_config_forget_wifi());
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        esp_restart();
+        ESP_LOGW(
+            TAG,
+            "initial Wi-Fi connection unavailable (%s); preserving credentials and continuing background recovery",
+            esp_err_to_name(err)
+        );
+        tater_leds_set_state(TATER_STATE_DISCONNECTED);
     }
     tater_protocol_init(&s_config, on_tater_state, on_tater_play_url, on_tater_play_tone, on_tater_ota_url);
     tater_protocol_start();

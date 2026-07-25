@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "tensorflow/lite/c/common.h"
@@ -68,6 +69,7 @@ constexpr size_t kWakeManifestMaxBytes = 16 * 1024;
 constexpr size_t kWakeDownloadedModelMaxBytes = 512 * 1024;
 constexpr size_t kWakeDownloadedSoundMaxBytes = 512 * 1024;
 constexpr int64_t kWakeDownloadStaleUs = 30000000;
+constexpr int64_t kWakeDownloadRetryDelayUs = 5000000;
 constexpr size_t kCaptureBufferSamples = kAudioSampleRate * 3;
 constexpr size_t kCaptureUploadBufferSize = 2048;
 constexpr int kCaptureUploadTimeoutMs = 15000;
@@ -98,6 +100,7 @@ struct DownloadedWakeModel {
 struct WakeDownloadRequest {
     char url[256];
     uint32_t generation;
+    bool task_with_caps;
 };
 
 struct WakeSoundDownloadRequest {
@@ -120,6 +123,7 @@ struct CaptureUploadRequest {
     float rise_score;
     uint8_t active_window_count;
     uint8_t min_active_windows;
+    bool task_with_caps;
 };
 
 struct PendingCloseMiss {
@@ -135,6 +139,11 @@ struct PendingCloseMiss {
     float rise_score;
     uint8_t active_window_count;
     uint8_t min_active_windows;
+};
+
+struct WakeVerifierTimeoutRequest {
+    uint32_t request_id;
+    uint16_t timeout_ms;
 };
 
 uint8_t *s_wake_arena = nullptr;
@@ -195,6 +204,7 @@ uint32_t s_custom_cache_failures = 0;
 uint32_t s_custom_download_generation = 0;
 uint32_t s_observed_wake_settings_generation = 0;
 int64_t s_custom_download_started_us = 0;
+int64_t s_custom_download_retry_after_us = 0;
 char s_requested_wake_sound_url[192] = "";
 char s_downloading_wake_sound_url[192] = "";
 bool s_wake_sound_download_running = false;
@@ -226,6 +236,17 @@ char s_capture_last_event_type[16] = "";
 char s_capture_last_error[96] = "";
 PendingCloseMiss s_pending_close_miss = {};
 int64_t s_last_close_miss_upload_us = 0;
+SemaphoreHandle_t s_wake_verifier_lock = nullptr;
+uint32_t s_wake_verifier_generation = 0;
+uint32_t s_wake_verifier_pending_id = 0;
+uint32_t s_wake_verifier_last_id = 0;
+uint32_t s_wake_verifier_completed_id = 0;
+uint32_t s_wake_verifier_count = 0;
+uint32_t s_wake_verifier_rejections = 0;
+uint32_t s_wake_verifier_fail_open = 0;
+bool s_wake_verifier_pending = false;
+char s_wake_verifier_pending_word[32] = "";
+char s_wake_verifier_last_reason[64] = "";
 
 void set_last_error(const char *message)
 {
@@ -939,7 +960,12 @@ bool ensure_capture_ring()
 
 bool capture_settings_enabled(const tater_live_settings_t *settings)
 {
-    return settings && (settings->capture_wake_audio || settings->capture_close_misses);
+    return settings
+        && (
+            settings->capture_wake_audio
+            || settings->capture_close_misses
+            || std::strcmp(settings->wake_verifier_mode, "off") != 0
+        );
 }
 
 void append_capture_audio(const int16_t *pcm, size_t sample_count)
@@ -985,6 +1011,38 @@ uint8_t *snapshot_capture_audio(size_t *out_byte_count)
     }
     *out_byte_count = byte_count;
     return raw;
+}
+
+int16_t *snapshot_capture_audio_tail(size_t requested_samples, size_t *out_sample_count)
+{
+    if (out_sample_count) {
+        *out_sample_count = 0;
+    }
+    if (
+        !out_sample_count
+        || !s_capture_ring
+        || requested_samples == 0
+        || s_capture_ring_count < (size_t)(kAudioSampleRate / 2)
+    ) {
+        return nullptr;
+    }
+    size_t sample_count = std::min(requested_samples, s_capture_ring_count);
+    int16_t *copy = static_cast<int16_t *>(
+        heap_caps_malloc(sample_count * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+    );
+    if (!copy) {
+        copy = static_cast<int16_t *>(heap_caps_malloc(sample_count * sizeof(int16_t), MALLOC_CAP_8BIT));
+    }
+    if (!copy) {
+        ESP_LOGW(TAG, "wake verifier snapshot alloc failed samples=%u", (unsigned)sample_count);
+        return nullptr;
+    }
+    size_t offset = s_capture_ring_count - sample_count;
+    for (size_t i = 0; i < sample_count; i++) {
+        copy[i] = s_capture_ring[(s_capture_ring_start + offset + i) % kCaptureBufferSamples];
+    }
+    *out_sample_count = sample_count;
+    return copy;
 }
 
 bool tater_server_host(char *out, size_t out_len)
@@ -1064,6 +1122,7 @@ void build_capture_upload_url(const char *base_url, char *out, size_t out_len)
 void capture_upload_task(void *arg)
 {
     CaptureUploadRequest *request = static_cast<CaptureUploadRequest *>(arg);
+    bool task_with_caps = request && request->task_with_caps;
     if (!request) {
         vTaskDelete(nullptr);
         return;
@@ -1179,6 +1238,14 @@ done:
     }
     heap_caps_free(request);
     s_capture_upload_running = false;
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    if (task_with_caps) {
+        vTaskDeleteWithCaps(nullptr);
+        return;
+    }
+#else
+    (void)task_with_caps;
+#endif
     vTaskDelete(nullptr);
 }
 
@@ -1264,7 +1331,25 @@ void queue_capture_upload(
     request->min_active_windows = min_active_windows;
 
     s_capture_upload_running = true;
-    BaseType_t created = xTaskCreatePinnedToCore(capture_upload_task, "wake_capture_up", 8192, request, 3, NULL, 0);
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    request->task_with_caps = true;
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+        capture_upload_task,
+        "wake_capture_up",
+        8192,
+        request,
+        3,
+        NULL,
+        0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+#else
+    BaseType_t created = pdFAIL;
+#endif
+    if (created != pdPASS) {
+        request->task_with_caps = false;
+        created = xTaskCreatePinnedToCore(capture_upload_task, "wake_capture_up", 8192, request, 3, NULL, 0);
+    }
     if (created != pdPASS) {
         s_capture_upload_running = false;
         heap_caps_free(request->pcm_data);
@@ -1725,6 +1810,236 @@ esp_err_t play_custom_wake_sound(const char *url)
     return ESP_ERR_NOT_FOUND;
 }
 
+void start_wake_session(const char *wake_word)
+{
+    const tater_live_settings_t *settings = tater_live_settings_get();
+    bool barge_in = settings && settings->barge_in_enabled && tater_playback_is_playing();
+    if (barge_in) {
+        ESP_LOGI(TAG, "barge-in stopping playback before voice start");
+        tater_protocol_send_log("info", "barge-in stopped playback");
+        tater_playback_stop();
+    }
+    const tater_wake_sound_asset_t *wake_sound = settings && settings->wake_sound_enabled
+        ? tater_wake_sound_asset_lookup(settings->wake_sound)
+        : nullptr;
+    if (wake_sound && !barge_in) {
+        esp_err_t sound_err = tater_playback_play_wav_data_local(
+            wake_sound->data,
+            (size_t)(wake_sound->end - wake_sound->data),
+            wake_sound->id);
+        if (sound_err != ESP_OK) {
+            ESP_LOGW(TAG, "wake sound start failed: %s", esp_err_to_name(sound_err));
+            tater_protocol_send_log("warn", "wake sound start failed");
+        }
+    } else if (!barge_in && settings && settings->wake_sound_enabled && settings->wake_sound_url[0]) {
+        esp_err_t sound_err = play_custom_wake_sound(settings->wake_sound_url);
+        if (sound_err == ESP_ERR_NOT_FOUND) {
+            ESP_LOGI(
+                TAG,
+                "wake sound caching for future wake id=%s url=%s",
+                settings->wake_sound,
+                settings->wake_sound_url
+            );
+            tater_protocol_send_log("info", "wake sound caching");
+        } else if (sound_err != ESP_OK) {
+            ESP_LOGW(
+                TAG,
+                "wake sound start failed id=%s: %s",
+                settings->wake_sound,
+                esp_err_to_name(sound_err)
+            );
+            tater_protocol_send_log("warn", "wake sound start failed");
+        }
+    } else if (!barge_in && settings && settings->wake_sound_enabled &&
+               std::strcmp(settings->wake_sound, "no_sound") != 0) {
+        ESP_LOGW(TAG, "wake sound asset not found: %s", settings->wake_sound);
+        tater_protocol_send_log("warn", "wake sound asset not found");
+    }
+    tater_protocol_start_voice(wake_word, "micro_wake_word");
+    tater_wake_engine_reset();
+}
+
+void complete_wake_verification(
+    uint32_t request_id,
+    bool accepted,
+    bool fail_open,
+    const char *reason
+)
+{
+    bool enforced = false;
+    bool should_start = false;
+    char wake_word[32] = "";
+    bool handled = false;
+
+    if (s_wake_verifier_lock) {
+        xSemaphoreTake(s_wake_verifier_lock, portMAX_DELAY);
+    }
+    if (
+        request_id != 0
+        && request_id == s_wake_verifier_last_id
+        && request_id != s_wake_verifier_completed_id
+    ) {
+        handled = true;
+        s_wake_verifier_completed_id = request_id;
+        s_wake_verifier_count++;
+        if (!accepted && !fail_open) {
+            s_wake_verifier_rejections++;
+        }
+        if (fail_open) {
+            s_wake_verifier_fail_open++;
+        }
+        std::snprintf(
+            s_wake_verifier_last_reason,
+            sizeof(s_wake_verifier_last_reason),
+            "%s",
+            reason && reason[0] ? reason : (accepted ? "accepted" : "rejected")
+        );
+        if (s_wake_verifier_pending && request_id == s_wake_verifier_pending_id) {
+            enforced = true;
+            should_start = accepted || fail_open;
+            std::snprintf(
+                wake_word,
+                sizeof(wake_word),
+                "%s",
+                s_wake_verifier_pending_word
+            );
+            s_wake_verifier_pending = false;
+            s_wake_verifier_pending_id = 0;
+            s_wake_verifier_pending_word[0] = '\0';
+        }
+    }
+    if (s_wake_verifier_lock) {
+        xSemaphoreGive(s_wake_verifier_lock);
+    }
+
+    if (!handled) {
+        return;
+    }
+    ESP_LOGI(
+        TAG,
+        "wake verifier result request=%lu accepted=%d fail_open=%d enforced=%d reason=%s",
+        (unsigned long)request_id,
+        accepted,
+        fail_open,
+        enforced,
+        reason ? reason : ""
+    );
+    if (!enforced) {
+        return;
+    }
+    if (should_start) {
+        tater_protocol_send_log("info", fail_open ? "wake verifier fail-open" : "wake verifier accepted");
+        start_wake_session(wake_word);
+    } else {
+        tater_protocol_send_log("info", "wake verifier rejected false wake");
+        tater_wake_engine_reset();
+    }
+}
+
+void wake_verifier_timeout_task(void *arg)
+{
+    WakeVerifierTimeoutRequest *request = static_cast<WakeVerifierTimeoutRequest *>(arg);
+    uint32_t request_id = request ? request->request_id : 0;
+    uint16_t timeout_ms = request ? request->timeout_ms : 500;
+    delete request;
+    vTaskDelay(pdMS_TO_TICKS(timeout_ms));
+    complete_wake_verification(request_id, true, true, "satellite_timeout_fail_open");
+    vTaskDelete(nullptr);
+}
+
+bool queue_wake_verification(const tater_live_settings_t *settings, const char *wake_word)
+{
+    if (!settings || std::strcmp(settings->wake_verifier_mode, "off") == 0) {
+        return false;
+    }
+    bool enforce = std::strcmp(settings->wake_verifier_mode, "enforce") == 0;
+    size_t requested_samples = (
+        (size_t)kAudioSampleRate * (size_t)settings->wake_verifier_window_ms
+    ) / 1000U;
+    size_t sample_count = 0;
+    int16_t *pcm = snapshot_capture_audio_tail(requested_samples, &sample_count);
+    if (!pcm || sample_count == 0) {
+        if (pcm) {
+            heap_caps_free(pcm);
+        }
+        ESP_LOGW(TAG, "wake verifier skipped: capture ring not ready");
+        return false;
+    }
+
+    uint32_t request_id = 0;
+    if (s_wake_verifier_lock) {
+        xSemaphoreTake(s_wake_verifier_lock, portMAX_DELAY);
+    }
+    s_wake_verifier_generation++;
+    if (s_wake_verifier_generation == 0) {
+        s_wake_verifier_generation = 1;
+    }
+    request_id = s_wake_verifier_generation;
+    s_wake_verifier_last_id = request_id;
+    s_wake_verifier_completed_id = 0;
+    std::snprintf(s_wake_verifier_last_reason, sizeof(s_wake_verifier_last_reason), "%s", "pending");
+    if (enforce) {
+        s_wake_verifier_pending = true;
+        s_wake_verifier_pending_id = request_id;
+        std::snprintf(
+            s_wake_verifier_pending_word,
+            sizeof(s_wake_verifier_pending_word),
+            "%s",
+            wake_word ? wake_word : ""
+        );
+    }
+    if (s_wake_verifier_lock) {
+        xSemaphoreGive(s_wake_verifier_lock);
+    }
+
+    uint32_t queued_id = tater_protocol_send_wake_verification(
+        request_id,
+        pcm,
+        sample_count,
+        enforce
+    );
+    heap_caps_free(pcm);
+    if (queued_id == 0) {
+        complete_wake_verification(request_id, true, true, "queue_fail_open");
+        return enforce;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "wake verifier queued request=%lu mode=%s samples=%u timeout_ms=%u",
+        (unsigned long)request_id,
+        settings->wake_verifier_mode,
+        (unsigned)sample_count,
+        (unsigned)settings->wake_verifier_timeout_ms
+    );
+    if (!enforce) {
+        return true;
+    }
+
+    WakeVerifierTimeoutRequest *timeout = new (std::nothrow) WakeVerifierTimeoutRequest{
+        request_id,
+        settings->wake_verifier_timeout_ms,
+    };
+    if (!timeout) {
+        complete_wake_verification(request_id, true, true, "timeout_alloc_fail_open");
+        return true;
+    }
+    BaseType_t created = xTaskCreatePinnedToCore(
+        wake_verifier_timeout_task,
+        "wake_verify_wait",
+        3072,
+        timeout,
+        3,
+        nullptr,
+        0
+    );
+    if (created != pdPASS) {
+        delete timeout;
+        complete_wake_verification(request_id, true, true, "timeout_task_fail_open");
+    }
+    return true;
+}
+
 void set_custom_download_running(bool running, const char *url, uint32_t generation)
 {
     if (s_custom_model_lock) {
@@ -1742,6 +2057,55 @@ void set_custom_download_running(bool running, const char *url, uint32_t generat
     if (s_custom_model_lock) {
         xSemaphoreGive(s_custom_model_lock);
     }
+}
+
+void set_custom_download_retry_after(int64_t retry_after_us, uint32_t generation)
+{
+    if (s_custom_model_lock) {
+        xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
+    }
+    if (generation == 0 || generation == s_custom_download_generation) {
+        s_custom_download_retry_after_us = retry_after_us;
+    }
+    if (s_custom_model_lock) {
+        xSemaphoreGive(s_custom_model_lock);
+    }
+}
+
+void wake_model_download_task(void *arg);
+
+BaseType_t create_wake_download_task(WakeDownloadRequest *request)
+{
+    if (!request) {
+        return pdFAIL;
+    }
+
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    request->task_with_caps = true;
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+        wake_model_download_task,
+        "wake_model_dl",
+        8192,
+        request,
+        4,
+        NULL,
+        0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (created == pdPASS) {
+        return created;
+    }
+    ESP_LOGW(
+        TAG,
+        "wake download PSRAM task create failed psram=%u internal=%u largest=%u; retrying internal",
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+    );
+#endif
+
+    request->task_with_caps = false;
+    return xTaskCreatePinnedToCore(wake_model_download_task, "wake_model_dl", 8192, request, 4, NULL, 0);
 }
 
 void queue_pending_custom_model(DownloadedWakeModel *model)
@@ -1768,9 +2132,11 @@ void wake_model_download_task(void *arg)
     WakeDownloadRequest *request = static_cast<WakeDownloadRequest *>(arg);
     char requested_url[sizeof(request->url)] = {0};
     uint32_t request_generation = 0;
+    bool task_with_caps = false;
     if (request) {
         std::snprintf(requested_url, sizeof(requested_url), "%s", request->url);
         request_generation = request->generation;
+        task_with_caps = request->task_with_caps;
         heap_caps_free(request);
     }
 
@@ -1819,8 +2185,11 @@ void wake_model_download_task(void *arg)
 done:
     if (!ok) {
         s_custom_download_failures++;
+        set_custom_download_retry_after(esp_timer_get_time() + kWakeDownloadRetryDelayUs, request_generation);
         ESP_LOGE(TAG, "wake model custom download failed url=%s", requested_url);
         tater_protocol_send_log("error", "wake model download failed");
+    } else {
+        set_custom_download_retry_after(0, request_generation);
     }
     if (json_data) {
         heap_caps_free(json_data);
@@ -1829,6 +2198,14 @@ done:
         heap_caps_free(model.data);
     }
     set_custom_download_running(false, "", request_generation);
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    if (task_with_caps) {
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+#else
+    (void)task_with_caps;
+#endif
     vTaskDelete(NULL);
 }
 
@@ -1876,9 +2253,16 @@ bool start_custom_wake_model_download(const char *url, bool force_download)
     }
     bool already_running = s_custom_download_running;
     bool already_requested = std::strcmp(s_requested_custom_url, url) == 0;
+    int64_t now_us = esp_timer_get_time();
     bool stale_running = already_running && s_custom_download_started_us > 0 &&
-        (esp_timer_get_time() - s_custom_download_started_us) > kWakeDownloadStaleUs;
+        (now_us - s_custom_download_started_us) > kWakeDownloadStaleUs;
     if (already_requested && already_running && !stale_running) {
+        if (s_custom_model_lock) {
+            xSemaphoreGive(s_custom_model_lock);
+        }
+        return s_ready;
+    }
+    if (already_requested && !already_running && now_us < s_custom_download_retry_after_us) {
         if (s_custom_model_lock) {
             xSemaphoreGive(s_custom_model_lock);
         }
@@ -1911,6 +2295,7 @@ bool start_custom_wake_model_download(const char *url, bool force_download)
     request_generation = s_custom_download_generation;
     s_custom_download_running = true;
     s_custom_download_started_us = esp_timer_get_time();
+    s_custom_download_retry_after_us = 0;
     std::snprintf(s_downloading_custom_url, sizeof(s_downloading_custom_url), "%s", url);
     if (s_custom_model_lock) {
         xSemaphoreGive(s_custom_model_lock);
@@ -1919,16 +2304,25 @@ bool start_custom_wake_model_download(const char *url, bool force_download)
     WakeDownloadRequest *request = static_cast<WakeDownloadRequest *>(heap_caps_calloc(1, sizeof(WakeDownloadRequest), MALLOC_CAP_8BIT));
     if (!request) {
         set_custom_download_running(false, "", request_generation);
+        set_custom_download_retry_after(esp_timer_get_time() + kWakeDownloadRetryDelayUs, request_generation);
         set_last_error("custom wake request alloc failed");
         return false;
     }
     std::snprintf(request->url, sizeof(request->url), "%s", url);
     request->generation = request_generation;
-    BaseType_t created = xTaskCreatePinnedToCore(wake_model_download_task, "wake_model_dl", 8192, request, 4, NULL, 0);
+    BaseType_t created = create_wake_download_task(request);
     if (created != pdPASS) {
         heap_caps_free(request);
         set_custom_download_running(false, "", request_generation);
+        set_custom_download_retry_after(esp_timer_get_time() + kWakeDownloadRetryDelayUs, request_generation);
         set_last_error("custom wake download task failed");
+        ESP_LOGE(
+            TAG,
+            "wake download task create failed psram=%u internal=%u largest=%u; retrying in 5 seconds",
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+        );
         return false;
     }
     set_last_error("wake model downloading");
@@ -1940,7 +2334,8 @@ bool ensure_selected_wake_model(const tater_live_settings_t *settings)
     const char *wake_word = settings ? settings->wake_word : "hey_tater";
     if (is_custom_wake_word(wake_word)) {
         uint32_t generation = settings ? settings->wake_settings_generation : 0;
-        bool force_download = generation != s_observed_wake_settings_generation;
+        bool force_download = s_observed_wake_settings_generation != 0 &&
+            generation != s_observed_wake_settings_generation;
         bool ok = start_custom_wake_model_download(settings ? settings->wake_word_url : "", force_download);
         if (ok) {
             s_observed_wake_settings_generation = generation;
@@ -2270,7 +2665,8 @@ void handle_feature_frame(const int8_t *feature)
     format_probability_history(probability_history, sizeof(probability_history));
     clear_pending_close_miss();
     s_detection_count++;
-    s_cooldown_until_us = esp_timer_get_time() + cooldown_us_for_environment(wake_environment_from_settings(settings));
+    int64_t trigger_time_us = esp_timer_get_time();
+    s_cooldown_until_us = trigger_time_us + cooldown_us_for_environment(wake_environment_from_settings(settings));
     ESP_LOGI(
         TAG,
         "wake detected score=%.3f avg=%.3f peak=%.3f threshold=%.3f profile=%s active=%u/%u rise=%.3f",
@@ -2297,39 +2693,13 @@ void handle_feature_frame(const int8_t *feature)
         s_last_rise_score,
         probability_history
     );
-    bool barge_in = settings && settings->barge_in_enabled && tater_playback_is_playing();
-    if (barge_in) {
-        ESP_LOGI(TAG, "barge-in stopping playback before voice start");
-        tater_protocol_send_log("info", "barge-in stopped playback");
-        tater_playback_stop();
+    bool verifier_queued = queue_wake_verification(settings, wake_word);
+    bool verifier_enforced = verifier_queued
+        && settings
+        && std::strcmp(settings->wake_verifier_mode, "enforce") == 0;
+    if (!verifier_enforced) {
+        start_wake_session(wake_word);
     }
-    const tater_wake_sound_asset_t *wake_sound = settings && settings->wake_sound_enabled
-        ? tater_wake_sound_asset_lookup(settings->wake_sound)
-        : nullptr;
-    if (wake_sound && !barge_in) {
-        esp_err_t sound_err = tater_playback_play_wav_data_local(
-            wake_sound->data,
-            (size_t)(wake_sound->end - wake_sound->data),
-            wake_sound->id);
-        if (sound_err != ESP_OK) {
-            ESP_LOGW(TAG, "wake sound start failed: %s", esp_err_to_name(sound_err));
-            tater_protocol_send_log("warn", "wake sound start failed");
-        }
-    } else if (!barge_in && settings && settings->wake_sound_enabled && std::strcmp(settings->wake_sound, "custom") == 0) {
-        esp_err_t sound_err = play_custom_wake_sound(settings->wake_sound_url);
-        if (sound_err == ESP_ERR_NOT_FOUND) {
-            ESP_LOGI(TAG, "custom wake sound caching for future wake url=%s", settings->wake_sound_url);
-            tater_protocol_send_log("info", "custom wake sound caching");
-        } else if (sound_err != ESP_OK) {
-            ESP_LOGW(TAG, "custom wake sound start failed: %s", esp_err_to_name(sound_err));
-            tater_protocol_send_log("warn", "custom wake sound start failed");
-        }
-    } else if (!barge_in && settings && settings->wake_sound_enabled && std::strcmp(settings->wake_sound, "no_sound") != 0) {
-        ESP_LOGW(TAG, "wake sound asset not found: %s", settings->wake_sound);
-        tater_protocol_send_log("warn", "wake sound asset not found");
-    }
-    tater_protocol_start_voice(wake_word, "micro_wake_word");
-    tater_wake_engine_reset();
 }
 
 void process_audio_frontend(const int16_t *pcm, size_t sample_count)
@@ -2370,6 +2740,9 @@ extern "C" esp_err_t tater_wake_engine_init(void)
     }
     if (!s_wake_sound_lock) {
         s_wake_sound_lock = xSemaphoreCreateMutex();
+    }
+    if (!s_wake_verifier_lock) {
+        s_wake_verifier_lock = xSemaphoreCreateMutex();
     }
 
     FrontendFillConfigWithDefaults(&s_frontend_config);
@@ -2431,6 +2804,16 @@ extern "C" void tater_wake_engine_reset(void)
     if (s_wake_interpreter) {
         (void)s_wake_interpreter->Reset();
     }
+}
+
+extern "C" void tater_wake_engine_verification_result(
+    uint32_t request_id,
+    bool accepted,
+    bool fail_open,
+    const char *reason
+)
+{
+    complete_wake_verification(request_id, accepted, fail_open, reason);
 }
 
 extern "C" void tater_wake_engine_note_audio(const int16_t *pcm, size_t sample_count)
@@ -2562,6 +2945,32 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     cJSON_AddStringToObject(wake, "last_reject_reason", s_last_reject_reason);
     cJSON_AddStringToObject(wake, "last_error", s_last_error);
     cJSON_AddBoolToObject(wake, "runtime_enabled", s_runtime_was_enabled);
+    bool verifier_pending = false;
+    uint32_t verifier_pending_id = 0;
+    uint32_t verifier_count = 0;
+    uint32_t verifier_rejections = 0;
+    uint32_t verifier_fail_open = 0;
+    char verifier_reason[64] = "";
+    if (s_wake_verifier_lock) {
+        xSemaphoreTake(s_wake_verifier_lock, portMAX_DELAY);
+    }
+    verifier_pending = s_wake_verifier_pending;
+    verifier_pending_id = s_wake_verifier_pending_id;
+    verifier_count = s_wake_verifier_count;
+    verifier_rejections = s_wake_verifier_rejections;
+    verifier_fail_open = s_wake_verifier_fail_open;
+    std::snprintf(verifier_reason, sizeof(verifier_reason), "%s", s_wake_verifier_last_reason);
+    if (s_wake_verifier_lock) {
+        xSemaphoreGive(s_wake_verifier_lock);
+    }
+    cJSON *verifier = cJSON_CreateObject();
+    cJSON_AddBoolToObject(verifier, "pending", verifier_pending);
+    cJSON_AddNumberToObject(verifier, "pending_id", verifier_pending_id);
+    cJSON_AddNumberToObject(verifier, "completed", verifier_count);
+    cJSON_AddNumberToObject(verifier, "rejections", verifier_rejections);
+    cJSON_AddNumberToObject(verifier, "fail_open", verifier_fail_open);
+    cJSON_AddStringToObject(verifier, "last_reason", verifier_reason);
+    cJSON_AddItemToObject(wake, "verifier", verifier);
     cJSON *capture = cJSON_CreateObject();
     cJSON_AddBoolToObject(capture, "upload_running", s_capture_upload_running);
     cJSON_AddNumberToObject(capture, "uploads", s_capture_upload_count);

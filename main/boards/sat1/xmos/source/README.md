@@ -47,6 +47,12 @@ Then build with:
 
 The build script expects XMOS XTC Tools to be installed. Set `XMOS_TOOL_PATH` if XTC is not installed at `/Applications/XMOS_XTC_15.3.1`.
 
+Run the host-side direction estimator checks with:
+
+```bash
+scripts/test_doa_estimator_host.sh
+```
+
 ## Current Source Base
 
 This source started from `FutureProofHomes/Satellite1-XMOS` at:
