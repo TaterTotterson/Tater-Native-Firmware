@@ -1,4 +1,8 @@
-- Updates all supported native satellite targets to firmware version 0.2.6.
+- Updates all supported native satellite targets to firmware version 0.2.7.
+- Restores ReSpeaker directional listening to the XVF3800's built-in auto-select AEC azimuth instead of the incorrect LED/GPO read path.
+- Makes the ReSpeaker listening state clearly visible while waiting for a fresh direction, then briefly holds the last direction before returning neutral.
+- Prevents random ReSpeaker single-LED flicker by limiting custom ring frames and mute polling on the shared XVF3800 I2C control path and skipping unchanged frames.
+- Restores the animated Wi-Fi/Tater connection twinkle instead of the temporary solid connection glow.
 - Prevents a tone-task stack overflow that could reboot ReSpeaker when Tater restores or starts a timer alarm.
 - Fixes Satellite1 XMOS 1.0.8 installation and recovery after an OTA update by keeping direct-flash SPI transfers within the ESP32-S3 non-DMA hardware limit.
 - Corrects the Satellite1 XMOS page-verification buffer size so every 256-byte page can be read back and verified safely.

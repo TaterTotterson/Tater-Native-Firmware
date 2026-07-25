@@ -21,6 +21,8 @@ static const char *TAG = "tater_leds";
 static bool s_led_ready;
 #if TATER_BOARD_RESPEAKER_XVF3800
 static uint8_t s_xvf_pixels[TATER_LED_COUNT * 3];
+static uint8_t s_xvf_last_pixels[TATER_LED_COUNT * 3];
+static bool s_xvf_last_frame_valid;
 #else
 static led_strip_handle_t s_strip;
 #endif
@@ -155,7 +157,22 @@ static void refresh_leds(void)
 {
 #if TATER_BOARD_RESPEAKER_XVF3800
     if (s_led_ready) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(tater_audio_xvf3800_set_led_ring(s_xvf_pixels, TATER_LED_COUNT));
+        if (s_xvf_last_frame_valid &&
+            memcmp(s_xvf_pixels, s_xvf_last_pixels, sizeof(s_xvf_pixels)) == 0) {
+            return;
+        }
+        esp_err_t err =
+            tater_audio_xvf3800_set_led_ring(s_xvf_pixels, TATER_LED_COUNT);
+        if (err == ESP_OK) {
+            memcpy(
+                s_xvf_last_pixels,
+                s_xvf_pixels,
+                sizeof(s_xvf_pixels));
+            s_xvf_last_frame_valid = true;
+        } else {
+            s_xvf_last_frame_valid = false;
+            ESP_ERROR_CHECK_WITHOUT_ABORT(err);
+        }
     }
 #else
     if (s_strip) {
@@ -553,8 +570,13 @@ static void directional_listening(rgb_t color)
 #if TATER_BOARD_SAT1 || TATER_BOARD_RESPEAKER_XVF3800
     bool show_direction = has_valid_doa || had_recent_direction;
     if (!show_direction) {
+#if TATER_BOARD_RESPEAKER_XVF3800
+        float neutral_level =
+            0.20f + (triangle_wave(s_animation_tick, 28) * 0.12f);
+#else
         float neutral_level =
             0.08f + (triangle_wave(s_animation_tick, 28) * 0.05f);
+#endif
         for (int i = 0; i < TATER_LED_COUNT; i++) {
             set_pixel(
                 i,
@@ -1165,11 +1187,7 @@ static void render(void)
         break;
     case TATER_STATE_DISCONNECTED:
     default:
-        if (s_animation_tick < 20) {
-            fill(0, 0, 0);
-        } else {
-            fill(18, 3, 0);
-        }
+        twinkle(s_animation_tick, TATER_ORANGE);
         break;
     }
     refresh_leds();
@@ -1182,6 +1200,11 @@ static void led_task(void *arg)
         if (s_led_ready) {
             render();
         }
+#if TATER_BOARD_RESPEAKER_XVF3800
+        // Seeed's XVF3800 examples limit custom ring updates to 100 ms.
+        // The LED, DoA, and mute controls all share the same I2C endpoint.
+        uint32_t delay_ms = 100;
+#else
         uint32_t delay_ms = 80;
         if (s_state == TATER_STATE_SPEAKING) {
             delay_ms = 40;
@@ -1192,6 +1215,7 @@ static void led_task(void *arg)
             delay_ms = 50;
 #endif
         }
+#endif
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 }

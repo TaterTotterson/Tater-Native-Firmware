@@ -336,9 +336,12 @@ static void sat1_poll_extra_buttons(
 #endif
 
 #if TATER_BOARD_RESPEAKER_XVF3800
+#define XVF_MUTE_POLL_MS 100
+#define XVF_MUTE_POLL_TICKS (XVF_MUTE_POLL_MS / BUTTON_POLL_MS)
+#define XVF_MUTE_DEBOUNCE_POLLS 2
 #define XVF_SETUP_RESET_TOGGLE_COUNT 8
-#define XVF_SETUP_RESET_TOGGLE_WINDOW_TICKS (8000 / BUTTON_POLL_MS)
-#define XVF_SETUP_RESET_HOLD_TICKS (5000 / BUTTON_POLL_MS)
+#define XVF_SETUP_RESET_TOGGLE_WINDOW_TICKS (8000 / XVF_MUTE_POLL_MS)
+#define XVF_SETUP_RESET_HOLD_TICKS (5000 / XVF_MUTE_POLL_MS)
 
 typedef struct {
     bool stable_on;
@@ -360,7 +363,7 @@ static void xvf_switch_init(xvf_switch_t *sw, bool on)
     }
     sw->stable_on = on;
     sw->last_raw_on = on;
-    sw->stable_count = BUTTON_DEBOUNCE_TICKS;
+    sw->stable_count = XVF_MUTE_DEBOUNCE_POLLS;
 }
 
 static bool xvf_switch_update(xvf_switch_t *sw, bool raw_on, bool *changed)
@@ -372,14 +375,14 @@ static bool xvf_switch_update(xvf_switch_t *sw, bool raw_on, bool *changed)
         return raw_on;
     }
     if (raw_on == sw->last_raw_on) {
-        if (sw->stable_count < BUTTON_DEBOUNCE_TICKS) {
+        if (sw->stable_count < XVF_MUTE_DEBOUNCE_POLLS) {
             sw->stable_count++;
         }
     } else {
         sw->stable_count = 0;
         sw->last_raw_on = raw_on;
     }
-    if (sw->stable_count >= BUTTON_DEBOUNCE_TICKS && raw_on != sw->stable_on) {
+    if (sw->stable_count >= XVF_MUTE_DEBOUNCE_POLLS && raw_on != sw->stable_on) {
         sw->stable_on = raw_on;
         if (changed) {
             *changed = true;
@@ -674,6 +677,7 @@ static void button_task(void *arg)
 #endif
 #if TATER_BOARD_RESPEAKER_XVF3800
     bool xvf_mute_initialized = false;
+    int xvf_mute_poll_ticks = 0;
     xvf_switch_t xvf_mute_switch = {0};
     xvf_setup_reset_t xvf_setup_reset = {0};
 #endif
@@ -834,7 +838,14 @@ static void button_task(void *arg)
         voicepe_poll_mute_switch(&voicepe_mute_initialized, &voicepe_mute_switch);
 #endif
 #if TATER_BOARD_RESPEAKER_XVF3800
-        xvf_poll_mute_switch(&xvf_mute_initialized, &xvf_mute_switch, &xvf_setup_reset);
+        xvf_mute_poll_ticks++;
+        if (xvf_mute_poll_ticks >= XVF_MUTE_POLL_TICKS) {
+            xvf_mute_poll_ticks = 0;
+            xvf_poll_mute_switch(
+                &xvf_mute_initialized,
+                &xvf_mute_switch,
+                &xvf_setup_reset);
+        }
 #endif
         vTaskDelay(pdMS_TO_TICKS(BUTTON_POLL_MS));
     }

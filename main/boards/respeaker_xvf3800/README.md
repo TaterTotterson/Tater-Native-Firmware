@@ -9,8 +9,12 @@ ESP32S3.
 - microphone audio is downsampled to 16 kHz mono for wake/STT streaming
 - LEDs, mute, amplifier, DoA, and XVF firmware update are controlled through
   the XVF3800 I2C command interface
-- directional LEDs use the XVF3800 speech detector to reject silent/noise-only
-  DoA updates, hold the last speech direction briefly, and then return neutral
+- directional LEDs use the XVF3800 auto-select AEC azimuth, hold the last fresh
+  source direction briefly, and return to a visible neutral listening ring when
+  the chip has no new direction
+- custom LED frames are limited to the XVF3800's recommended 100 ms update
+  interval, unchanged frames are skipped, and mute polling is rate-limited so
+  the controls do not overload the shared I2C endpoint
 - bundled XVF3800 I2S firmware target: `1.0.7`
 - XVF3800 firmware binary and host protocol reference live under `xmos/`
 

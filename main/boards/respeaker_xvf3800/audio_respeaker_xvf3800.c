@@ -59,12 +59,14 @@ extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_end[] asm("_binary_xvf3800_i2
 #define XVF_GPO_READ_VALUES 0
 #define XVF_GPO_WRITE_VALUE 1
 #define XVF_GPO_LED_RING_VALUE 18
-#define XVF_GPO_DOA_VALUE 18
-#define XVF_GPO_DOA_RESPONSE_LEN 5
 #define XVF_GPO_PIN_MUTE 30
 #define XVF_GPO_PIN_AMP_ENABLE 31
 #define XVF_GPO_PIN_LED_POWER 33
 #define XVF_GPO_COUNT 5
+
+#define XVF_AEC_RESID 33
+#define XVF_AEC_AZIMUTH_VALUES 75
+#define XVF_AEC_AZIMUTH_RESPONSE_LEN 17
 
 #define CTRL_DONE 0
 #define CTRL_WAIT 1
@@ -519,17 +521,17 @@ static esp_err_t xvf_read_doa(tater_audio_doa_t *out)
         return ESP_ERR_INVALID_ARG;
     }
     const uint8_t request[] = {
-        XVF_GPO_RESID,
-        XVF_GPO_DOA_VALUE | 0x80,
-        XVF_GPO_DOA_RESPONSE_LEN,
+        XVF_AEC_RESID,
+        XVF_AEC_AZIMUTH_VALUES | 0x80,
+        XVF_AEC_AZIMUTH_RESPONSE_LEN,
     };
-    uint8_t response[XVF_GPO_DOA_RESPONSE_LEN] = {0};
+    uint8_t response[XVF_AEC_AZIMUTH_RESPONSE_LEN] = {0};
     bool ready = false;
     for (uint8_t attempt = 0; attempt < RESPEAKER_XVF_DOA_READ_ATTEMPTS; attempt++) {
         ESP_RETURN_ON_ERROR(
             locked_i2c_write_read(request, sizeof(request), response, sizeof(response)),
             TAG,
-            "doa value read failed"
+            "azimuth read failed"
         );
         if (response[0] == CTRL_DONE) {
             ready = true;
@@ -555,11 +557,11 @@ static esp_err_t xvf_read_doa(tater_audio_doa_t *out)
     }
 
     memset(out, 0, sizeof(*out));
-    out->valid = value.speech_detected;
+    out->valid = true;
     out->four_mic = true;
-    out->confidence = value.speech_detected ? 32 : 0;
+    out->confidence = 32;
     out->angle_index = value.angle_index;
-    out->energy = value.speech_detected ? 1 : 0;
+    out->energy = 1;
     out->frame_counter = ++s_doa_frame_counter;
     return ESP_OK;
 }

@@ -5,8 +5,8 @@
 #include <stdint.h>
 
 typedef struct {
+    float radians;
     uint16_t degrees;
-    bool speech_detected;
     uint8_t angle_index;
 } xvf3800_doa_value_t;
 
