@@ -1,4 +1,5 @@
-- Updates all supported native satellite targets to firmware version 0.2.5.
+- Updates all supported native satellite targets to firmware version 0.2.6.
+- Prevents a tone-task stack overflow that could reboot ReSpeaker when Tater restores or starts a timer alarm.
 - Fixes Satellite1 XMOS 1.0.8 installation and recovery after an OTA update by keeping direct-flash SPI transfers within the ESP32-S3 non-DMA hardware limit.
 - Corrects the Satellite1 XMOS page-verification buffer size so every 256-byte page can be read back and verified safely.
 - Makes an interrupted or previously failed Satellite1 XMOS flash recover automatically on the next boot, then skip reflashing once 1.0.8 is confirmed.

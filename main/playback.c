@@ -38,6 +38,7 @@ static const size_t PLAYBACK_FLAC_JITTER_CAPACITY = 512 * 1024;
 static const size_t PLAYBACK_FLAC_PREBUFFER = 256 * 1024;
 static const uint32_t PLAYBACK_HTTP_READER_TASK_STACK = 4096;
 static const uint32_t PLAYBACK_URL_TASK_STACK = 16384;
+static const uint32_t PLAYBACK_TONE_TASK_STACK = 8192;
 static const uint32_t PLAYBACK_STOP_WAIT_MS = 3000;
 static const uint32_t PLAYBACK_STOP_POLL_MS = 20;
 
@@ -2146,7 +2147,7 @@ static esp_err_t play_tone_async(uint32_t frequency_hz, uint32_t duration_ms, ui
     BaseType_t ok = playback_create_task(
         tone_task,
         "tater_tone",
-        4096,
+        PLAYBACK_TONE_TASK_STACK,
         tone,
         5,
         &s_task,
