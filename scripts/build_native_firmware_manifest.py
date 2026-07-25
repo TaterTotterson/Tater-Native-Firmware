@@ -25,6 +25,11 @@ BOARDS: dict[str, dict[str, Any]] = {
         "board": "satellite1",
         "header": FIRMWARE_ROOT / "main" / "boards" / "sat1" / "board_sat1.h",
         "flash_size": "16MB",
+        "xmos_firmware": {
+            "version": "1.0.8",
+            "source": FIRMWARE_ROOT / "main" / "boards" / "sat1" / "xmos" / "sat1_xmos_1_0_8_factory.bin",
+            "repo_path": "main/boards/sat1/xmos/sat1_xmos_1_0_8_factory.bin",
+        },
     },
     "voicepe": {
         "env": "voicepe",

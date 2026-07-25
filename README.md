@@ -25,6 +25,18 @@ Wake-word models now live in the
 Use that repo to browse shared microWakeWord packages or request/build new
 custom wake words for Tater Native satellites.
 
+## Home Assistant
+
+Home Assistant users can connect this same native firmware directly to Home
+Assistant with the
+[Tater Satellite integration](https://github.com/TaterTotterson/Tater-Home-Assistant-Satellites).
+The integration provides satellite pairing, voice settings, wake-word changes,
+trainer linking, firmware/OTA updates, and Home Assistant Assist pipeline
+support without requiring a separate firmware build.
+
+For the complete Tater Assistant experience, connect the satellites to
+[Tater](https://github.com/TaterTotterson/Tater) instead.
+
 ## Features
 
 ### Supported Hardware
@@ -169,8 +181,9 @@ ESP32-S3-BOX-3 Display:
 
 - M4A/AAC and OGG/Vorbis are intentionally not included until there is a real
   need for them.
-- Sat1 XMOS direct-flash recovery is newer than the Voice PE DFU path and still
-  needs more real-device testing across factory XMOS versions.
+- A Sat1 boot that must install or recover XMOS `1.0.8` can take about 20
+  seconds before the satellite connects. Later boots verify the version and
+  skip reflashing.
 - S3 Box display feed depends on Tater being reachable; the display falls back
   to local state/clock placeholders when server-fed stats are unavailable.
 

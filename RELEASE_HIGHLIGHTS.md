@@ -1,10 +1,6 @@
-- Updates all supported native satellite targets to firmware version 0.2.4.
-- Adds optional low-latency Tater STT wake verification with off, observe, and enforce modes plus fail-open timeout handling.
-- Keeps saved Wi-Fi credentials during temporary outages and reconnects indefinitely with capped exponential backoff and jitter.
-- Adds WebSocket lifecycle recovery, reconnect-aware audio handling, and Sat1-safe frame fragmentation to prevent satellites from remaining disconnected after a Tater restart or interrupted voice session.
-- Upgrades the bundled Sat1 XMOS firmware to 1.0.8 with four-microphone DoA estimation, adaptive noise gating, confidence filtering, and smoother direction tracking.
-- Corrects ReSpeaker XVF3800 DoA and speech-detector handling so directional LEDs ignore silent or noise-only updates.
-- Holds the most recent valid Sat1/ReSpeaker direction briefly after speech, then returns the ring to a calm neutral listening glow.
-- Normalizes LED brightness to a true 0-100% scale, raises the default to 80%, and replaces random disconnected twinkles with a stable low-glow state.
-- Improves custom wake-word and wake-sound download, cache, refresh, retry, and diagnostic behavior.
-- Adds host-side regression tests for network recovery and Sat1/ReSpeaker DoA processing.
+- Updates all supported native satellite targets to firmware version 0.2.5.
+- Fixes Satellite1 XMOS 1.0.8 installation and recovery after an OTA update by keeping direct-flash SPI transfers within the ESP32-S3 non-DMA hardware limit.
+- Corrects the Satellite1 XMOS page-verification buffer size so every 256-byte page can be read back and verified safely.
+- Makes an interrupted or previously failed Satellite1 XMOS flash recover automatically on the next boot, then skip reflashing once 1.0.8 is confirmed.
+- Publishes the bundled Satellite1 XMOS 1.0.8 image and checksum in the generated firmware release manifest.
+- Documents direct Home Assistant support through the Tater Satellite integration while keeping Tater as the complete assistant option.

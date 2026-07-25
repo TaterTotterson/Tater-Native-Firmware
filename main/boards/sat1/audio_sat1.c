@@ -22,6 +22,7 @@
 #include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "soc/soc_caps.h"
 #include "tater_protocol.h"
 #include "wake_engine.h"
 
@@ -83,7 +84,7 @@ static i2s_chan_handle_t s_tx_chan;
 static spi_device_handle_t s_spi;
 static SemaphoreHandle_t s_i2c_mutex;
 static SemaphoreHandle_t s_spi_mutex;
-DMA_ATTR static uint8_t s_spi_transfer_buffer[260];
+DMA_ATTR static uint8_t s_spi_transfer_buffer[SAT1_XMOS_FLASH_PAGE_SIZE + 5];
 static bool s_speaker_ready;
 static bool s_speaker_enabled;
 static bool s_speaker_primed;
@@ -512,11 +513,11 @@ static esp_err_t spi_init(void)
         .sclk_io_num = TATER_SAT1_SPI_CLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 260,
+        .max_transfer_sz = sizeof(s_spi_transfer_buffer),
     };
     /*
-     * This SPI bus only carries short XMOS control messages (at most 260
-     * bytes). DMA adds no useful throughput here and the driver may allocate
+     * This SPI bus only carries short XMOS control and flash messages (at most
+     * 261 bytes). DMA adds no useful throughput here and the driver may allocate
      * an aligned RX bounce buffer for every odd-sized DOA read. Use the
      * polling CPU path so DoA reads do not depend on transient DMA memory.
      */
@@ -566,14 +567,26 @@ static esp_err_t sat1_spi_transfer(uint8_t *buf, size_t len)
         xSemaphoreTake(s_spi_mutex, portMAX_DELAY);
     }
     memcpy(s_spi_transfer_buffer, buf, len);
-    spi_transaction_t transaction = {
-        .length = len * 8,
-        .tx_buffer = s_spi_transfer_buffer,
-        .rx_buffer = s_spi_transfer_buffer,
-    };
     gpio_set_level(TATER_SAT1_SPI_CS, 0);
     esp_rom_delay_us(1);
-    esp_err_t err = spi_device_polling_transmit(s_spi, &transaction);
+    esp_err_t err = ESP_OK;
+    size_t offset = 0;
+    while (offset < len) {
+        size_t chunk_len = len - offset;
+        if (chunk_len > SOC_SPI_MAXIMUM_BUFFER_SIZE) {
+            chunk_len = SOC_SPI_MAXIMUM_BUFFER_SIZE;
+        }
+        spi_transaction_t transaction = {
+            .length = chunk_len * 8,
+            .tx_buffer = &s_spi_transfer_buffer[offset],
+            .rx_buffer = &s_spi_transfer_buffer[offset],
+        };
+        err = spi_device_polling_transmit(s_spi, &transaction);
+        if (err != ESP_OK) {
+            break;
+        }
+        offset += chunk_len;
+    }
     esp_rom_delay_us(1);
     gpio_set_level(TATER_SAT1_SPI_CS, 1);
     if (err == ESP_OK) {
