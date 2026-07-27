@@ -25,7 +25,9 @@
 #include "audio_aec.h"
 #include "audio_i2s.h"
 #include "native_settings.h"
+#include "ota_update.h"
 #include "playback.h"
+#include "timer_sound_assets.h"
 #include "wake_engine.h"
 
 static const char *TAG = "tater_proto";
@@ -88,11 +90,21 @@ static tater_state_t s_playback_return_state = TATER_STATE_IDLE;
 static bool s_playback_visual_active;
 static int64_t s_playback_visual_started_us;
 static bool s_tool_visual_hold;
-static bool s_timer_active;
-static bool s_timer_ringing;
-static char s_timer_id[48];
-static char s_timer_label[64];
-static int64_t s_timer_deadline_us;
+#define TATER_MAX_LOCAL_TIMERS 8
+#define TATER_TIMER_MAX_RING_MS (15 * 60 * 1000)
+
+typedef struct {
+    bool active;
+    bool ringing;
+    char id[48];
+    char name[64];
+    uint32_t original_duration_ms;
+    int64_t deadline_us;
+    int64_t ringing_started_us;
+} tater_local_timer_t;
+
+static tater_local_timer_t s_timers[TATER_MAX_LOCAL_TIMERS];
+static SemaphoreHandle_t s_timer_lock;
 static TaskHandle_t s_timer_alarm_task;
 static TaskHandle_t s_timer_monitor_task;
 static char s_last_link_down_detail[96];
@@ -113,6 +125,8 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
 static int send_audio_locked(const int16_t *pcm, size_t sample_count, TickType_t timeout);
 static void audio_tx_clear_queue(void);
 static void audio_tx_task(void *arg);
+static bool json_truthy(const cJSON *item);
+static bool timer_any_ringing(void);
 static void timer_monitor_task(void *arg);
 static void continued_reopen_watchdog_task(void *arg);
 
@@ -456,7 +470,7 @@ static bool playback_turn_in_progress(void)
 
 static void emit_state(tater_state_t state, const char *detail)
 {
-    if (s_timer_ringing && state != TATER_STATE_TIMER && state != TATER_STATE_OTA && state != TATER_STATE_PROVISIONING) {
+    if (timer_any_ringing() && state != TATER_STATE_TIMER && state != TATER_STATE_OTA && state != TATER_STATE_PROVISIONING) {
         ESP_LOGI(TAG, "state=%d detail=%s ignored during timer alarm", (int)state, detail ? detail : "");
         return;
     }
@@ -1462,51 +1476,271 @@ static uint32_t timer_payload_duration_ms(const cJSON *payload, const char *ms_k
     return fallback_ms;
 }
 
-static void timer_copy_identity(const cJSON *payload)
+static void timer_lock(void)
 {
-    const cJSON *id_item = cJSON_GetObjectItem(payload, "id");
-    const cJSON *label_item = cJSON_GetObjectItem(payload, "label");
-    if (cJSON_IsString(id_item) && id_item->valuestring && id_item->valuestring[0]) {
-        strlcpy(s_timer_id, id_item->valuestring, sizeof(s_timer_id));
-    }
-    if (cJSON_IsString(label_item) && label_item->valuestring) {
-        strlcpy(s_timer_label, label_item->valuestring, sizeof(s_timer_label));
+    if (s_timer_lock) {
+        xSemaphoreTake(s_timer_lock, portMAX_DELAY);
     }
 }
 
-static void timer_emit_event(const char *event)
+static void timer_unlock(void)
 {
+    if (s_timer_lock) {
+        xSemaphoreGive(s_timer_lock);
+    }
+}
+
+static int timer_active_count_locked(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS; i++) {
+        if (s_timers[i].active) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int timer_ringing_count_locked(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS; i++) {
+        if (s_timers[i].active && s_timers[i].ringing) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static bool timer_any_ringing(void)
+{
+    timer_lock();
+    bool ringing = timer_ringing_count_locked() > 0;
+    timer_unlock();
+    return ringing;
+}
+
+static bool timer_any_active(void)
+{
+    timer_lock();
+    bool active = timer_active_count_locked() > 0;
+    timer_unlock();
+    return active;
+}
+
+static int64_t timer_remaining_ms(const tater_local_timer_t *timer)
+{
+    if (!timer || !timer->active || timer->ringing || timer->deadline_us <= 0) {
+        return 0;
+    }
+    int64_t remaining_ms = (timer->deadline_us - esp_timer_get_time()) / 1000;
+    return remaining_ms > 0 ? remaining_ms : 0;
+}
+
+static cJSON *timer_json(const tater_local_timer_t *timer)
+{
+    cJSON *row = cJSON_CreateObject();
+    if (!row || !timer) {
+        return row;
+    }
+    cJSON_AddStringToObject(row, "id", timer->id);
+    cJSON_AddStringToObject(row, "name", timer->name);
+    cJSON_AddStringToObject(row, "label", timer->name);
+    cJSON_AddStringToObject(row, "state", timer->ringing ? "ringing" : "armed");
+    cJSON_AddBoolToObject(row, "active", timer->active);
+    cJSON_AddBoolToObject(row, "ringing", timer->ringing);
+    cJSON_AddNumberToObject(row, "original_duration_ms", timer->original_duration_ms);
+    cJSON_AddNumberToObject(row, "duration_ms", timer->original_duration_ms);
+    cJSON_AddNumberToObject(row, "remaining_ms", (double)timer_remaining_ms(timer));
+    return row;
+}
+
+static void timer_emit_event(const char *event, const tater_local_timer_t *timer)
+{
+    if (!timer) {
+        return;
+    }
     cJSON *root = new_envelope("timer.event");
     cJSON *payload = cJSON_GetObjectItem(root, "payload");
     cJSON_AddStringToObject(payload, "event", event ? event : "");
-    cJSON_AddStringToObject(payload, "id", s_timer_id);
-    cJSON_AddStringToObject(payload, "label", s_timer_label);
-    cJSON_AddBoolToObject(payload, "active", s_timer_active);
-    cJSON_AddBoolToObject(payload, "ringing", s_timer_ringing);
-    if (s_timer_active && s_timer_deadline_us > 0) {
-        int64_t remaining_ms = (s_timer_deadline_us - esp_timer_get_time()) / 1000;
-        if (remaining_ms < 0) {
-            remaining_ms = 0;
-        }
-        cJSON_AddNumberToObject(payload, "remaining_ms", remaining_ms);
-    }
+    cJSON_AddStringToObject(payload, "id", timer->id);
+    cJSON_AddStringToObject(payload, "name", timer->name);
+    cJSON_AddStringToObject(payload, "label", timer->name);
+    cJSON_AddStringToObject(payload, "state", timer->ringing ? "ringing" : (timer->active ? "armed" : "stopped"));
+    cJSON_AddBoolToObject(payload, "active", timer->active);
+    cJSON_AddBoolToObject(payload, "ringing", timer->ringing);
+    cJSON_AddNumberToObject(payload, "original_duration_ms", timer->original_duration_ms);
+    cJSON_AddNumberToObject(payload, "remaining_ms", (double)timer_remaining_ms(timer));
     send_json(root);
+}
+
+static cJSON *timer_result_payload(
+    const char *reply_to,
+    const char *action,
+    bool ok,
+    const char *code,
+    const char *message
+)
+{
+    cJSON *root = new_envelope("timer.result");
+    cJSON *payload = cJSON_GetObjectItem(root, "payload");
+    cJSON_AddStringToObject(payload, "reply_to", reply_to ? reply_to : "");
+    cJSON_AddStringToObject(payload, "action", action ? action : "");
+    cJSON_AddBoolToObject(payload, "ok", ok);
+    if (code && code[0]) {
+        cJSON_AddStringToObject(payload, "code", code);
+    }
+    if (message && message[0]) {
+        cJSON_AddStringToObject(payload, "message", message);
+    }
+    return root;
+}
+
+static void timer_send_list_result(const char *reply_to)
+{
+    cJSON *root = timer_result_payload(reply_to, "list", true, "", "");
+    cJSON *payload = cJSON_GetObjectItem(root, "payload");
+    cJSON *timers = cJSON_CreateArray();
+    int count = 0;
+    timer_lock();
+    for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS; i++) {
+        if (!s_timers[i].active) {
+            continue;
+        }
+        cJSON_AddItemToArray(timers, timer_json(&s_timers[i]));
+        count++;
+    }
+    timer_unlock();
+    cJSON_AddItemToObject(payload, "timers", timers);
+    cJSON_AddNumberToObject(payload, "count", count);
+    send_json(root);
+}
+
+static bool timer_payload_matches(const cJSON *payload, const tater_local_timer_t *timer, bool *has_criteria)
+{
+    if (!payload || !timer || !timer->active) {
+        return false;
+    }
+    bool criteria = false;
+    bool matches = true;
+    const cJSON *ids = cJSON_GetObjectItem(payload, "ids");
+    if (cJSON_IsArray(ids) && cJSON_GetArraySize(ids) > 0) {
+        criteria = true;
+        bool id_match = false;
+        const cJSON *candidate = NULL;
+        cJSON_ArrayForEach(candidate, ids) {
+            if (cJSON_IsString(candidate) && candidate->valuestring && strcmp(candidate->valuestring, timer->id) == 0) {
+                id_match = true;
+                break;
+            }
+        }
+        matches = matches && id_match;
+    }
+
+    const cJSON *id_item = cJSON_GetObjectItem(payload, "id");
+    if (cJSON_IsString(id_item) && id_item->valuestring && id_item->valuestring[0]) {
+        criteria = true;
+        matches = matches && strcmp(id_item->valuestring, timer->id) == 0;
+    }
+    const cJSON *name_item = cJSON_GetObjectItem(payload, "name");
+    if (!cJSON_IsString(name_item) || !name_item->valuestring) {
+        name_item = cJSON_GetObjectItem(payload, "label");
+    }
+    if (cJSON_IsString(name_item) && name_item->valuestring && name_item->valuestring[0]) {
+        criteria = true;
+        matches = matches && strcasecmp(name_item->valuestring, timer->name) == 0;
+    }
+    uint32_t duration_ms = timer_payload_duration_ms(
+        payload,
+        "original_duration_ms",
+        "original_duration_s",
+        0
+    );
+    if (duration_ms > 0) {
+        criteria = true;
+        matches = matches && duration_ms == timer->original_duration_ms;
+    }
+    if (has_criteria) {
+        *has_criteria = criteria;
+    }
+    return matches;
+}
+
+static size_t timer_select_locked(const cJSON *payload, size_t *indices, size_t capacity, bool *ambiguous)
+{
+    bool select_all = json_truthy(cJSON_GetObjectItem(payload, "all"));
+    const cJSON *ids = cJSON_GetObjectItem(payload, "ids");
+    bool explicit_id_list = cJSON_IsArray(ids) && cJSON_GetArraySize(ids) > 0;
+    bool has_criteria = false;
+    for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS; i++) {
+        bool row_has_criteria = false;
+        (void)timer_payload_matches(payload, &s_timers[i], &row_has_criteria);
+        has_criteria = has_criteria || row_has_criteria;
+    }
+
+    size_t count = 0;
+    if (select_all || has_criteria) {
+        for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS && count < capacity; i++) {
+            if (!s_timers[i].active) {
+                continue;
+            }
+            if (select_all || timer_payload_matches(payload, &s_timers[i], NULL)) {
+                indices[count++] = i;
+            }
+        }
+        if (has_criteria && !select_all && !explicit_id_list && count > 1) {
+            if (ambiguous) {
+                *ambiguous = true;
+            }
+            return 0;
+        }
+        return count;
+    }
+
+    int ringing_count = timer_ringing_count_locked();
+    if (ringing_count > 0) {
+        for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS && count < capacity; i++) {
+            if (s_timers[i].active && s_timers[i].ringing) {
+                indices[count++] = i;
+            }
+        }
+        return count;
+    }
+
+    if (timer_active_count_locked() == 1) {
+        for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS; i++) {
+            if (s_timers[i].active) {
+                indices[count++] = i;
+                break;
+            }
+        }
+        return count;
+    }
+    if (ambiguous) {
+        *ambiguous = timer_active_count_locked() > 1;
+    }
+    return 0;
 }
 
 static void timer_alarm_task(void *arg)
 {
     (void)arg;
-    while (s_timer_ringing) {
+    const tater_timer_sound_asset_t *alarm = tater_timer_sound_asset();
+    while (timer_any_ringing()) {
         emit_state(TATER_STATE_TIMER, "timer ringing");
         if (!tater_playback_is_playing()) {
-            esp_err_t err = tater_playback_play_tone_local(880, 420, 80);
+            esp_err_t err = alarm
+                ? tater_playback_play_wav_data_local(
+                    alarm->data,
+                    (size_t)(alarm->end - alarm->data),
+                    "zen_timer_alarm"
+                )
+                : tater_playback_play_tone_local(880, 420, 80);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "timer alarm tone failed: %s", esp_err_to_name(err));
+                ESP_LOGW(TAG, "timer alarm playback failed: %s", esp_err_to_name(err));
             }
         }
-        for (int i = 0; i < 18 && s_timer_ringing; i++) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
     s_timer_alarm_task = NULL;
     vTaskDelete(NULL);
@@ -1524,73 +1758,297 @@ static void timer_start_alarm_task(void)
     }
 }
 
-static void timer_ring(const char *detail, bool notify_expired)
+static void timer_begin_ringing(void)
 {
-    s_timer_active = true;
-    s_timer_ringing = true;
-    s_timer_deadline_us = 0;
-    emit_state(TATER_STATE_TIMER, detail ? detail : "timer");
-    if (notify_expired) {
-        timer_emit_event("expired");
+    if (s_voice_active) {
+        tater_protocol_stop_voice(true);
     }
+    if (tater_playback_is_playing()) {
+        tater_playback_stop();
+    }
+    tater_wake_engine_set_timer_stop_mode(true);
+    emit_state(TATER_STATE_TIMER, "timer ringing");
     timer_start_alarm_task();
 }
 
-static void timer_clear_local(bool notify, const char *event)
+static void timer_finish_ringing_if_idle(bool was_ringing)
 {
-    bool was_active = s_timer_active;
-    bool was_ringing = s_timer_ringing;
-    if (notify && was_active) {
-        timer_emit_event(event ? event : "stopped");
+    if (!was_ringing || timer_any_ringing()) {
+        return;
     }
-    s_timer_active = false;
-    s_timer_ringing = false;
-    s_timer_deadline_us = 0;
-    s_timer_id[0] = '\0';
-    s_timer_label[0] = '\0';
-    if (was_ringing && tater_playback_is_playing()) {
+    tater_wake_engine_set_timer_stop_mode(false);
+    if (tater_playback_is_playing()) {
         tater_playback_stop();
     }
     if (s_current_state == TATER_STATE_TIMER) {
-        emit_state(websocket_ready() ? TATER_STATE_IDLE : TATER_STATE_DISCONNECTED, "timer cleared");
+        emit_state(websocket_ready() ? TATER_STATE_IDLE : TATER_STATE_DISCONNECTED, "timer stopped");
     }
 }
 
-static void timer_arm_from_payload(const cJSON *payload)
+static void timer_start_from_payload(const cJSON *payload, const char *reply_to, bool replace_existing)
 {
-    uint32_t remaining_ms = timer_payload_duration_ms(payload, "remaining_ms", "remaining_s", 0);
-    uint32_t duration_ms = timer_payload_duration_ms(payload, "duration_ms", "duration_s", 0);
-    uint32_t arm_ms = remaining_ms > 0 ? remaining_ms : duration_ms;
-    if (arm_ms == 0) {
-        timer_ring("timer alarm", false);
+    uint32_t original_duration_ms = timer_payload_duration_ms(
+        payload,
+        "original_duration_ms",
+        "original_duration_s",
+        0
+    );
+    if (original_duration_ms == 0) {
+        original_duration_ms = timer_payload_duration_ms(payload, "duration_ms", "duration_s", 0);
+    }
+    uint32_t countdown_ms = timer_payload_duration_ms(payload, "remaining_ms", "remaining_s", 0);
+    if (countdown_ms == 0) {
+        countdown_ms = timer_payload_duration_ms(
+            payload,
+            "duration_ms",
+            "duration_s",
+            original_duration_ms
+        );
+    }
+    if (countdown_ms == 0) {
+        cJSON *root = timer_result_payload(reply_to, "start", false, "invalid_duration", "Timer duration must be greater than zero.");
+        send_json(root);
         return;
     }
-    bool was_ringing = s_timer_ringing;
-    timer_copy_identity(payload);
-    s_timer_active = true;
-    s_timer_ringing = false;
-    s_timer_deadline_us = esp_timer_get_time() + ((int64_t)arm_ms * 1000LL);
-    if (was_ringing && tater_playback_is_playing()) {
-        tater_playback_stop();
+    if (original_duration_ms == 0) {
+        original_duration_ms = countdown_ms;
     }
-    emit_state(TATER_STATE_TIMER, "timer armed");
-    ESP_LOGI(TAG, "timer armed id=%s remaining_ms=%lu", s_timer_id, (unsigned long)arm_ms);
+
+    char requested_id[48] = {0};
+    char requested_name[64] = {0};
+    const cJSON *id_item = cJSON_GetObjectItem(payload, "id");
+    const cJSON *name_item = cJSON_GetObjectItem(payload, "name");
+    if (!cJSON_IsString(name_item) || !name_item->valuestring) {
+        name_item = cJSON_GetObjectItem(payload, "label");
+    }
+    if (cJSON_IsString(id_item) && id_item->valuestring) {
+        strlcpy(requested_id, id_item->valuestring, sizeof(requested_id));
+    }
+    if (!requested_id[0]) {
+        make_id(requested_id, sizeof(requested_id));
+    }
+    if (cJSON_IsString(name_item) && name_item->valuestring) {
+        strlcpy(requested_name, name_item->valuestring, sizeof(requested_name));
+    }
+
+    tater_local_timer_t snapshot = {0};
+    bool duplicate = false;
+    bool full = false;
+    bool was_ringing = false;
+    timer_lock();
+    int target = -1;
+    for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS; i++) {
+        if (s_timers[i].active && strcmp(s_timers[i].id, requested_id) == 0) {
+            target = (int)i;
+            duplicate = !replace_existing;
+            break;
+        }
+        if (target < 0 && !s_timers[i].active) {
+            target = (int)i;
+        }
+    }
+    if (target < 0) {
+        full = true;
+    } else if (duplicate) {
+        snapshot = s_timers[target];
+    } else {
+        tater_local_timer_t *timer = &s_timers[target];
+        was_ringing = timer->active && timer->ringing;
+        char existing_name[sizeof(timer->name)] = {0};
+        strlcpy(existing_name, timer->name, sizeof(existing_name));
+        memset(timer, 0, sizeof(*timer));
+        timer->active = true;
+        strlcpy(timer->id, requested_id, sizeof(timer->id));
+        strlcpy(
+            timer->name,
+            requested_name[0] ? requested_name : existing_name,
+            sizeof(timer->name)
+        );
+        timer->original_duration_ms = original_duration_ms;
+        timer->deadline_us = esp_timer_get_time() + ((int64_t)countdown_ms * 1000LL);
+        snapshot = *timer;
+    }
+    timer_unlock();
+
+    if (full) {
+        cJSON *root = timer_result_payload(reply_to, "start", false, "timer_limit", "This satellite already has the maximum number of timers.");
+        send_json(root);
+        return;
+    }
+
+    cJSON *root = timer_result_payload(reply_to, "start", true, duplicate ? "already_exists" : "", "");
+    cJSON *result = cJSON_GetObjectItem(root, "payload");
+    cJSON_AddItemToObject(result, "timer", timer_json(&snapshot));
+    send_json(root);
+    if (!duplicate) {
+        timer_emit_event(replace_existing ? "updated" : "armed", &snapshot);
+        ESP_LOGI(
+            TAG,
+            "timer %s id=%s name=%s countdown_ms=%lu original_duration_ms=%lu",
+            replace_existing ? "updated" : "armed",
+            snapshot.id,
+            snapshot.name,
+            (unsigned long)countdown_ms,
+            (unsigned long)original_duration_ms
+        );
+    }
+    timer_finish_ringing_if_idle(was_ringing);
 }
 
-static void timer_alarm_from_payload(const cJSON *payload)
+static void timer_cancel_from_payload(const cJSON *payload, const char *reply_to, const char *event)
 {
-    timer_copy_identity(payload);
-    ESP_LOGW(TAG, "timer alarm id=%s", s_timer_id);
-    timer_ring("timer alarm", false);
+    size_t indices[TATER_MAX_LOCAL_TIMERS] = {0};
+    tater_local_timer_t affected[TATER_MAX_LOCAL_TIMERS] = {0};
+    bool ambiguous = false;
+    bool was_ringing = false;
+    size_t count = 0;
+
+    timer_lock();
+    count = timer_select_locked(payload, indices, TATER_MAX_LOCAL_TIMERS, &ambiguous);
+    for (size_t i = 0; i < count; i++) {
+        size_t index = indices[i];
+        affected[i] = s_timers[index];
+        was_ringing = was_ringing || s_timers[index].ringing;
+        memset(&s_timers[index], 0, sizeof(s_timers[index]));
+    }
+    timer_unlock();
+
+    const char *code = ambiguous ? "ambiguous" : (count == 0 ? "not_found" : "");
+    const char *message = ambiguous
+        ? "More than one timer is running; specify a timer name or duration."
+        : (count == 0 ? "No matching timer is running." : "");
+    cJSON *root = timer_result_payload(reply_to, "cancel", true, code, message);
+    cJSON *result = cJSON_GetObjectItem(root, "payload");
+    cJSON *timers = cJSON_CreateArray();
+    for (size_t i = 0; i < count; i++) {
+        cJSON_AddItemToArray(timers, timer_json(&affected[i]));
+    }
+    cJSON_AddItemToObject(result, "timers", timers);
+    cJSON_AddNumberToObject(result, "affected", count);
+    send_json(root);
+
+    for (size_t i = 0; i < count; i++) {
+        affected[i].active = false;
+        affected[i].ringing = false;
+        affected[i].deadline_us = 0;
+        timer_emit_event(event ? event : "cancelled", &affected[i]);
+    }
+    timer_finish_ringing_if_idle(was_ringing);
+}
+
+static void timer_snooze_from_payload(const cJSON *payload, const char *reply_to)
+{
+    uint32_t duration_ms = timer_payload_duration_ms(payload, "duration_ms", "duration_s", 5 * 60 * 1000);
+    size_t indices[TATER_MAX_LOCAL_TIMERS] = {0};
+    tater_local_timer_t affected[TATER_MAX_LOCAL_TIMERS] = {0};
+    bool ambiguous = false;
+    bool was_ringing = false;
+    size_t count = 0;
+
+    timer_lock();
+    count = timer_select_locked(payload, indices, TATER_MAX_LOCAL_TIMERS, &ambiguous);
+    for (size_t i = 0; i < count; i++) {
+        tater_local_timer_t *timer = &s_timers[indices[i]];
+        was_ringing = was_ringing || timer->ringing;
+        timer->ringing = false;
+        timer->ringing_started_us = 0;
+        timer->original_duration_ms = duration_ms;
+        timer->deadline_us = esp_timer_get_time() + ((int64_t)duration_ms * 1000LL);
+        affected[i] = *timer;
+    }
+    timer_unlock();
+
+    const char *code = ambiguous ? "ambiguous" : (count == 0 ? "not_found" : "");
+    const char *message = ambiguous
+        ? "More than one timer is running; specify a timer name or duration."
+        : (count == 0 ? "No matching timer is running." : "");
+    cJSON *root = timer_result_payload(reply_to, "snooze", true, code, message);
+    cJSON *result = cJSON_GetObjectItem(root, "payload");
+    cJSON *timers = cJSON_CreateArray();
+    for (size_t i = 0; i < count; i++) {
+        cJSON_AddItemToArray(timers, timer_json(&affected[i]));
+    }
+    cJSON_AddItemToObject(result, "timers", timers);
+    cJSON_AddNumberToObject(result, "affected", count);
+    send_json(root);
+    for (size_t i = 0; i < count; i++) {
+        timer_emit_event("snoozed", &affected[i]);
+    }
+    timer_finish_ringing_if_idle(was_ringing);
+}
+
+static void timer_force_alarm_from_payload(const cJSON *payload)
+{
+    size_t indices[TATER_MAX_LOCAL_TIMERS] = {0};
+    size_t count = 0;
+    tater_local_timer_t expired[TATER_MAX_LOCAL_TIMERS] = {0};
+    timer_lock();
+    count = timer_select_locked(payload, indices, TATER_MAX_LOCAL_TIMERS, NULL);
+    for (size_t i = 0; i < count; i++) {
+        tater_local_timer_t *timer = &s_timers[indices[i]];
+        timer->ringing = true;
+        timer->deadline_us = 0;
+        timer->ringing_started_us = esp_timer_get_time();
+        expired[i] = *timer;
+    }
+    timer_unlock();
+    if (count == 0) {
+        return;
+    }
+    timer_begin_ringing();
+    for (size_t i = 0; i < count; i++) {
+        timer_emit_event("expired", &expired[i]);
+    }
 }
 
 static void timer_monitor_task(void *arg)
 {
     (void)arg;
     while (true) {
-        if (s_timer_active && !s_timer_ringing && s_timer_deadline_us > 0 && esp_timer_get_time() >= s_timer_deadline_us) {
-            ESP_LOGW(TAG, "timer expired locally id=%s", s_timer_id);
-            timer_ring("timer expired locally", true);
+        tater_local_timer_t expired[TATER_MAX_LOCAL_TIMERS] = {0};
+        tater_local_timer_t auto_stopped[TATER_MAX_LOCAL_TIMERS] = {0};
+        size_t expired_count = 0;
+        size_t auto_stopped_count = 0;
+        int64_t now_us = esp_timer_get_time();
+        timer_lock();
+        for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS; i++) {
+            tater_local_timer_t *timer = &s_timers[i];
+            if (!timer->active) {
+                continue;
+            }
+            if (!timer->ringing && timer->deadline_us > 0 && now_us >= timer->deadline_us) {
+                timer->ringing = true;
+                timer->deadline_us = 0;
+                timer->ringing_started_us = now_us;
+                expired[expired_count++] = *timer;
+            } else if (timer->ringing
+                    && timer->ringing_started_us > 0
+                    && ((now_us - timer->ringing_started_us) / 1000) >= TATER_TIMER_MAX_RING_MS) {
+                auto_stopped[auto_stopped_count++] = *timer;
+                memset(timer, 0, sizeof(*timer));
+            }
+        }
+        timer_unlock();
+
+        if (expired_count > 0) {
+            timer_begin_ringing();
+            for (size_t i = 0; i < expired_count; i++) {
+                ESP_LOGW(TAG, "timer expired locally id=%s name=%s", expired[i].id, expired[i].name);
+                timer_emit_event("expired", &expired[i]);
+            }
+        }
+        for (size_t i = 0; i < auto_stopped_count; i++) {
+            auto_stopped[i].active = false;
+            auto_stopped[i].ringing = false;
+            timer_emit_event("auto_stopped", &auto_stopped[i]);
+        }
+        if (auto_stopped_count > 0) {
+            timer_finish_ringing_if_idle(true);
+        }
+        if (timer_any_ringing()) {
+            // Recover the tiny handoff window where one alarm task exits just
+            // as a different timer begins ringing.
+            timer_start_alarm_task();
         }
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -1716,8 +2174,10 @@ static void handle_text_message(const char *data, int len)
         return;
     }
     const cJSON *type_item = cJSON_GetObjectItem(root, "type");
+    const cJSON *id_item = cJSON_GetObjectItem(root, "id");
     const cJSON *payload = cJSON_GetObjectItem(root, "payload");
     const char *type = cJSON_IsString(type_item) ? type_item->valuestring : "";
+    const char *request_id = cJSON_IsString(id_item) && id_item->valuestring ? id_item->valuestring : "";
     if (s_rx_text_logs < 8 || strcmp(type, "error") == 0) {
         ESP_LOGI(TAG, "json recv type=%s bytes=%d", type, len);
         s_rx_text_logs++;
@@ -1858,12 +2318,20 @@ static void handle_text_message(const char *data, int len)
         if (s_play_tone_cb) {
             s_play_tone_cb(frequency_hz, duration_ms, volume_percent);
         }
-    } else if (strcmp(type, "timer.arm") == 0 && cJSON_IsObject(payload)) {
-        timer_arm_from_payload(payload);
+    } else if ((strcmp(type, "timer.start") == 0 || strcmp(type, "timer.arm") == 0) && cJSON_IsObject(payload)) {
+        timer_start_from_payload(payload, request_id, strcmp(type, "timer.arm") == 0);
+    } else if ((strcmp(type, "timer.list") == 0 || strcmp(type, "timer.status") == 0)) {
+        timer_send_list_result(request_id);
+    } else if (strcmp(type, "timer.cancel") == 0 && cJSON_IsObject(payload)) {
+        timer_cancel_from_payload(payload, request_id, "cancelled");
+    } else if (strcmp(type, "timer.snooze") == 0 && cJSON_IsObject(payload)) {
+        timer_snooze_from_payload(payload, request_id);
     } else if (strcmp(type, "timer.alarm") == 0 && cJSON_IsObject(payload)) {
-        timer_alarm_from_payload(payload);
+        timer_force_alarm_from_payload(payload);
     } else if (strcmp(type, "timer.clear") == 0) {
-        timer_clear_local(false, "cleared");
+        cJSON *empty = cJSON_CreateObject();
+        timer_cancel_from_payload(cJSON_IsObject(payload) ? payload : empty, request_id, "cleared");
+        cJSON_Delete(empty);
     } else if (strcmp(type, "ota.url") == 0 && cJSON_IsObject(payload)) {
         const cJSON *url_item = cJSON_GetObjectItem(payload, "url");
         if (cJSON_IsString(url_item) && s_ota_url_cb) {
@@ -1992,6 +2460,7 @@ void tater_protocol_init(
     s_ota_url_cb = ota_url_cb;
     tater_live_settings_init_defaults();
     s_send_lock = xSemaphoreCreateMutex();
+    s_timer_lock = xSemaphoreCreateMutex();
     esp_err_t audio_tx_err = audio_tx_init();
     if (audio_tx_err != ESP_OK) {
         ESP_LOGE(TAG, "audio tx queue init failed: %s", esp_err_to_name(audio_tx_err));
@@ -2013,7 +2482,7 @@ void tater_protocol_start(void)
         ESP_LOGE(TAG, "websocket reconnect watchdog task create failed");
     }
     if (!s_timer_monitor_task) {
-        BaseType_t timer_task_ok = xTaskCreate(timer_monitor_task, "tater_timer", 3072, NULL, 4, &s_timer_monitor_task);
+        BaseType_t timer_task_ok = xTaskCreate(timer_monitor_task, "tater_timer", 5120, NULL, 4, &s_timer_monitor_task);
         if (timer_task_ok != pdPASS) {
             s_timer_monitor_task = NULL;
             ESP_LOGE(TAG, "timer monitor task create failed");
@@ -2033,26 +2502,39 @@ bool tater_protocol_voice_active(void)
 
 bool tater_protocol_timer_is_ringing(void)
 {
-    return s_timer_ringing;
+    return timer_any_ringing();
 }
 
 bool tater_protocol_timer_is_active(void)
 {
-    return s_timer_active;
+    return timer_any_active();
 }
 
 void tater_protocol_timer_stop_from_device(void)
 {
-    if (!s_timer_ringing) {
+    if (!timer_any_ringing()) {
         return;
     }
     ESP_LOGI(TAG, "timer stopped from device button");
-    timer_clear_local(true, "stopped");
+    cJSON *empty = cJSON_CreateObject();
+    if (empty) {
+        timer_cancel_from_payload(empty, "", "stopped");
+        cJSON_Delete(empty);
+    }
+}
+
+bool tater_protocol_can_detect_timer_stop(void)
+{
+    if (!timer_any_ringing() || s_voice_active || tater_ota_is_running()) {
+        return false;
+    }
+    const tater_live_settings_t *settings = tater_live_settings_get();
+    return !settings || !settings->muted;
 }
 
 bool tater_protocol_can_start_local_wake(void)
 {
-    if (!websocket_ready() || s_voice_active || s_timer_ringing) {
+    if (!websocket_ready() || s_voice_active || timer_any_ringing()) {
         return false;
     }
     const tater_live_settings_t *settings = tater_live_settings_get();
@@ -2121,17 +2603,22 @@ void tater_protocol_send_status(const char *state)
     cJSON_AddBoolToObject(payload, "voice_active", s_voice_active);
     cJSON_AddBoolToObject(payload, "voice_start_pending", s_voice_start_pending);
     cJSON *timer = cJSON_CreateObject();
-    cJSON_AddBoolToObject(timer, "active", s_timer_active);
-    cJSON_AddBoolToObject(timer, "ringing", s_timer_ringing);
-    cJSON_AddStringToObject(timer, "id", s_timer_id);
-    cJSON_AddStringToObject(timer, "label", s_timer_label);
-    if (s_timer_active && s_timer_deadline_us > 0) {
-        int64_t remaining_ms = (s_timer_deadline_us - esp_timer_get_time()) / 1000;
-        if (remaining_ms < 0) {
-            remaining_ms = 0;
+    cJSON *timer_rows = cJSON_CreateArray();
+    timer_lock();
+    int active_timers = timer_active_count_locked();
+    int ringing_timers = timer_ringing_count_locked();
+    cJSON_AddBoolToObject(timer, "active", active_timers > 0);
+    cJSON_AddBoolToObject(timer, "ringing", ringing_timers > 0);
+    cJSON_AddNumberToObject(timer, "count", active_timers);
+    cJSON_AddNumberToObject(timer, "ringing_count", ringing_timers);
+    for (size_t i = 0; i < TATER_MAX_LOCAL_TIMERS; i++) {
+        if (!s_timers[i].active) {
+            continue;
         }
-        cJSON_AddNumberToObject(timer, "remaining_ms", remaining_ms);
+        cJSON_AddItemToArray(timer_rows, timer_json(&s_timers[i]));
     }
+    timer_unlock();
+    cJSON_AddItemToObject(timer, "timers", timer_rows);
     cJSON_AddItemToObject(payload, "timer", timer);
     cJSON_AddNumberToObject(payload, "audio_preroll_samples", s_audio_preroll_count);
     cJSON_AddBoolToObject(payload, "connected", websocket_ready());

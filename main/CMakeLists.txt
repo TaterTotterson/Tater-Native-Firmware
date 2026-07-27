@@ -18,6 +18,7 @@ idf_component_register(
         "provisioning.c"
         "tater_config.c"
         "tater_protocol.c"
+        "timer_sound_assets.c"
         "wake_engine.cc"
         "wake_model_assets.c"
         "wake_sound_assets.c"
@@ -44,6 +45,7 @@ idf_component_register(
 )
 
 target_add_binary_data(${COMPONENT_LIB} "models/hey_tater.tflite" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "models/stop.tflite" BINARY)
 if(TATER_NATIVE_BUILD_ENV STREQUAL "voicepe")
     target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "sat1")
@@ -70,3 +72,4 @@ target_add_binary_data(${COMPONENT_LIB} "wake_sounds/tater_notify_digital_blip.w
 target_add_binary_data(${COMPONENT_LIB} "wake_sounds/turning-off-microphone-percussion-1.wav" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "wake_sounds/wake_word_triggered.wav" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "wake_sounds/waterdrop.wav" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "timer_sounds/zen_timer_alarm.wav" BINARY)

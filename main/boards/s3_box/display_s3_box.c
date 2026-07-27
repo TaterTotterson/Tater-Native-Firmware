@@ -12,6 +12,7 @@
 #include "board.h"
 #include "cJSON.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "driver/spi_master.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -35,6 +36,8 @@ static const char *TAG = "tater_display_s3_box";
 #define LCD_SPI_CLOCK_HZ (40 * 1000 * 1000)
 #define DISPLAY_FEED_POLL_MS 60000
 #define DISPLAY_FEED_RESPONSE_MAX 4096
+#define LCD_BACKLIGHT_PWM_FREQUENCY_HZ 5000
+#define LCD_BACKLIGHT_PWM_MAX_DUTY ((1U << LEDC_TIMER_10_BIT) - 1U)
 
 typedef struct {
     uint8_t r;
@@ -79,7 +82,10 @@ static uint16_t *s_fb;
 static uint16_t *s_dma;
 static bool s_display_ready;
 static volatile tater_state_t s_state = TATER_STATE_DISCONNECTED;
-static uint8_t s_brightness = 80;
+static uint8_t s_requested_brightness = 80;
+static uint8_t s_applied_brightness = UINT8_MAX;
+static bool s_brightness_settings_ready;
+static bool s_backlight_pwm_ready;
 static uint32_t s_state_epoch;
 static uint32_t s_render_epoch;
 static uint32_t s_animation_tick;
@@ -89,6 +95,93 @@ static volatile uint8_t s_feedback_total;
 static volatile int64_t s_feedback_until_us;
 static SemaphoreHandle_t s_feed_lock;
 static display_feed_t s_feed;
+
+static bool screen_night_schedule_active(const tater_live_settings_t *settings)
+{
+    if (!settings || !settings->screen_night_mode_enabled) {
+        return false;
+    }
+    uint32_t local_seconds = 0;
+    if (!tater_live_settings_local_seconds(&local_seconds)) {
+        return false;
+    }
+    uint16_t now_minute = (uint16_t)(local_seconds / 60);
+    uint16_t start = settings->screen_night_start_minute;
+    uint16_t end = settings->screen_night_end_minute;
+    if (start == end) {
+        return false;
+    }
+    if (start < end) {
+        return now_minute >= start && now_minute < end;
+    }
+    return now_minute >= start || now_minute < end;
+}
+
+static uint8_t requested_backlight_brightness(void)
+{
+    if (!s_brightness_settings_ready) {
+        return s_requested_brightness;
+    }
+    const tater_live_settings_t *settings = tater_live_settings_get();
+    if (screen_night_schedule_active(settings)) {
+        return settings->screen_night_brightness;
+    }
+    return s_requested_brightness;
+}
+
+static void apply_backlight_brightness(uint8_t brightness)
+{
+    uint8_t next = brightness > 100 ? 100 : brightness;
+    if (s_applied_brightness == next) {
+        return;
+    }
+    s_applied_brightness = next;
+    if (s_backlight_pwm_ready) {
+        uint32_t duty = ((uint32_t)next * LCD_BACKLIGHT_PWM_MAX_DUTY + 50U) / 100U;
+        ESP_ERROR_CHECK_WITHOUT_ABORT(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+        return;
+    }
+    gpio_set_level(TATER_LCD_BACKLIGHT, next > 0 ? 1 : 0);
+}
+
+static void refresh_backlight_brightness(void)
+{
+    apply_backlight_brightness(requested_backlight_brightness());
+}
+
+static esp_err_t backlight_pwm_init(void)
+{
+    ledc_timer_config_t timer_config = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_10_BIT,
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = LCD_BACKLIGHT_PWM_FREQUENCY_HZ,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    esp_err_t err = ledc_timer_config(&timer_config);
+    if (err != ESP_OK) {
+        return err;
+    }
+    ledc_channel_config_t channel_config = {
+        .gpio_num = TATER_LCD_BACKLIGHT,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = LEDC_CHANNEL_0,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = LEDC_TIMER_0,
+        .duty = 0,
+        .hpoint = 0,
+    };
+    err = ledc_channel_config(&channel_config);
+    if (err != ESP_OK) {
+        gpio_reset_pin(TATER_LCD_BACKLIGHT);
+        gpio_set_direction(TATER_LCD_BACKLIGHT, GPIO_MODE_OUTPUT);
+        return err;
+    }
+    s_backlight_pwm_ready = true;
+    s_applied_brightness = UINT8_MAX;
+    return ESP_OK;
+}
 
 static uint16_t lcd_color(rgb_t color)
 {
@@ -1368,7 +1461,11 @@ static esp_err_t lcd_init(void)
     };
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)TATER_LCD_SPI_HOST, &io_config, &s_lcd_io), TAG, "lcd io failed");
     ESP_RETURN_ON_ERROR(lcd_init_sequence(), TAG, "lcd init sequence failed");
-    gpio_set_level(TATER_LCD_BACKLIGHT, s_brightness > 0 ? 1 : 0);
+    esp_err_t backlight_err = backlight_pwm_init();
+    if (backlight_err != ESP_OK) {
+        ESP_LOGW(TAG, "lcd backlight PWM unavailable; using on/off fallback: %s", esp_err_to_name(backlight_err));
+    }
+    refresh_backlight_brightness();
     return ESP_OK;
 }
 
@@ -1392,6 +1489,7 @@ static void display_task(void *arg)
     (void)arg;
     while (true) {
         if (s_display_ready) {
+            refresh_backlight_brightness();
             render();
         }
         uint32_t delay_ms = 100;
@@ -1446,8 +1544,9 @@ void tater_leds_set_state(tater_state_t state)
 
 void tater_leds_set_brightness(uint8_t brightness)
 {
-    s_brightness = brightness > 100 ? 100 : brightness;
-    gpio_set_level(TATER_LCD_BACKLIGHT, s_brightness > 0 ? 1 : 0);
+    s_requested_brightness = brightness > 100 ? 100 : brightness;
+    s_brightness_settings_ready = true;
+    refresh_backlight_brightness();
 }
 
 void tater_leds_show_setup_reset_clicks(uint8_t clicks, uint8_t required_clicks)

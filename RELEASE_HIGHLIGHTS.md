@@ -1,11 +1,8 @@
-- Updates all supported native satellite targets to firmware version 0.2.7.
-- Restores ReSpeaker directional listening to the XVF3800's built-in auto-select AEC azimuth instead of the incorrect LED/GPO read path.
-- Makes the ReSpeaker listening state clearly visible while waiting for a fresh direction, then briefly holds the last direction before returning neutral.
-- Prevents random ReSpeaker single-LED flicker by limiting custom ring frames and mute polling on the shared XVF3800 I2C control path and skipping unchanged frames.
-- Restores the animated Wi-Fi/Tater connection twinkle instead of the temporary solid connection glow.
-- Prevents a tone-task stack overflow that could reboot ReSpeaker when Tater restores or starts a timer alarm.
-- Fixes Satellite1 XMOS 1.0.8 installation and recovery after an OTA update by keeping direct-flash SPI transfers within the ESP32-S3 non-DMA hardware limit.
-- Corrects the Satellite1 XMOS page-verification buffer size so every 256-byte page can be read back and verified safely.
-- Makes an interrupted or previously failed Satellite1 XMOS flash recover automatically on the next boot, then skip reflashing once 1.0.8 is confirmed.
-- Publishes the bundled Satellite1 XMOS 1.0.8 image and checksum in the generated firmware release manifest.
-- Documents direct Home Assistant support through the Tater Satellite integration while keeping Tater as the complete assistant option.
+- Updates Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box to firmware version 0.2.8.
+- Moves timer ownership entirely onto each satellite so countdowns and alarms continue without Tater tracking or restoring timer state.
+- Supports up to eight concurrent named timers per satellite, including start, list, cancel, snooze, and stop commands.
+- Adds an embedded Zen-style alarm sound plus an alarm-only `stop` wake model, so users can dismiss ringing timers by voice or with the device button.
+- Keeps later timers counting when an earlier alarm is dismissed and intentionally drops timers after a satellite loses power.
+- Adds real PWM screen-brightness control to S3 Box.
+- Adds S3 Box scheduled night dimming with separate normal and overnight brightness levels.
+- Keeps the S3 Box dimming schedule running through temporary network or Tater disconnects after its local time is synchronized.

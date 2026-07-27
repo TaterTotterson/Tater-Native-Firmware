@@ -146,6 +146,16 @@ struct WakeVerifierTimeoutRequest {
     uint16_t timeout_ms;
 };
 
+struct SavedWakeModel {
+    bool valid;
+    char id[32];
+    char label[48];
+    char source[16];
+    char url[256];
+    uint8_t *custom_data;
+    size_t custom_size;
+};
+
 uint8_t *s_wake_arena = nullptr;
 bool s_wake_arena_psram = false;
 
@@ -191,6 +201,9 @@ char s_active_model_source[16] = "embedded";
 char s_active_model_url[256] = "";
 uint8_t *s_active_custom_model_data = nullptr;
 size_t s_active_custom_model_size = 0;
+volatile bool s_timer_stop_mode_requested = false;
+bool s_timer_stop_mode_active = false;
+SavedWakeModel s_timer_saved_model = {};
 SemaphoreHandle_t s_custom_model_lock = nullptr;
 SemaphoreHandle_t s_wake_sound_lock = nullptr;
 DownloadedWakeModel s_pending_custom_model = {};
@@ -353,7 +366,14 @@ void destroy_wake_interpreter()
     s_wake_arena_used = 0;
 }
 
-bool configure_wake_model_bytes(const char *id, const char *label, const uint8_t *data, size_t model_size, const char *source_url)
+bool configure_wake_model_bytes(
+    const char *id,
+    const char *label,
+    const uint8_t *data,
+    size_t model_size,
+    const char *source_url,
+    bool preserve_previous_custom = false
+)
 {
     if (!data || model_size == 0) {
         set_last_error("wake model asset missing");
@@ -411,7 +431,7 @@ bool configure_wake_model_bytes(const char *id, const char *label, const uint8_t
         std::snprintf(s_active_model_url, sizeof(s_active_model_url), "%s", source_url);
         s_active_custom_model_data = const_cast<uint8_t *>(data);
         s_active_custom_model_size = model_size;
-        if (old_custom_model_data && old_custom_model_data != data) {
+        if (old_custom_model_data && old_custom_model_data != data && !preserve_previous_custom) {
             heap_caps_free(old_custom_model_data);
         }
     } else {
@@ -419,7 +439,7 @@ bool configure_wake_model_bytes(const char *id, const char *label, const uint8_t
         s_active_model_url[0] = '\0';
         s_active_custom_model_data = nullptr;
         s_active_custom_model_size = 0;
-        if (old_custom_model_data) {
+        if (old_custom_model_data && !preserve_previous_custom) {
             heap_caps_free(old_custom_model_data);
         }
     }
@@ -457,6 +477,79 @@ bool configure_wake_model(const tater_wake_model_asset_t *asset)
         static_cast<size_t>(asset->end - asset->data),
         nullptr
     );
+}
+
+bool restore_saved_wake_model()
+{
+    if (!s_timer_saved_model.valid) {
+        s_timer_stop_mode_active = false;
+        return true;
+    }
+
+    bool restored = false;
+    if (std::strcmp(s_timer_saved_model.source, "url") == 0
+            && s_timer_saved_model.custom_data
+            && s_timer_saved_model.custom_size > 0) {
+        restored = configure_wake_model_bytes(
+            s_timer_saved_model.id,
+            s_timer_saved_model.label,
+            s_timer_saved_model.custom_data,
+            s_timer_saved_model.custom_size,
+            s_timer_saved_model.url
+        );
+    } else {
+        const tater_wake_model_asset_t *asset = tater_wake_model_asset_lookup(s_timer_saved_model.id);
+        restored = configure_wake_model(asset);
+    }
+
+    if (!restored) {
+        ESP_LOGE(TAG, "failed to restore wake model after timer stop mode id=%s", s_timer_saved_model.id);
+        return false;
+    }
+    s_timer_saved_model = {};
+    s_timer_stop_mode_active = false;
+    ESP_LOGI(TAG, "restored normal wake model after timer alarm");
+    return true;
+}
+
+bool enter_timer_stop_mode()
+{
+    if (s_timer_stop_mode_active) {
+        return true;
+    }
+    const tater_wake_model_asset_t *stop_model = tater_wake_model_asset_lookup("stop");
+    if (!stop_model || !stop_model->data || !stop_model->end || stop_model->end <= stop_model->data) {
+        set_last_error("timer stop wake model missing");
+        ESP_LOGE(TAG, "timer stop wake model missing");
+        return false;
+    }
+
+    SavedWakeModel saved = {};
+    saved.valid = s_ready;
+    std::snprintf(saved.id, sizeof(saved.id), "%s", s_active_wake_word);
+    std::snprintf(saved.label, sizeof(saved.label), "%s", s_active_wake_label);
+    std::snprintf(saved.source, sizeof(saved.source), "%s", s_active_model_source);
+    std::snprintf(saved.url, sizeof(saved.url), "%s", s_active_model_url);
+    saved.custom_data = s_active_custom_model_data;
+    saved.custom_size = s_active_custom_model_size;
+    s_timer_saved_model = saved;
+
+    bool configured = configure_wake_model_bytes(
+        stop_model->id,
+        stop_model->label,
+        stop_model->data,
+        static_cast<size_t>(stop_model->end - stop_model->data),
+        nullptr,
+        true
+    );
+    if (!configured) {
+        ESP_LOGE(TAG, "failed to activate timer stop wake model");
+        (void)restore_saved_wake_model();
+        return false;
+    }
+    s_timer_stop_mode_active = true;
+    ESP_LOGI(TAG, "timer stop wake model active");
+    return true;
 }
 
 bool is_custom_wake_word(const char *wake_word)
@@ -2365,6 +2458,12 @@ bool runtime_enabled()
     if (!s_ready) {
         return false;
     }
+    if (s_timer_stop_mode_requested || s_timer_stop_mode_active) {
+        return s_timer_stop_mode_requested
+            && s_timer_stop_mode_active
+            && !tater_ota_is_running()
+            && tater_protocol_can_detect_timer_stop();
+    }
     const tater_live_settings_t *settings = tater_live_settings_get();
     if (!settings || std::strcmp(settings->wake_engine, "micro_wake_word") != 0) {
         return false;
@@ -2541,6 +2640,43 @@ float run_wake_model()
 
 bool score_window_triggered(float score)
 {
+    if (s_timer_stop_mode_active) {
+        constexpr size_t stop_window = 5;
+        constexpr float stop_threshold = 0.50f;
+        std::snprintf(s_last_detection_profile, sizeof(s_last_detection_profile), "%s", "timer_stop");
+        s_score_window[s_score_window_index] = score;
+        s_score_window_index = (s_score_window_index + 1) % stop_window;
+        if (s_score_window_count < stop_window) {
+            s_score_window_count++;
+        }
+        size_t count = score_window_count(stop_window);
+        float sum = 0.0f;
+        float peak = 0.0f;
+        for (size_t i = 0; i < count; i++) {
+            float value = score_window_value_at(i, count, stop_window);
+            sum += value;
+            peak = std::max(peak, value);
+        }
+        s_last_average = count > 0 ? sum / static_cast<float>(count) : 0.0f;
+        s_last_peak = peak;
+        s_last_peak_threshold = stop_threshold;
+        s_last_active_window_count = active_windows_at_or_above(stop_threshold, stop_window);
+        s_last_min_active_windows = 1;
+        s_last_rise_score = score_window_rise_score(count, stop_window);
+        if (count < stop_window) {
+            std::snprintf(s_last_reject_reason, sizeof(s_last_reject_reason), "%s", "warming_up");
+            return false;
+        }
+        bool detected = s_last_average >= stop_threshold;
+        std::snprintf(
+            s_last_reject_reason,
+            sizeof(s_last_reject_reason),
+            "%s",
+            detected ? "" : "average"
+        );
+        return detected;
+    }
+
     const tater_live_settings_t *settings = tater_live_settings_get();
     size_t window = normalized_score_window(settings);
     float threshold = settings ? settings->wake_threshold : 0.97f;
@@ -2609,6 +2745,21 @@ void handle_feature_frame(const int8_t *feature)
     s_last_score = run_wake_model();
     bool triggered = score_window_triggered(s_last_score);
     const tater_live_settings_t *settings = tater_live_settings_get();
+    if (s_timer_stop_mode_active) {
+        if (triggered) {
+            s_detection_count++;
+            ESP_LOGI(
+                TAG,
+                "timer stop detected score=%.3f average=%.3f peak=%.3f",
+                (double)s_last_score,
+                (double)s_last_average,
+                (double)s_last_peak
+            );
+            tater_protocol_send_log("info", "local timer stop word detected");
+            tater_protocol_timer_stop_from_device();
+        }
+        return;
+    }
     if (debug_logging_enabled(settings)) {
         int64_t now_us = esp_timer_get_time();
         float threshold = settings ? settings->wake_threshold : 0.97f;
@@ -2806,6 +2957,11 @@ extern "C" void tater_wake_engine_reset(void)
     }
 }
 
+extern "C" void tater_wake_engine_set_timer_stop_mode(bool enabled)
+{
+    s_timer_stop_mode_requested = enabled;
+}
+
 extern "C" void tater_wake_engine_verification_result(
     uint32_t request_id,
     bool accepted,
@@ -2861,7 +3017,12 @@ extern "C" void tater_wake_engine_note_audio(const int16_t *pcm, size_t sample_c
 extern "C" void tater_wake_engine_process(const int16_t *pcm, size_t sample_count)
 {
     const tater_live_settings_t *settings = tater_live_settings_get();
-    if (settings) {
+    if (s_timer_stop_mode_requested) {
+        (void)enter_timer_stop_mode();
+    } else if (s_timer_stop_mode_active) {
+        (void)restore_saved_wake_model();
+    }
+    if (!s_timer_stop_mode_requested && !s_timer_stop_mode_active && settings) {
         consume_pending_custom_model(settings);
         (void)ensure_selected_wake_model(settings);
     }
@@ -2945,6 +3106,8 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     cJSON_AddStringToObject(wake, "last_reject_reason", s_last_reject_reason);
     cJSON_AddStringToObject(wake, "last_error", s_last_error);
     cJSON_AddBoolToObject(wake, "runtime_enabled", s_runtime_was_enabled);
+    cJSON_AddBoolToObject(wake, "timer_stop_mode_requested", s_timer_stop_mode_requested);
+    cJSON_AddBoolToObject(wake, "timer_stop_mode_active", s_timer_stop_mode_active);
     bool verifier_pending = false;
     uint32_t verifier_pending_id = 0;
     uint32_t verifier_count = 0;

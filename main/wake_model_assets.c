@@ -4,12 +4,15 @@
 
 extern const uint8_t _binary_hey_tater_tflite_start[] asm("_binary_hey_tater_tflite_start");
 extern const uint8_t _binary_hey_tater_tflite_end[] asm("_binary_hey_tater_tflite_end");
+extern const uint8_t _binary_stop_tflite_start[] asm("_binary_stop_tflite_start");
+extern const uint8_t _binary_stop_tflite_end[] asm("_binary_stop_tflite_end");
 
 #define WAKE_MODEL_ASSET(asset_id, asset_label, symbol_name) \
     { asset_id, asset_label, _binary_##symbol_name##_tflite_start, _binary_##symbol_name##_tflite_end }
 
 static const tater_wake_model_asset_t s_assets[] = {
     WAKE_MODEL_ASSET("hey_tater", "Hey Tater", hey_tater),
+    WAKE_MODEL_ASSET("stop", "Stop", stop),
 };
 
 const tater_wake_model_asset_t *tater_wake_model_asset_lookup(const char *id)

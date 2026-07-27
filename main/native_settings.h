@@ -31,6 +31,13 @@ typedef struct {
     bool barge_in_enabled;
     uint8_t volume_percent;
     bool muted;
+    uint8_t screen_brightness;
+    bool screen_night_mode_enabled;
+    uint8_t screen_night_brightness;
+    uint16_t screen_night_start_minute;
+    uint16_t screen_night_end_minute;
+    uint32_t screen_local_time_seconds;
+    bool screen_local_time_valid;
     uint8_t led_brightness;
     char led_color[8];
     char led_listening_animation[32];
@@ -47,3 +54,4 @@ uint8_t tater_live_settings_adjust_volume(int delta_percent);
 bool tater_live_settings_set_muted(bool muted);
 bool tater_live_settings_apply_json(const cJSON *payload);
 void tater_live_settings_add_status(cJSON *payload);
+bool tater_live_settings_local_seconds(uint32_t *seconds_since_midnight);

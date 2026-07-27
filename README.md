@@ -84,6 +84,7 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 ### Voice And Audio
 
 - Local embedded `hey_tater` microWakeWord model
+- Embedded alarm-only `stop` model that is active only while a timer rings
 - Custom microWakeWord `.json` and `.tflite` URL support with persistent cache
 - Wake sensitivity, environment profile, threshold, and sliding-window settings
 - Optional low-latency Tater STT wake verification in observe or enforce mode,
@@ -99,7 +100,7 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 - Compressed-stream jitter buffering for MP3/FLAC
 - Embedded on-device wake sounds
 - Custom wake-sound WAV URL support with persistent cache
-- Server-driven `play.tone` support for timers and diagnostics
+- Server-driven `play.tone` support for diagnostics
 - Per-device volume setting
 
 ### LEDs, Buttons, And Device UI
@@ -123,9 +124,17 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 
 ### Timers And Intercom Hooks
 
-- Tater-managed timers with local satellite alarm fallback
-- Timer LEDs and local alarm tone while ringing
-- Timer stop from the device button
+- Up to eight concurrent, optionally named timers owned entirely by the
+  satellite
+- Volatile monotonic countdowns that continue through Tater and Wi-Fi
+  disconnects and intentionally clear when the satellite reboots
+- Original embedded zen chime with a quiet speech-detection gap
+- Local `stop` wake word while ringing, without an STT or network round trip
+- Saying `stop` or pressing the device button dismisses every timer currently
+  ringing while later timers continue counting
+- Live start, list, cancel, and snooze commands; Tater does not persist or
+  restore satellite timer state
+- Timer LEDs only while ringing, with a 15-minute automatic alarm cutoff
 - Native intercom/push-to-talk hooks through the same satellite transport
 - Broadcast/intercom routing is handled by Tater so room targeting can happen on
   the server side
@@ -170,6 +179,8 @@ ESP32-S3-BOX-3 Display:
 - 320x240 LCD with Tater-themed display UI
 - Tater assistant name, online state, voice state, clock, date, volume, mute,
   and configured display stats
+- Per-device PWM screen brightness plus optional local-time night dimming with
+  separate start, restore, and night-brightness settings
 - Display feed polling from Tater with room/profile targeting
 - 48 kHz stereo I2S microphone capture downsampled into the 16 kHz wake/STT path
 - Shared-duplex I2S speaker playback

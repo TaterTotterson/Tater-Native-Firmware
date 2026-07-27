@@ -9,11 +9,13 @@
 #include "board.h"
 #include "audio_i2s.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "leds.h"
 
 static const char *TAG = "tater_settings";
 
 static tater_live_settings_t s_settings;
+static int64_t s_screen_time_sync_us;
 
 static void strlcpy_or_empty(char *dst, const char *src, size_t dst_len)
 {
@@ -86,6 +88,51 @@ static uint16_t json_u16_range(const cJSON *value, uint16_t fallback, uint16_t m
     return (uint16_t)(out + 0.5f);
 }
 
+static uint32_t json_u32_range(const cJSON *value, uint32_t fallback, uint32_t min_value, uint32_t max_value)
+{
+    double out = fallback;
+    if (cJSON_IsNumber(value)) {
+        out = value->valuedouble;
+    } else if (cJSON_IsString(value) && value->valuestring) {
+        char *end = NULL;
+        out = strtod(value->valuestring, &end);
+        if (end == value->valuestring) {
+            out = fallback;
+        }
+    }
+    if (!isfinite(out)) {
+        out = fallback;
+    }
+    if (out < min_value) {
+        out = min_value;
+    }
+    if (out > max_value) {
+        out = max_value;
+    }
+    return (uint32_t)(out + 0.5);
+}
+
+static uint16_t json_time_minute(const cJSON *value, uint16_t fallback)
+{
+    if (cJSON_IsNumber(value)) {
+        return json_u16_range(value, fallback, 0, 1439);
+    }
+    if (!cJSON_IsString(value) || !value->valuestring) {
+        return fallback;
+    }
+    int hour = -1;
+    int minute = -1;
+    char trailing = '\0';
+    if (sscanf(value->valuestring, "%d:%d%c", &hour, &minute, &trailing) != 2
+            || hour < 0
+            || hour > 23
+            || minute < 0
+            || minute > 59) {
+        return fallback;
+    }
+    return (uint16_t)((hour * 60) + minute);
+}
+
 void tater_live_settings_init_defaults(void)
 {
     strlcpy_or_empty(s_settings.wake_engine, "micro_wake_word", sizeof(s_settings.wake_engine));
@@ -121,6 +168,14 @@ void tater_live_settings_init_defaults(void)
     s_settings.barge_in_enabled = false;
     s_settings.volume_percent = 80;
     s_settings.muted = false;
+    s_settings.screen_brightness = 80;
+    s_settings.screen_night_mode_enabled = false;
+    s_settings.screen_night_brightness = 10;
+    s_settings.screen_night_start_minute = 22 * 60;
+    s_settings.screen_night_end_minute = 7 * 60;
+    s_settings.screen_local_time_seconds = 0;
+    s_settings.screen_local_time_valid = false;
+    s_screen_time_sync_us = 0;
     s_settings.led_brightness = 80;
     strlcpy_or_empty(s_settings.led_color, "#ff5a1f", sizeof(s_settings.led_color));
     strlcpy_or_empty(s_settings.led_listening_animation, "directional", sizeof(s_settings.led_listening_animation));
@@ -128,7 +183,11 @@ void tater_live_settings_init_defaults(void)
     strlcpy_or_empty(s_settings.led_tool_call_animation, "ping_pong", sizeof(s_settings.led_tool_call_animation));
     strlcpy_or_empty(s_settings.led_replying_animation, "voice_ring", sizeof(s_settings.led_replying_animation));
     strlcpy_or_empty(s_settings.logging_level, "info", sizeof(s_settings.logging_level));
+#if TATER_BOARD_S3_BOX
+    tater_leds_set_brightness(s_settings.screen_brightness);
+#else
     tater_leds_set_brightness(s_settings.led_brightness);
+#endif
 }
 
 const tater_live_settings_t *tater_live_settings_get(void)
@@ -195,6 +254,12 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *barge_in_enabled = cJSON_GetObjectItem(payload, "barge_in_enabled");
     const cJSON *volume_percent = cJSON_GetObjectItem(payload, "volume_percent");
     const cJSON *muted = cJSON_GetObjectItem(payload, "muted");
+    const cJSON *screen_brightness = cJSON_GetObjectItem(payload, "screen_brightness");
+    const cJSON *screen_night_mode_enabled = cJSON_GetObjectItem(payload, "screen_night_mode_enabled");
+    const cJSON *screen_night_brightness = cJSON_GetObjectItem(payload, "screen_night_brightness");
+    const cJSON *screen_night_start = cJSON_GetObjectItem(payload, "screen_night_start");
+    const cJSON *screen_night_end = cJSON_GetObjectItem(payload, "screen_night_end");
+    const cJSON *screen_local_time_seconds = cJSON_GetObjectItem(payload, "screen_local_time_seconds");
     const cJSON *led_brightness = cJSON_GetObjectItem(payload, "led_brightness");
     const cJSON *led_color = cJSON_GetObjectItem(payload, "led_color");
     const cJSON *led_listening_animation = cJSON_GetObjectItem(payload, "led_listening_animation");
@@ -261,6 +326,40 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     s_settings.volume_percent = json_u8_range(volume_percent, s_settings.volume_percent, 0, 100);
     bool next_muted = json_bool(muted, s_settings.muted);
     tater_live_settings_set_muted(next_muted);
+    s_settings.screen_brightness = json_u8_range(
+        screen_brightness,
+        s_settings.screen_brightness,
+        0,
+        100
+    );
+    s_settings.screen_night_mode_enabled = json_bool(
+        screen_night_mode_enabled,
+        s_settings.screen_night_mode_enabled
+    );
+    s_settings.screen_night_brightness = json_u8_range(
+        screen_night_brightness,
+        s_settings.screen_night_brightness,
+        0,
+        100
+    );
+    s_settings.screen_night_start_minute = json_time_minute(
+        screen_night_start,
+        s_settings.screen_night_start_minute
+    );
+    s_settings.screen_night_end_minute = json_time_minute(
+        screen_night_end,
+        s_settings.screen_night_end_minute
+    );
+    if (cJSON_IsNumber(screen_local_time_seconds) || cJSON_IsString(screen_local_time_seconds)) {
+        s_settings.screen_local_time_seconds = json_u32_range(
+            screen_local_time_seconds,
+            s_settings.screen_local_time_seconds,
+            0,
+            (24 * 60 * 60) - 1
+        );
+        s_settings.screen_local_time_valid = true;
+        s_screen_time_sync_us = esp_timer_get_time();
+    }
     s_settings.led_brightness = json_u8_range(led_brightness, s_settings.led_brightness, 0, 100);
     if (cJSON_IsString(led_color) && led_color->valuestring && led_color->valuestring[0]) {
         strlcpy_or_empty(s_settings.led_color, led_color->valuestring, sizeof(s_settings.led_color));
@@ -277,7 +376,11 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     if (cJSON_IsString(led_replying_animation) && led_replying_animation->valuestring && led_replying_animation->valuestring[0]) {
         strlcpy_or_empty(s_settings.led_replying_animation, led_replying_animation->valuestring, sizeof(s_settings.led_replying_animation));
     }
+#if TATER_BOARD_S3_BOX
+    tater_leds_set_brightness(s_settings.screen_brightness);
+#else
     tater_leds_set_brightness(s_settings.led_brightness);
+#endif
     if (cJSON_IsString(logging_level) && logging_level->valuestring && logging_level->valuestring[0]) {
         strlcpy_or_empty(s_settings.logging_level, logging_level->valuestring, sizeof(s_settings.logging_level));
     }
@@ -285,7 +388,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
 
     ESP_LOGI(
         TAG,
-        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s wake_gen=%u sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f verifier=%s/%ums/%ums wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d led=%u color=%s animations=%s/%s/%s/%s logging=%s",
+        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s wake_gen=%u sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f verifier=%s/%ums/%ums wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d screen=%u night=%d/%u/%u-%u led=%u color=%s animations=%s/%s/%s/%s logging=%s",
         s_settings.wake_engine,
         s_settings.wake_word,
         s_settings.wake_word_url,
@@ -309,6 +412,11 @@ bool tater_live_settings_apply_json(const cJSON *payload)
         s_settings.barge_in_enabled,
         s_settings.volume_percent,
         s_settings.muted,
+        s_settings.screen_brightness,
+        s_settings.screen_night_mode_enabled,
+        s_settings.screen_night_brightness,
+        s_settings.screen_night_start_minute,
+        s_settings.screen_night_end_minute,
         s_settings.led_brightness,
         s_settings.led_color,
         s_settings.led_listening_animation,
@@ -351,6 +459,12 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddBoolToObject(settings, "barge_in_enabled", s_settings.barge_in_enabled);
     cJSON_AddNumberToObject(settings, "volume_percent", s_settings.volume_percent);
     cJSON_AddBoolToObject(settings, "muted", s_settings.muted);
+    cJSON_AddNumberToObject(settings, "screen_brightness", s_settings.screen_brightness);
+    cJSON_AddBoolToObject(settings, "screen_night_mode_enabled", s_settings.screen_night_mode_enabled);
+    cJSON_AddNumberToObject(settings, "screen_night_brightness", s_settings.screen_night_brightness);
+    cJSON_AddNumberToObject(settings, "screen_night_start_minute", s_settings.screen_night_start_minute);
+    cJSON_AddNumberToObject(settings, "screen_night_end_minute", s_settings.screen_night_end_minute);
+    cJSON_AddBoolToObject(settings, "screen_local_time_valid", s_settings.screen_local_time_valid);
     cJSON_AddNumberToObject(settings, "led_brightness", s_settings.led_brightness);
     cJSON_AddStringToObject(settings, "led_color", s_settings.led_color);
     cJSON_AddStringToObject(settings, "led_listening_animation", s_settings.led_listening_animation);
@@ -359,4 +473,18 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddStringToObject(settings, "led_replying_animation", s_settings.led_replying_animation);
     cJSON_AddStringToObject(settings, "logging_level", s_settings.logging_level);
     cJSON_AddItemToObject(payload, "live_settings", settings);
+}
+
+bool tater_live_settings_local_seconds(uint32_t *seconds_since_midnight)
+{
+    if (!seconds_since_midnight || !s_settings.screen_local_time_valid || s_screen_time_sync_us <= 0) {
+        return false;
+    }
+    int64_t elapsed_us = esp_timer_get_time() - s_screen_time_sync_us;
+    if (elapsed_us < 0) {
+        elapsed_us = 0;
+    }
+    uint32_t elapsed_seconds = (uint32_t)(elapsed_us / 1000000LL);
+    *seconds_since_midnight = (s_settings.screen_local_time_seconds + elapsed_seconds) % (24 * 60 * 60);
+    return true;
 }
