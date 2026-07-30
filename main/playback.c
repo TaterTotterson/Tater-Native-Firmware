@@ -17,11 +17,13 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_mp3_dec.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "native_settings.h"
+#include "playback_mix.h"
 #include "tater_protocol.h"
 
 static const char *TAG = "tater_playback";
@@ -39,8 +41,28 @@ static const size_t PLAYBACK_FLAC_PREBUFFER = 256 * 1024;
 static const uint32_t PLAYBACK_HTTP_READER_TASK_STACK = 4096;
 static const uint32_t PLAYBACK_URL_TASK_STACK = 16384;
 static const uint32_t PLAYBACK_TONE_TASK_STACK = 8192;
+static const uint32_t PLAYBACK_SCENE_BACKGROUND_TASK_STACK = 16384;
 static const uint32_t PLAYBACK_STOP_WAIT_MS = 3000;
 static const uint32_t PLAYBACK_STOP_POLL_MS = 20;
+static const uint32_t PLAYBACK_SCENE_PREBUFFER_MS = 250;
+static const uint32_t PLAYBACK_SCENE_PREBUFFER_TIMEOUT_MS = 5000;
+static const uint32_t PLAYBACK_MEDIA_PREPARE_TIMEOUT_MS = 30000;
+static const uint32_t PLAYBACK_MEDIA_PLAYHEAD_INTERVAL_MS = 1000;
+static const int32_t PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES = 480;
+static const size_t PLAYBACK_SCENE_BACKGROUND_RING_FRAMES = 2 * TATER_SPK_SAMPLE_RATE;
+static const size_t PLAYBACK_MEDIA_RING_FRAMES = 2 * TATER_SPK_SAMPLE_RATE;
+static const size_t PLAYBACK_OVERLAY_RING_FRAMES = TATER_SPK_SAMPLE_RATE;
+#define PLAYBACK_MIX_CHUNK_FRAMES 256
+
+typedef struct playback_pcm_sink playback_pcm_sink_t;
+
+struct playback_pcm_sink {
+    void *ctx;
+    esp_err_t (*begin)(void *ctx);
+    esp_err_t (*write)(void *ctx, const int16_t *stereo_frames, size_t frame_count);
+    esp_err_t (*end)(void *ctx);
+    uint8_t volume_percent;
+};
 
 typedef struct {
     uint16_t audio_format;
@@ -68,6 +90,7 @@ typedef enum {
 } wav_header_result_t;
 
 typedef struct {
+    playback_pcm_sink_t *sink;
     uint8_t partial_frame[32];
     size_t partial_len;
     size_t data_bytes_seen;
@@ -94,7 +117,8 @@ typedef struct {
     size_t out_cap;
     esp_audio_simple_dec_info_t info;
     bool have_info;
-    bool speaker_started;
+    bool sink_started;
+    playback_pcm_sink_t *sink;
     pcm_stream_state_t pcm;
     uint32_t decoded_bytes;
 } codec_stream_state_t;
@@ -150,10 +174,141 @@ typedef struct {
     bool task_with_caps;
 } playback_memory_args_t;
 
+typedef struct {
+    int16_t *samples;
+    size_t capacity_frames;
+    size_t read_frame;
+    size_t write_frame;
+    size_t fill_frames;
+    size_t high_water_frames;
+    size_t underrun_frames;
+    size_t total_written_frames;
+    size_t total_read_frames;
+    SemaphoreHandle_t lock;
+    SemaphoreHandle_t can_read;
+    SemaphoreHandle_t can_write;
+    volatile bool stop;
+    bool closed;
+    bool failed;
+} scene_pcm_ring_t;
+
+typedef struct {
+    scene_pcm_ring_t *ring;
+    char *url;
+    bool loop;
+    uint8_t volume_percent;
+    volatile bool done;
+    bool task_with_caps;
+    esp_err_t result;
+    TaskHandle_t notify_task;
+} scene_background_args_t;
+
+typedef struct {
+    scene_pcm_ring_t *background;
+    tater_playback_mix_state_t mix;
+    uint8_t ducking_target_percent;
+    uint16_t ducking_attack_ms;
+    uint16_t ducking_release_ms;
+    uint16_t fade_out_ms;
+    bool speaker_started;
+} scene_mixer_sink_t;
+
+typedef struct {
+    char scene_id[TATER_PLAYBACK_SCENE_ID_MAX];
+    char *foreground_url;
+    char *background_url;
+    uint8_t foreground_volume_percent;
+    uint8_t background_volume_percent;
+    uint8_t ducking_target_percent;
+    uint16_t ducking_attack_ms;
+    uint16_t ducking_release_ms;
+    uint16_t background_fade_out_ms;
+    bool background_loop;
+    bool task_with_caps;
+} scene_args_t;
+
+typedef struct {
+    SemaphoreHandle_t lock;
+    bool active;
+    bool accepting_overlays;
+    char session_id[TATER_PLAYBACK_MEDIA_SESSION_ID_MAX];
+    char group_id[TATER_PLAYBACK_MEDIA_GROUP_ID_MAX];
+    char prepare_reply_to[TATER_PLAYBACK_REQUEST_ID_MAX];
+    char *media_url;
+    uint8_t media_volume_percent;
+    tater_playback_channel_t media_channel;
+    bool media_loop;
+    bool prepare_requested;
+    bool prepared;
+    bool committed;
+    int64_t scheduled_start_us;
+    int32_t pending_correction_frames;
+    uint64_t source_frames;
+    uint64_t output_frames;
+    scene_pcm_ring_t media_ring;
+    bool media_ring_initialized;
+    scene_background_args_t *media_decoder;
+    TaskHandle_t media_decoder_task;
+    bool task_with_caps;
+
+    char overlay_id[TATER_PLAYBACK_OVERLAY_ID_MAX];
+    char *overlay_url;
+    uint8_t overlay_volume_percent;
+    uint8_t ducking_target_percent;
+    uint16_t ducking_attack_ms;
+    uint16_t ducking_release_ms;
+    scene_pcm_ring_t overlay_ring;
+    bool overlay_ring_initialized;
+    scene_background_args_t *overlay_decoder;
+    TaskHandle_t overlay_decoder_task;
+    bool overlay_pending;
+    bool overlay_active;
+    bool overlay_releasing;
+    bool overlay_started_reported;
+    int64_t overlay_start_at_us;
+} media_session_state_t;
+
 static volatile bool s_abort;
 static volatile bool s_playing;
 static TaskHandle_t s_task;
 static SemaphoreHandle_t s_lifecycle_lock;
+static media_session_state_t s_media_session;
+
+static esp_err_t playback_sink_begin(playback_pcm_sink_t *sink)
+{
+    if (sink && sink->begin) {
+        return sink->begin(sink->ctx);
+    }
+    return tater_audio_speaker_begin();
+}
+
+static esp_err_t playback_sink_write(
+    playback_pcm_sink_t *sink,
+    const int16_t *stereo_frames,
+    size_t frame_count
+)
+{
+    if (sink && sink->write) {
+        return sink->write(sink->ctx, stereo_frames, frame_count);
+    }
+    return tater_audio_write_speaker_frames(stereo_frames, frame_count);
+}
+
+static esp_err_t playback_sink_end(playback_pcm_sink_t *sink)
+{
+    if (sink && sink->end) {
+        return sink->end(sink->ctx);
+    }
+    return tater_audio_speaker_end();
+}
+
+static uint8_t playback_sink_volume(playback_pcm_sink_t *sink)
+{
+    if (!sink) {
+        return 100;
+    }
+    return sink->volume_percent > 100 ? 100 : sink->volume_percent;
+}
 
 static void playback_log_heap(const char *label)
 {
@@ -689,10 +844,12 @@ static int codec_jitter_read(codec_jitter_buffer_t *buffer, uint8_t *out, size_t
     return -1;
 }
 
-static int16_t scale_output_sample(int16_t sample)
+static int16_t scale_output_sample(int16_t sample, playback_pcm_sink_t *sink)
 {
     const tater_live_settings_t *settings = tater_live_settings_get();
-    uint8_t volume = settings ? settings->volume_percent : 100;
+    uint32_t master_volume = settings ? settings->volume_percent : 100;
+    uint32_t source_volume = playback_sink_volume(sink);
+    uint32_t volume = (master_volume * source_volume + 50) / 100;
     if (volume >= 100) {
         return sample;
     }
@@ -774,7 +931,7 @@ static esp_err_t pcm_stream_flush(pcm_stream_state_t *state)
     if (!state || state->out_frames == 0) {
         return ESP_OK;
     }
-    esp_err_t err = tater_audio_write_speaker_frames(state->out, state->out_frames);
+    esp_err_t err = playback_sink_write(state->sink, state->out, state->out_frames);
     if (err == ESP_OK) {
         state->output_frames += state->out_frames;
         state->out_frames = 0;
@@ -788,8 +945,8 @@ static esp_err_t pcm_stream_emit_stereo(uint32_t sample_rate, pcm_stream_state_t
         return ESP_ERR_INVALID_ARG;
     }
 
-    left = scale_output_sample(left);
-    right = scale_output_sample(right);
+    left = scale_output_sample(left, state->sink);
+    right = scale_output_sample(right, state->sink);
     state->input_frames++;
     state->resample_accum += TATER_SPK_SAMPLE_RATE;
 
@@ -1056,7 +1213,11 @@ static esp_err_t audio_codec_register_once(void)
     return ESP_OK;
 }
 
-static esp_err_t codec_stream_begin(codec_stream_state_t *stream, stream_audio_type_t type)
+static esp_err_t codec_stream_begin(
+    codec_stream_state_t *stream,
+    stream_audio_type_t type,
+    playback_pcm_sink_t *sink
+)
 {
     if (!stream) {
         return ESP_ERR_INVALID_ARG;
@@ -1065,6 +1226,8 @@ static esp_err_t codec_stream_begin(codec_stream_state_t *stream, stream_audio_t
     ESP_RETURN_ON_ERROR(audio_codec_register_once(), TAG, "codec registry failed");
     memset(stream, 0, sizeof(*stream));
     stream->type = simple_decoder_type_for_stream(type);
+    stream->sink = sink;
+    stream->pcm.sink = sink;
     if (stream->type == ESP_AUDIO_SIMPLE_DEC_TYPE_NONE) {
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -1094,12 +1257,12 @@ static void codec_stream_end(codec_stream_state_t *stream)
     if (!stream) {
         return;
     }
-    if (stream->speaker_started) {
-        esp_err_t end_err = tater_audio_speaker_end();
+    if (stream->sink_started) {
+        esp_err_t end_err = playback_sink_end(stream->sink);
         if (end_err != ESP_OK) {
-            ESP_LOGW(TAG, "speaker end failed err=%s", esp_err_to_name(end_err));
+            ESP_LOGW(TAG, "playback sink end failed err=%s", esp_err_to_name(end_err));
         }
-        stream->speaker_started = false;
+        stream->sink_started = false;
     }
     if (stream->decoder) {
         esp_audio_simple_dec_close(stream->decoder);
@@ -1128,8 +1291,8 @@ static esp_err_t codec_stream_handle_pcm(codec_stream_state_t *stream, const uin
                  stream->info.channel,
                  stream->info.bits_per_sample,
                  stream->info.bitrate);
-        ESP_RETURN_ON_ERROR(tater_audio_speaker_begin(), TAG, "speaker begin failed");
-        stream->speaker_started = true;
+        ESP_RETURN_ON_ERROR(playback_sink_begin(stream->sink), TAG, "playback sink begin failed");
+        stream->sink_started = true;
         stream->have_info = true;
     }
 
@@ -1254,12 +1417,13 @@ static esp_err_t stream_codec_from_open_client(
     size_t initial_len,
     uint8_t *read_buf,
     size_t read_size,
-    int64_t content_length
+    int64_t content_length,
+    playback_pcm_sink_t *sink
 )
 {
     codec_jitter_buffer_t jitter = {0};
     codec_stream_state_t stream = {0};
-    esp_err_t err = codec_stream_begin(&stream, type);
+    esp_err_t err = codec_stream_begin(&stream, type, sink);
     if (err != ESP_OK) {
         return err;
     }
@@ -1338,7 +1502,7 @@ static esp_err_t stream_codec_from_open_client(
     }
 
     if (err == ESP_OK && !s_abort) {
-        if (stream.speaker_started) {
+        if (stream.sink_started) {
             err = pcm_stream_flush(&stream.pcm);
         } else {
             err = ESP_ERR_NOT_SUPPORTED;
@@ -1392,7 +1556,8 @@ static esp_err_t stream_wav_direct_from_open_client(
     size_t initial_audio_len,
     uint8_t *read_buf,
     size_t read_size,
-    const char *reason
+    const char *reason,
+    playback_pcm_sink_t *sink
 )
 {
     if (!client || !info || !read_buf || read_size == 0) {
@@ -1403,11 +1568,13 @@ static esp_err_t stream_wav_direct_from_open_client(
         tater_protocol_send_log("warn", reason);
     }
 
-    wav_stream_state_t state = {0};
-    esp_err_t err = tater_audio_speaker_begin();
+    wav_stream_state_t state = {
+        .sink = sink,
+    };
+    esp_err_t err = playback_sink_begin(sink);
     bool speaker_started = err == ESP_OK;
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "speaker begin failed: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "playback sink begin failed: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -1440,9 +1607,9 @@ static esp_err_t stream_wav_direct_from_open_client(
         (unsigned)state.data_bytes_seen
     );
     if (speaker_started) {
-        esp_err_t end_err = tater_audio_speaker_end();
+        esp_err_t end_err = playback_sink_end(sink);
         if (end_err != ESP_OK) {
-            ESP_LOGW(TAG, "speaker end failed err=%s", esp_err_to_name(end_err));
+            ESP_LOGW(TAG, "playback sink end failed err=%s", esp_err_to_name(end_err));
         }
     }
     if (err != ESP_OK) {
@@ -1459,7 +1626,8 @@ static esp_err_t stream_wav_from_open_client(
     size_t http_bytes_seen,
     uint8_t *read_buf,
     size_t read_size,
-    int64_t content_length
+    int64_t content_length,
+    playback_pcm_sink_t *sink
 )
 {
     if (!client || !info || !read_buf || read_size == 0) {
@@ -1467,7 +1635,9 @@ static esp_err_t stream_wav_from_open_client(
     }
 
     codec_jitter_buffer_t jitter = {0};
-    wav_stream_state_t state = {0};
+    wav_stream_state_t state = {
+        .sink = sink,
+    };
     esp_err_t err = codec_jitter_init(&jitter, PLAYBACK_WAV_JITTER_CAPACITY);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "stream wav jitter init failed err=%s; using direct playback", esp_err_to_name(err));
@@ -1478,7 +1648,8 @@ static esp_err_t stream_wav_from_open_client(
             initial_audio_len,
             read_buf,
             read_size,
-            "wav buffered playback unavailable; using direct playback"
+            "wav buffered playback unavailable; using direct playback",
+            sink
         );
     }
 
@@ -1544,7 +1715,8 @@ static esp_err_t stream_wav_from_open_client(
             initial_audio_len,
             read_buf,
             read_size,
-            "wav reader unavailable; using direct playback"
+            "wav reader unavailable; using direct playback",
+            sink
         );
     }
 
@@ -1564,11 +1736,11 @@ static esp_err_t stream_wav_from_open_client(
     }
     if (err == ESP_OK) {
         tater_protocol_send_log("info", "wav buffered playback");
-        err = tater_audio_speaker_begin();
+        err = playback_sink_begin(sink);
         if (err == ESP_OK) {
             speaker_started = true;
         } else {
-            ESP_LOGE(TAG, "speaker begin failed: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "playback sink begin failed: %s", esp_err_to_name(err));
         }
     }
 
@@ -1599,9 +1771,9 @@ static esp_err_t stream_wav_from_open_client(
         (unsigned)state.data_bytes_seen
     );
     if (speaker_started) {
-        esp_err_t end_err = tater_audio_speaker_end();
+        esp_err_t end_err = playback_sink_end(sink);
         if (end_err != ESP_OK) {
-            ESP_LOGW(TAG, "speaker end failed err=%s", esp_err_to_name(end_err));
+            ESP_LOGW(TAG, "playback sink end failed err=%s", esp_err_to_name(end_err));
         }
     }
 
@@ -1636,7 +1808,7 @@ static esp_err_t stream_wav_from_open_client(
     return s_abort ? ESP_FAIL : ESP_OK;
 }
 
-static esp_err_t stream_audio_url(const char *url)
+static esp_err_t stream_audio_url(const char *url, playback_pcm_sink_t *sink)
 {
     esp_http_client_config_t cfg = {
         .url = url,
@@ -1710,7 +1882,8 @@ static esp_err_t stream_audio_url(const char *url)
                     header_len,
                     read_buf,
                     PLAYBACK_HTTP_READ_SIZE,
-                    content_length
+                    content_length,
+                    sink
                 );
                 goto done;
             }
@@ -1743,7 +1916,8 @@ static esp_err_t stream_audio_url(const char *url)
                 header_len,
                 read_buf,
                 PLAYBACK_HTTP_READ_SIZE,
-                content_length
+                content_length,
+                sink
             );
             goto done;
         }
@@ -1762,6 +1936,418 @@ done:
         return err;
     }
     return s_abort ? ESP_FAIL : ESP_OK;
+}
+
+static void scene_pcm_ring_signal(scene_pcm_ring_t *ring)
+{
+    if (!ring) {
+        return;
+    }
+    if (ring->can_read) {
+        xSemaphoreGive(ring->can_read);
+    }
+    if (ring->can_write) {
+        xSemaphoreGive(ring->can_write);
+    }
+}
+
+static esp_err_t scene_pcm_ring_init(scene_pcm_ring_t *ring, size_t capacity_frames)
+{
+    if (!ring || capacity_frames == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(ring, 0, sizeof(*ring));
+    ring->samples = (int16_t *)alloc_audio(
+        capacity_frames * TATER_SPK_CHANNELS * sizeof(int16_t)
+    );
+    ring->lock = xSemaphoreCreateMutex();
+    ring->can_read = xSemaphoreCreateBinary();
+    ring->can_write = xSemaphoreCreateBinary();
+    if (!ring->samples || !ring->lock || !ring->can_read || !ring->can_write) {
+        if (ring->lock) {
+            vSemaphoreDelete(ring->lock);
+        }
+        if (ring->can_read) {
+            vSemaphoreDelete(ring->can_read);
+        }
+        if (ring->can_write) {
+            vSemaphoreDelete(ring->can_write);
+        }
+        free(ring->samples);
+        memset(ring, 0, sizeof(*ring));
+        return ESP_ERR_NO_MEM;
+    }
+    ring->capacity_frames = capacity_frames;
+    xSemaphoreGive(ring->can_write);
+    return ESP_OK;
+}
+
+static void scene_pcm_ring_destroy(scene_pcm_ring_t *ring)
+{
+    if (!ring) {
+        return;
+    }
+    if (ring->lock) {
+        vSemaphoreDelete(ring->lock);
+    }
+    if (ring->can_read) {
+        vSemaphoreDelete(ring->can_read);
+    }
+    if (ring->can_write) {
+        vSemaphoreDelete(ring->can_write);
+    }
+    free(ring->samples);
+    memset(ring, 0, sizeof(*ring));
+}
+
+static void scene_pcm_ring_stop(scene_pcm_ring_t *ring)
+{
+    if (!ring || !ring->lock) {
+        return;
+    }
+    xSemaphoreTake(ring->lock, portMAX_DELAY);
+    ring->stop = true;
+    xSemaphoreGive(ring->lock);
+    scene_pcm_ring_signal(ring);
+}
+
+static void scene_pcm_ring_finish(scene_pcm_ring_t *ring, esp_err_t result)
+{
+    if (!ring || !ring->lock) {
+        return;
+    }
+    xSemaphoreTake(ring->lock, portMAX_DELAY);
+    ring->closed = true;
+    if (result != ESP_OK && !ring->stop && !s_abort) {
+        ring->failed = true;
+    }
+    xSemaphoreGive(ring->lock);
+    scene_pcm_ring_signal(ring);
+}
+
+static esp_err_t scene_pcm_ring_write(
+    void *ctx,
+    const int16_t *stereo_frames,
+    size_t frame_count
+)
+{
+    scene_pcm_ring_t *ring = (scene_pcm_ring_t *)ctx;
+    if (!ring || !ring->lock || !stereo_frames || frame_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t offset = 0;
+    while (!s_abort && offset < frame_count) {
+        xSemaphoreTake(ring->lock, portMAX_DELAY);
+        if (ring->stop) {
+            xSemaphoreGive(ring->lock);
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        size_t available = ring->capacity_frames - ring->fill_frames;
+        size_t write_frames = frame_count - offset;
+        if (write_frames > available) {
+            write_frames = available;
+        }
+        size_t contiguous = ring->capacity_frames - ring->write_frame;
+        if (write_frames > contiguous) {
+            write_frames = contiguous;
+        }
+        if (write_frames > 0) {
+            memcpy(
+                &ring->samples[ring->write_frame * TATER_SPK_CHANNELS],
+                &stereo_frames[offset * TATER_SPK_CHANNELS],
+                write_frames * TATER_SPK_CHANNELS * sizeof(int16_t)
+            );
+            ring->write_frame = (ring->write_frame + write_frames) % ring->capacity_frames;
+            ring->fill_frames += write_frames;
+            ring->total_written_frames += write_frames;
+            if (ring->fill_frames > ring->high_water_frames) {
+                ring->high_water_frames = ring->fill_frames;
+            }
+            offset += write_frames;
+            xSemaphoreGive(ring->can_read);
+        }
+        xSemaphoreGive(ring->lock);
+
+        if (offset < frame_count) {
+            xSemaphoreTake(ring->can_write, pdMS_TO_TICKS(20));
+        }
+    }
+    return offset == frame_count ? ESP_OK : ESP_FAIL;
+}
+
+static size_t scene_pcm_ring_read(
+    scene_pcm_ring_t *ring,
+    int16_t *stereo_frames,
+    size_t frame_count,
+    TickType_t wait_ticks
+)
+{
+    if (!ring || !ring->lock || !stereo_frames || frame_count == 0) {
+        return 0;
+    }
+
+    TickType_t started = xTaskGetTickCount();
+    while (!s_abort) {
+        xSemaphoreTake(ring->lock, portMAX_DELAY);
+        size_t read_frames = frame_count;
+        if (read_frames > ring->fill_frames) {
+            read_frames = ring->fill_frames;
+        }
+        if (read_frames > 0) {
+            size_t first = read_frames;
+            size_t contiguous = ring->capacity_frames - ring->read_frame;
+            if (first > contiguous) {
+                first = contiguous;
+            }
+            memcpy(
+                stereo_frames,
+                &ring->samples[ring->read_frame * TATER_SPK_CHANNELS],
+                first * TATER_SPK_CHANNELS * sizeof(int16_t)
+            );
+            if (read_frames > first) {
+                memcpy(
+                    &stereo_frames[first * TATER_SPK_CHANNELS],
+                    ring->samples,
+                    (read_frames - first) * TATER_SPK_CHANNELS * sizeof(int16_t)
+                );
+            }
+            ring->read_frame = (ring->read_frame + read_frames) % ring->capacity_frames;
+            ring->fill_frames -= read_frames;
+            ring->total_read_frames += read_frames;
+            if (read_frames < frame_count) {
+                ring->underrun_frames += frame_count - read_frames;
+            }
+            xSemaphoreGive(ring->can_write);
+            xSemaphoreGive(ring->lock);
+            return read_frames;
+        }
+        bool ended = ring->closed || ring->failed || ring->stop;
+        xSemaphoreGive(ring->lock);
+
+        if (ended || wait_ticks == 0 || (xTaskGetTickCount() - started) >= wait_ticks) {
+            xSemaphoreTake(ring->lock, portMAX_DELAY);
+            ring->underrun_frames += frame_count;
+            xSemaphoreGive(ring->lock);
+            return 0;
+        }
+        xSemaphoreTake(ring->can_read, pdMS_TO_TICKS(10));
+    }
+    return 0;
+}
+
+static bool scene_pcm_ring_wait_prebuffer(scene_pcm_ring_t *ring)
+{
+    if (!ring || !ring->lock) {
+        return false;
+    }
+
+    const size_t target_frames =
+        ((size_t)TATER_SPK_SAMPLE_RATE * PLAYBACK_SCENE_PREBUFFER_MS) / 1000;
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout = pdMS_TO_TICKS(PLAYBACK_SCENE_PREBUFFER_TIMEOUT_MS);
+    while (!s_abort) {
+        xSemaphoreTake(ring->lock, portMAX_DELAY);
+        size_t fill_frames = ring->fill_frames;
+        bool ended = ring->closed || ring->failed;
+        xSemaphoreGive(ring->lock);
+
+        if (fill_frames >= target_frames || (ended && fill_frames > 0)) {
+            return true;
+        }
+        if (ended || (xTaskGetTickCount() - started) >= timeout) {
+            return false;
+        }
+        xSemaphoreTake(ring->can_read, pdMS_TO_TICKS(50));
+    }
+    return false;
+}
+
+static void scene_pcm_ring_snapshot(
+    scene_pcm_ring_t *ring,
+    size_t *fill_frames,
+    bool *ended
+)
+{
+    if (fill_frames) {
+        *fill_frames = 0;
+    }
+    if (ended) {
+        *ended = true;
+    }
+    if (!ring || !ring->lock) {
+        return;
+    }
+
+    xSemaphoreTake(ring->lock, portMAX_DELAY);
+    if (fill_frames) {
+        *fill_frames = ring->fill_frames;
+    }
+    if (ended) {
+        *ended = ring->closed || ring->failed || ring->stop;
+    }
+    xSemaphoreGive(ring->lock);
+}
+
+static esp_err_t scene_background_sink_begin(void *ctx)
+{
+    scene_pcm_ring_t *ring = (scene_pcm_ring_t *)ctx;
+    return ring && !ring->stop ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+static esp_err_t scene_background_sink_end(void *ctx)
+{
+    (void)ctx;
+    return ESP_OK;
+}
+
+static void scene_background_task(void *arg)
+{
+    scene_background_args_t *request = (scene_background_args_t *)arg;
+    bool task_with_caps = request ? request->task_with_caps : false;
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+
+    if (request && request->ring && request->url && request->url[0]) {
+        playback_pcm_sink_t sink = {
+            .ctx = request->ring,
+            .begin = scene_background_sink_begin,
+            .write = scene_pcm_ring_write,
+            .end = scene_background_sink_end,
+            .volume_percent = request->volume_percent,
+        };
+        do {
+            err = stream_audio_url(request->url, &sink);
+            if (err != ESP_OK || !request->loop || request->ring->stop || s_abort) {
+                break;
+            }
+            ESP_LOGI(TAG, "audio scene background loop restarting");
+        } while (!s_abort && !request->ring->stop);
+    }
+
+    if (request && request->ring) {
+        scene_pcm_ring_finish(request->ring, err);
+    }
+    if (request) {
+        request->result = err;
+        request->done = true;
+        if (request->notify_task) {
+            xTaskNotifyGive(request->notify_task);
+        }
+    }
+    playback_delete_current_task(task_with_caps);
+}
+
+static esp_err_t scene_mixer_sink_begin(void *ctx)
+{
+    scene_mixer_sink_t *mixer = (scene_mixer_sink_t *)ctx;
+    if (!mixer) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = tater_audio_speaker_begin();
+    if (err != ESP_OK) {
+        return err;
+    }
+    mixer->speaker_started = true;
+    tater_playback_mix_init(&mixer->mix, mixer->background ? 0 : 100);
+    if (mixer->background) {
+        uint32_t attack_frames =
+            ((uint32_t)TATER_SPK_SAMPLE_RATE * mixer->ducking_attack_ms) / 1000;
+        tater_playback_mix_set_background(
+            &mixer->mix,
+            mixer->ducking_target_percent,
+            attack_frames
+        );
+    }
+    return ESP_OK;
+}
+
+static esp_err_t scene_mixer_sink_write(
+    void *ctx,
+    const int16_t *foreground_stereo,
+    size_t frame_count
+)
+{
+    scene_mixer_sink_t *mixer = (scene_mixer_sink_t *)ctx;
+    if (!mixer || !foreground_stereo || frame_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int16_t background[256 * TATER_SPK_CHANNELS];
+    int16_t mixed[256 * TATER_SPK_CHANNELS];
+    size_t offset = 0;
+    while (offset < frame_count) {
+        size_t frames = frame_count - offset;
+        if (frames > 256) {
+            frames = 256;
+        }
+        memset(background, 0, frames * TATER_SPK_CHANNELS * sizeof(int16_t));
+        if (mixer->background) {
+            (void)scene_pcm_ring_read(mixer->background, background, frames, 0);
+        }
+        tater_playback_mix_frames(
+            &mixer->mix,
+            &foreground_stereo[offset * TATER_SPK_CHANNELS],
+            mixer->background ? background : NULL,
+            mixed,
+            frames
+        );
+        esp_err_t err = tater_audio_write_speaker_frames(mixed, frames);
+        if (err != ESP_OK) {
+            return err;
+        }
+        offset += frames;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t scene_mixer_sink_end(void *ctx)
+{
+    scene_mixer_sink_t *mixer = (scene_mixer_sink_t *)ctx;
+    if (!mixer || !mixer->speaker_started) {
+        return ESP_OK;
+    }
+
+    uint16_t fade_ms = mixer->fade_out_ms > 0
+        ? mixer->fade_out_ms
+        : mixer->ducking_release_ms;
+    if (mixer->background && fade_ms > 0 && !s_abort) {
+        uint32_t fade_frames = ((uint32_t)TATER_SPK_SAMPLE_RATE * fade_ms) / 1000;
+        tater_playback_mix_set_background(&mixer->mix, 0, fade_frames);
+        int16_t foreground[256 * TATER_SPK_CHANNELS] = {0};
+        int16_t background[256 * TATER_SPK_CHANNELS];
+        int16_t mixed[256 * TATER_SPK_CHANNELS];
+        uint32_t remaining = fade_frames;
+        while (!s_abort && remaining > 0) {
+            size_t frames = remaining > 256 ? 256 : remaining;
+            memset(background, 0, frames * TATER_SPK_CHANNELS * sizeof(int16_t));
+            size_t got = scene_pcm_ring_read(
+                mixer->background,
+                background,
+                frames,
+                pdMS_TO_TICKS(30)
+            );
+            if (got == 0) {
+                break;
+            }
+            tater_playback_mix_frames(
+                &mixer->mix,
+                foreground,
+                background,
+                mixed,
+                got
+            );
+            esp_err_t err = tater_audio_write_speaker_frames(mixed, got);
+            if (err != ESP_OK) {
+                break;
+            }
+            remaining -= got;
+        }
+    }
+
+    mixer->speaker_started = false;
+    return tater_audio_speaker_end();
 }
 
 static int16_t wav_sample_s16(const wav_info_t *wav, size_t frame, uint16_t channel)
@@ -1806,8 +2392,8 @@ static esp_err_t play_wav(const wav_info_t *wav)
             }
             int16_t left = wav_sample_s16(wav, src_frame, 0);
             int16_t right = wav->channels > 1 ? wav_sample_s16(wav, src_frame, 1) : left;
-            out[frames * 2] = scale_output_sample(left);
-            out[(frames * 2) + 1] = scale_output_sample(right);
+            out[frames * 2] = scale_output_sample(left, NULL);
+            out[(frames * 2) + 1] = scale_output_sample(right, NULL);
             frames++;
             pos_q32 += step_q32;
         }
@@ -1928,7 +2514,7 @@ static void playback_task(void *arg)
     ESP_LOGI(TAG, "playback url=%s", url);
     tater_protocol_send_log("info", "playback started");
 
-    esp_err_t err = stream_audio_url(url);
+    esp_err_t err = stream_audio_url(url, NULL);
     bool aborted = s_abort;
     playback_mark_finished();
     if (notify_finished) {
@@ -1946,6 +2532,767 @@ static void playback_task(void *arg)
     }
     free(url);
     free(request);
+    playback_delete_current_task(task_with_caps);
+}
+
+static void scene_task(void *arg)
+{
+    scene_args_t *request = (scene_args_t *)arg;
+    bool task_with_caps = request ? request->task_with_caps : false;
+    scene_pcm_ring_t background_ring = {0};
+    scene_background_args_t *background_request = NULL;
+    TaskHandle_t background_task = NULL;
+    bool background_ready = false;
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+
+    s_playing = true;
+    ESP_LOGI(
+        TAG,
+        "audio scene started id=%s foreground=%s background=%s loop=%d duck=%u%% attack=%ums release=%ums fade=%ums",
+        request ? request->scene_id : "",
+        request && request->foreground_url ? request->foreground_url : "",
+        request && request->background_url ? request->background_url : "-",
+        request ? request->background_loop : false,
+        request ? request->ducking_target_percent : 0,
+        request ? request->ducking_attack_ms : 0,
+        request ? request->ducking_release_ms : 0,
+        request ? request->background_fade_out_ms : 0
+    );
+    tater_protocol_send_log("info", "audio scene started");
+
+    if (!request || !request->foreground_url || !request->foreground_url[0]) {
+        goto done;
+    }
+
+    if (request->background_url && request->background_url[0]) {
+        esp_err_t ring_err = scene_pcm_ring_init(
+            &background_ring,
+            PLAYBACK_SCENE_BACKGROUND_RING_FRAMES
+        );
+        if (ring_err == ESP_OK) {
+            background_request = calloc(1, sizeof(*background_request));
+            if (background_request) {
+                background_request->ring = &background_ring;
+                background_request->url = request->background_url;
+                background_request->loop = request->background_loop;
+                background_request->volume_percent = request->background_volume_percent;
+                background_request->notify_task = xTaskGetCurrentTaskHandle();
+                BaseType_t created = playback_create_task(
+                    scene_background_task,
+                    "scene_background",
+                    PLAYBACK_SCENE_BACKGROUND_TASK_STACK,
+                    background_request,
+                    4,
+                    &background_task,
+                    0,
+                    &background_request->task_with_caps
+                );
+                if (created != pdPASS) {
+                    ESP_LOGW(TAG, "audio scene background task create failed");
+                    free(background_request);
+                    background_request = NULL;
+                } else {
+                    background_ready = scene_pcm_ring_wait_prebuffer(&background_ring);
+                    if (!background_ready) {
+                        ESP_LOGW(TAG, "audio scene background unavailable; playing foreground only");
+                    }
+                }
+            }
+        } else {
+            ESP_LOGW(
+                TAG,
+                "audio scene background buffer unavailable err=%s; playing foreground only",
+                esp_err_to_name(ring_err)
+            );
+        }
+    }
+
+    if (s_abort) {
+        err = ESP_FAIL;
+        goto done;
+    }
+
+    scene_mixer_sink_t mixer = {
+        .background = background_ready ? &background_ring : NULL,
+        .ducking_target_percent = request->ducking_target_percent,
+        .ducking_attack_ms = request->ducking_attack_ms,
+        .ducking_release_ms = request->ducking_release_ms,
+        .fade_out_ms = request->background_fade_out_ms,
+    };
+    playback_pcm_sink_t foreground_sink = {
+        .ctx = &mixer,
+        .begin = scene_mixer_sink_begin,
+        .write = scene_mixer_sink_write,
+        .end = scene_mixer_sink_end,
+        .volume_percent = request->foreground_volume_percent,
+    };
+    err = stream_audio_url(request->foreground_url, &foreground_sink);
+
+done:
+    if (background_ring.lock) {
+        scene_pcm_ring_stop(&background_ring);
+    }
+    if (background_task) {
+        uint32_t waited_ms = 0;
+        while (background_request && !background_request->done) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+            waited_ms += 100;
+            if (waited_ms == 3000 || (waited_ms > 3000 && (waited_ms % 5000) == 0)) {
+                ESP_LOGW(TAG, "audio scene background still stopping after %u ms", (unsigned)waited_ms);
+            }
+        }
+    }
+    if (background_ring.lock) {
+        ESP_LOGI(
+            TAG,
+            "audio scene background frames read=%u wrote=%u high_water=%u underrun=%u result=%s",
+            (unsigned)background_ring.total_read_frames,
+            (unsigned)background_ring.total_written_frames,
+            (unsigned)background_ring.high_water_frames,
+            (unsigned)background_ring.underrun_frames,
+            background_request
+                ? esp_err_to_name(background_request->result)
+                : esp_err_to_name(ESP_ERR_NOT_FOUND)
+        );
+        scene_pcm_ring_destroy(&background_ring);
+    }
+    free(background_request);
+
+    bool aborted = s_abort;
+    char scene_id[TATER_PLAYBACK_SCENE_ID_MAX] = {0};
+    if (request) {
+        snprintf(scene_id, sizeof(scene_id), "%s", request->scene_id);
+    }
+    playback_mark_finished();
+    if (!aborted && err == ESP_OK) {
+        tater_protocol_send_audio_scene_finished(scene_id, true);
+        tater_protocol_send_log("info", "audio scene finished");
+    } else {
+        tater_protocol_send_audio_scene_finished(scene_id, false);
+        tater_protocol_send_log("warn", "audio scene stopped or failed");
+    }
+
+    if (request) {
+        free(request->foreground_url);
+        free(request->background_url);
+    }
+    free(request);
+    playback_delete_current_task(task_with_caps);
+}
+
+static void media_session_wait_decoder(
+    scene_background_args_t *request,
+    scene_pcm_ring_t *ring,
+    TaskHandle_t task
+)
+{
+    if (ring && ring->lock) {
+        scene_pcm_ring_stop(ring);
+    }
+    if (!task || !request) {
+        return;
+    }
+
+    uint32_t waited_ms = 0;
+    while (!request->done) {
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+        waited_ms += 100;
+        if (waited_ms == 3000 || (waited_ms > 3000 && (waited_ms % 5000) == 0)) {
+            ESP_LOGW(TAG, "media decoder still stopping after %u ms", (unsigned)waited_ms);
+        }
+    }
+}
+
+static void media_session_free_decoder(scene_background_args_t **request_ptr)
+{
+    if (!request_ptr || !*request_ptr) {
+        return;
+    }
+    scene_background_args_t *request = *request_ptr;
+    free(request->url);
+    free(request);
+    *request_ptr = NULL;
+}
+
+static void media_session_reset_overlay(media_session_state_t *session)
+{
+    if (!session) {
+        return;
+    }
+
+    scene_background_args_t *decoder = NULL;
+    TaskHandle_t decoder_task = NULL;
+    bool ring_initialized = false;
+    char overlay_id[TATER_PLAYBACK_OVERLAY_ID_MAX] = {0};
+
+    xSemaphoreTake(session->lock, portMAX_DELAY);
+    decoder = session->overlay_decoder;
+    decoder_task = session->overlay_decoder_task;
+    ring_initialized = session->overlay_ring_initialized;
+    snprintf(overlay_id, sizeof(overlay_id), "%s", session->overlay_id);
+    session->overlay_pending = false;
+    session->overlay_active = false;
+    session->overlay_releasing = false;
+    session->overlay_started_reported = false;
+    session->overlay_start_at_us = 0;
+    xSemaphoreGive(session->lock);
+
+    media_session_wait_decoder(
+        decoder,
+        ring_initialized ? &session->overlay_ring : NULL,
+        decoder_task
+    );
+    media_session_free_decoder(&decoder);
+    if (ring_initialized) {
+        scene_pcm_ring_destroy(&session->overlay_ring);
+    }
+
+    xSemaphoreTake(session->lock, portMAX_DELAY);
+    session->overlay_decoder = NULL;
+    session->overlay_decoder_task = NULL;
+    session->overlay_ring_initialized = false;
+    free(session->overlay_url);
+    session->overlay_url = NULL;
+    session->overlay_id[0] = '\0';
+    xSemaphoreGive(session->lock);
+}
+
+static void media_session_finish_overlay(
+    media_session_state_t *session,
+    bool ok
+)
+{
+    if (!session) {
+        return;
+    }
+    char overlay_id[TATER_PLAYBACK_OVERLAY_ID_MAX] = {0};
+    xSemaphoreTake(session->lock, portMAX_DELAY);
+    snprintf(overlay_id, sizeof(overlay_id), "%s", session->overlay_id);
+    xSemaphoreGive(session->lock);
+
+    media_session_reset_overlay(session);
+    tater_protocol_send_audio_overlay_finished(overlay_id, ok);
+}
+
+static bool media_session_overlay_flags(
+    media_session_state_t *session,
+    bool *pending,
+    bool *active,
+    bool *releasing
+)
+{
+    if (!session || !session->lock) {
+        return false;
+    }
+    xSemaphoreTake(session->lock, portMAX_DELAY);
+    bool has_overlay =
+        session->overlay_pending || session->overlay_active || session->overlay_releasing;
+    if (pending) {
+        *pending = session->overlay_pending;
+    }
+    if (active) {
+        *active = session->overlay_active;
+    }
+    if (releasing) {
+        *releasing = session->overlay_releasing;
+    }
+    xSemaphoreGive(session->lock);
+    return has_overlay;
+}
+
+static const char *media_session_channel_name(tater_playback_channel_t channel)
+{
+    switch (channel) {
+        case TATER_PLAYBACK_CHANNEL_LEFT:
+            return "left";
+        case TATER_PLAYBACK_CHANNEL_RIGHT:
+            return "right";
+        case TATER_PLAYBACK_CHANNEL_MONO:
+            return "mono";
+        case TATER_PLAYBACK_CHANNEL_STEREO:
+        default:
+            return "stereo";
+    }
+}
+
+static bool media_session_wait_for_commit(
+    media_session_state_t *session,
+    int64_t *start_at_us
+)
+{
+    if (!session || !session->lock || !start_at_us) {
+        return false;
+    }
+
+    int64_t deadline_us =
+        esp_timer_get_time() + ((int64_t)PLAYBACK_MEDIA_PREPARE_TIMEOUT_MS * 1000LL);
+    while (!s_abort && esp_timer_get_time() < deadline_us) {
+        xSemaphoreTake(session->lock, portMAX_DELAY);
+        bool committed = session->committed;
+        int64_t scheduled_start_us = session->scheduled_start_us;
+        xSemaphoreGive(session->lock);
+        if (committed) {
+            *start_at_us = scheduled_start_us;
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return false;
+}
+
+static bool media_session_wait_until(int64_t start_at_us)
+{
+    while (!s_abort) {
+        int64_t remaining_us = start_at_us - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            return true;
+        }
+        if (remaining_us > 20000) {
+            vTaskDelay(pdMS_TO_TICKS((remaining_us - 10000) / 1000));
+        } else if (remaining_us > 2000) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        } else {
+            taskYIELD();
+        }
+    }
+    return false;
+}
+
+static int32_t media_session_take_correction(media_session_state_t *session)
+{
+    if (!session || !session->lock) {
+        return 0;
+    }
+    xSemaphoreTake(session->lock, portMAX_DELAY);
+    int32_t correction = session->pending_correction_frames;
+    if (correction > (int32_t)PLAYBACK_MIX_CHUNK_FRAMES) {
+        correction = PLAYBACK_MIX_CHUNK_FRAMES;
+    } else if (correction < -(int32_t)PLAYBACK_MIX_CHUNK_FRAMES) {
+        correction = -(int32_t)PLAYBACK_MIX_CHUNK_FRAMES;
+    }
+    session->pending_correction_frames -= correction;
+    xSemaphoreGive(session->lock);
+    return correction;
+}
+
+static void media_session_task(void *arg)
+{
+    media_session_state_t *session = (media_session_state_t *)arg;
+    bool task_with_caps = session ? session->task_with_caps : false;
+    esp_err_t err = ESP_ERR_INVALID_ARG;
+    bool speaker_started = false;
+    bool ready_reported = false;
+    bool started_reported = false;
+    bool media_finished = false;
+    bool have_last_media_frame = false;
+    int16_t last_media_frame[TATER_SPK_CHANNELS] = {0};
+    uint64_t source_frames_written = 0;
+    uint64_t output_frames_written = 0;
+    int32_t correction_since_report = 0;
+    int64_t scheduled_start_us = 0;
+    int64_t last_playhead_us = 0;
+    tater_playback_mix_state_t mix;
+    char session_id[TATER_PLAYBACK_MEDIA_SESSION_ID_MAX] = {0};
+    char group_id[TATER_PLAYBACK_MEDIA_GROUP_ID_MAX] = {0};
+    char prepare_reply_to[TATER_PLAYBACK_REQUEST_ID_MAX] = {0};
+    tater_playback_channel_t media_channel = TATER_PLAYBACK_CHANNEL_STEREO;
+    bool prepare_requested = false;
+
+    if (!session || !session->lock || !session->media_url || !session->media_url[0]) {
+        goto done;
+    }
+    xSemaphoreTake(session->lock, portMAX_DELAY);
+    snprintf(session_id, sizeof(session_id), "%s", session->session_id);
+    snprintf(group_id, sizeof(group_id), "%s", session->group_id);
+    snprintf(prepare_reply_to, sizeof(prepare_reply_to), "%s", session->prepare_reply_to);
+    media_channel = session->media_channel;
+    prepare_requested = session->prepare_requested;
+    xSemaphoreGive(session->lock);
+    s_playing = true;
+    playback_log_heap("media session start");
+
+    err = scene_pcm_ring_init(&session->media_ring, PLAYBACK_MEDIA_RING_FRAMES);
+    if (err != ESP_OK) {
+        goto done;
+    }
+    session->media_ring_initialized = true;
+
+    session->media_decoder = calloc(1, sizeof(*session->media_decoder));
+    if (!session->media_decoder) {
+        err = ESP_ERR_NO_MEM;
+        goto done;
+    }
+    session->media_decoder->ring = &session->media_ring;
+    session->media_decoder->url = strdup(session->media_url);
+    session->media_decoder->loop = session->media_loop;
+    session->media_decoder->volume_percent = session->media_volume_percent;
+    session->media_decoder->notify_task = xTaskGetCurrentTaskHandle();
+    if (!session->media_decoder->url) {
+        err = ESP_ERR_NO_MEM;
+        goto done;
+    }
+
+    BaseType_t decoder_created = playback_create_task(
+        scene_background_task,
+        "media_decoder",
+        PLAYBACK_SCENE_BACKGROUND_TASK_STACK,
+        session->media_decoder,
+        4,
+        &session->media_decoder_task,
+        0,
+        &session->media_decoder->task_with_caps
+    );
+    if (decoder_created != pdPASS) {
+        err = ESP_ERR_NO_MEM;
+        goto done;
+    }
+
+    if (!scene_pcm_ring_wait_prebuffer(&session->media_ring)) {
+        err = session->media_decoder->done
+            ? session->media_decoder->result
+            : ESP_ERR_TIMEOUT;
+        goto done;
+    }
+
+    err = tater_audio_speaker_begin();
+    if (err != ESP_OK) {
+        goto done;
+    }
+    speaker_started = true;
+
+    size_t ready_buffered_frames = 0;
+    bool ready_ended = false;
+    scene_pcm_ring_snapshot(&session->media_ring, &ready_buffered_frames, &ready_ended);
+    (void)ready_ended;
+    if (prepare_requested) {
+        xSemaphoreTake(session->lock, portMAX_DELAY);
+        session->prepared = true;
+        xSemaphoreGive(session->lock);
+        tater_protocol_send_media_session_ready(
+            session_id,
+            group_id,
+            prepare_reply_to,
+            true,
+            (uint32_t)ready_buffered_frames
+        );
+        ready_reported = true;
+        if (!media_session_wait_for_commit(session, &scheduled_start_us)) {
+            err = ESP_ERR_TIMEOUT;
+            goto done;
+        }
+    } else {
+        scheduled_start_us = esp_timer_get_time();
+    }
+
+    if (scheduled_start_us <= 0) {
+        scheduled_start_us = esp_timer_get_time();
+    }
+    if (!media_session_wait_until(scheduled_start_us)) {
+        err = ESP_ERR_INVALID_STATE;
+        goto done;
+    }
+
+    int64_t actual_start_us = esp_timer_get_time();
+    tater_playback_mix_init(&mix, 100);
+    tater_protocol_send_media_session_started(
+        session_id,
+        group_id,
+        media_session_channel_name(media_channel),
+        scheduled_start_us,
+        actual_start_us
+    );
+    started_reported = true;
+    last_playhead_us = actual_start_us;
+    ESP_LOGI(
+        TAG,
+        "media session started id=%s group=%s channel=%s scheduled=%" PRId64 " actual=%" PRId64,
+        session_id[0] ? session_id : "-",
+        group_id[0] ? group_id : "-",
+        media_session_channel_name(media_channel),
+        scheduled_start_us,
+        actual_start_us
+    );
+
+    int16_t media_frames[PLAYBACK_MIX_CHUNK_FRAMES * TATER_SPK_CHANNELS];
+    int16_t foreground_frames[PLAYBACK_MIX_CHUNK_FRAMES * TATER_SPK_CHANNELS];
+    int16_t mixed_frames[PLAYBACK_MIX_CHUNK_FRAMES * TATER_SPK_CHANNELS];
+    int16_t correction_frames[PLAYBACK_MIX_CHUNK_FRAMES * TATER_SPK_CHANNELS];
+
+    while (!s_abort) {
+        size_t media_fill = 0;
+        bool media_ended = false;
+        scene_pcm_ring_snapshot(&session->media_ring, &media_fill, &media_ended);
+        media_finished = media_ended && media_fill == 0;
+
+        bool overlay_pending = false;
+        bool overlay_active = false;
+        bool overlay_releasing = false;
+        bool has_overlay = media_session_overlay_flags(
+            session,
+            &overlay_pending,
+            &overlay_active,
+            &overlay_releasing
+        );
+
+        if (overlay_pending) {
+            size_t overlay_fill = 0;
+            bool overlay_ended = false;
+            scene_pcm_ring_snapshot(&session->overlay_ring, &overlay_fill, &overlay_ended);
+            size_t prebuffer_frames =
+                ((size_t)TATER_SPK_SAMPLE_RATE * PLAYBACK_SCENE_PREBUFFER_MS) / 1000;
+            xSemaphoreTake(session->lock, portMAX_DELAY);
+            int64_t overlay_start_at_us = session->overlay_start_at_us;
+            xSemaphoreGive(session->lock);
+            bool overlay_start_due =
+                overlay_start_at_us <= 0 || esp_timer_get_time() >= overlay_start_at_us;
+            if (
+                overlay_start_due
+                && (overlay_fill >= prebuffer_frames || (overlay_ended && overlay_fill > 0))
+            ) {
+                xSemaphoreTake(session->lock, portMAX_DELAY);
+                session->overlay_pending = false;
+                session->overlay_active = true;
+                overlay_pending = false;
+                overlay_active = true;
+                uint32_t attack_frames =
+                    ((uint32_t)TATER_SPK_SAMPLE_RATE * session->ducking_attack_ms) / 1000;
+                tater_playback_mix_set_background(
+                    &mix,
+                    session->ducking_target_percent,
+                    attack_frames
+                );
+                if (!session->overlay_started_reported) {
+                    tater_protocol_send_audio_overlay_started(session->overlay_id);
+                    session->overlay_started_reported = true;
+                }
+                xSemaphoreGive(session->lock);
+            } else if (overlay_ended && overlay_fill == 0) {
+                media_session_finish_overlay(session, false);
+                has_overlay = false;
+                overlay_pending = false;
+            }
+        }
+
+        if (!has_overlay && have_last_media_frame) {
+            int32_t correction = media_session_take_correction(session);
+            if (correction > 0) {
+                size_t discard_target = (size_t)correction;
+                size_t discarded = scene_pcm_ring_read(
+                    &session->media_ring,
+                    correction_frames,
+                    discard_target,
+                    0
+                );
+                source_frames_written += discarded;
+                correction_since_report += (int32_t)discarded;
+                if (discarded < discard_target) {
+                    xSemaphoreTake(session->lock, portMAX_DELAY);
+                    session->pending_correction_frames +=
+                        (int32_t)(discard_target - discarded);
+                    xSemaphoreGive(session->lock);
+                }
+            } else if (correction < 0) {
+                size_t repeat_frames = (size_t)(-correction);
+                for (size_t frame = 0; frame < repeat_frames; frame++) {
+                    correction_frames[frame * TATER_SPK_CHANNELS] = last_media_frame[0];
+                    correction_frames[(frame * TATER_SPK_CHANNELS) + 1] =
+                        last_media_frame[TATER_SPK_CHANNELS > 1 ? 1 : 0];
+                }
+                err = tater_audio_write_speaker_frames(correction_frames, repeat_frames);
+                if (err != ESP_OK) {
+                    break;
+                }
+                output_frames_written += repeat_frames;
+                correction_since_report -= (int32_t)repeat_frames;
+            }
+        }
+
+        memset(media_frames, 0, sizeof(media_frames));
+        memset(foreground_frames, 0, sizeof(foreground_frames));
+        size_t got_media = scene_pcm_ring_read(
+            &session->media_ring,
+            media_frames,
+            PLAYBACK_MIX_CHUNK_FRAMES,
+            media_finished ? 0 : pdMS_TO_TICKS(30)
+        );
+        source_frames_written += got_media;
+        if (got_media > 0) {
+            tater_playback_route_channel(media_channel, media_frames, got_media);
+            last_media_frame[0] =
+                media_frames[(got_media - 1) * TATER_SPK_CHANNELS];
+            last_media_frame[TATER_SPK_CHANNELS > 1 ? 1 : 0] =
+                media_frames[((got_media - 1) * TATER_SPK_CHANNELS)
+                    + (TATER_SPK_CHANNELS > 1 ? 1 : 0)];
+            have_last_media_frame = true;
+        }
+        size_t got_foreground = 0;
+        bool release_after_write = false;
+
+        if (overlay_active) {
+            got_foreground = scene_pcm_ring_read(
+                &session->overlay_ring,
+                foreground_frames,
+                PLAYBACK_MIX_CHUNK_FRAMES,
+                pdMS_TO_TICKS(30)
+            );
+            size_t overlay_fill = 0;
+            bool overlay_ended = false;
+            scene_pcm_ring_snapshot(&session->overlay_ring, &overlay_fill, &overlay_ended);
+            release_after_write = overlay_ended && overlay_fill == 0;
+        }
+
+        size_t output_frames = got_media > got_foreground ? got_media : got_foreground;
+        if (output_frames > 0) {
+            tater_playback_mix_frames(
+                &mix,
+                overlay_active ? foreground_frames : NULL,
+                media_frames,
+                mixed_frames,
+                output_frames
+            );
+            err = tater_audio_write_speaker_frames(mixed_frames, output_frames);
+            if (err != ESP_OK) {
+                break;
+            }
+            output_frames_written += output_frames;
+        }
+
+        int64_t now_us = esp_timer_get_time();
+        if (
+            group_id[0]
+            && now_us - last_playhead_us
+                >= ((int64_t)PLAYBACK_MEDIA_PLAYHEAD_INTERVAL_MS * 1000LL)
+        ) {
+            size_t buffered_frames = 0;
+            bool media_ring_ended = false;
+            scene_pcm_ring_snapshot(
+                &session->media_ring,
+                &buffered_frames,
+                &media_ring_ended
+            );
+            (void)media_ring_ended;
+            xSemaphoreTake(session->lock, portMAX_DELAY);
+            session->source_frames = source_frames_written;
+            session->output_frames = output_frames_written;
+            xSemaphoreGive(session->lock);
+            tater_protocol_send_media_session_playhead(
+                session_id,
+                group_id,
+                media_session_channel_name(media_channel),
+                source_frames_written,
+                output_frames_written,
+                (uint32_t)buffered_frames,
+                now_us,
+                scheduled_start_us,
+                correction_since_report
+            );
+            correction_since_report = 0;
+            last_playhead_us = now_us;
+        }
+
+        if (release_after_write) {
+            xSemaphoreTake(session->lock, portMAX_DELAY);
+            session->overlay_active = false;
+            session->overlay_releasing = true;
+            overlay_active = false;
+            overlay_releasing = true;
+            uint32_t release_frames =
+                ((uint32_t)TATER_SPK_SAMPLE_RATE * session->ducking_release_ms) / 1000;
+            tater_playback_mix_set_background(&mix, 100, release_frames);
+            xSemaphoreGive(session->lock);
+        }
+
+        if (
+            overlay_releasing
+            && (mix.ramp_frames_remaining == 0 || (media_finished && got_media == 0))
+        ) {
+            media_session_finish_overlay(session, true);
+            has_overlay = false;
+            overlay_releasing = false;
+        }
+
+        if (media_finished && !has_overlay) {
+            err = session->media_decoder && session->media_decoder->result != ESP_OK
+                ? session->media_decoder->result
+                : ESP_OK;
+            break;
+        }
+        if (output_frames == 0) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    }
+
+done:
+    if (prepare_requested && !ready_reported) {
+        tater_protocol_send_media_session_ready(
+            session_id,
+            group_id,
+            prepare_reply_to,
+            false,
+            0
+        );
+    }
+    if (session && session->lock) {
+        xSemaphoreTake(session->lock, portMAX_DELAY);
+        session->accepting_overlays = false;
+        bool overlay_in_progress =
+            session->overlay_pending || session->overlay_active || session->overlay_releasing;
+        xSemaphoreGive(session->lock);
+        if (overlay_in_progress) {
+            media_session_finish_overlay(session, false);
+        }
+    }
+
+    if (session && session->media_ring_initialized) {
+        media_session_wait_decoder(
+            session->media_decoder,
+            &session->media_ring,
+            session->media_decoder_task
+        );
+    }
+    if (session) {
+        media_session_free_decoder(&session->media_decoder);
+        session->media_decoder_task = NULL;
+        if (session->media_ring_initialized) {
+            scene_pcm_ring_destroy(&session->media_ring);
+            session->media_ring_initialized = false;
+        }
+    }
+    if (speaker_started) {
+        esp_err_t end_err = tater_audio_speaker_end();
+        if (err == ESP_OK && end_err != ESP_OK) {
+            err = end_err;
+        }
+    }
+
+    bool aborted = s_abort;
+    if (session && session->lock) {
+        xSemaphoreTake(session->lock, portMAX_DELAY);
+        free(session->media_url);
+        session->media_url = NULL;
+        session->active = false;
+        session->accepting_overlays = false;
+        session->session_id[0] = '\0';
+        session->group_id[0] = '\0';
+        session->prepare_reply_to[0] = '\0';
+        session->prepared = false;
+        session->committed = false;
+        session->scheduled_start_us = 0;
+        session->pending_correction_frames = 0;
+        session->source_frames = 0;
+        session->output_frames = 0;
+        xSemaphoreGive(session->lock);
+    }
+    playback_mark_finished();
+
+    bool ok = !aborted && started_reported && err == ESP_OK;
+    tater_protocol_send_media_session_finished(session_id, ok);
+    ESP_LOGI(
+        TAG,
+        "media session finished id=%s ok=%d",
+        session_id[0] ? session_id : "-",
+        ok
+    );
     playback_delete_current_task(task_with_caps);
 }
 
@@ -2026,6 +3373,10 @@ esp_err_t tater_playback_init(void)
         s_lifecycle_lock = xSemaphoreCreateMutex();
         ESP_RETURN_ON_FALSE(s_lifecycle_lock, ESP_ERR_NO_MEM, TAG, "playback lifecycle mutex failed");
     }
+    if (!s_media_session.lock) {
+        s_media_session.lock = xSemaphoreCreateMutex();
+        ESP_RETURN_ON_FALSE(s_media_session.lock, ESP_ERR_NO_MEM, TAG, "media session mutex failed");
+    }
     esp_err_t codec_err = audio_codec_register_once();
     if (codec_err != ESP_OK) {
         ESP_LOGW(TAG, "mp3/flac decoder registration deferred err=%s", esp_err_to_name(codec_err));
@@ -2083,6 +3434,320 @@ esp_err_t tater_playback_play_url(const char *url)
 esp_err_t tater_playback_play_url_local(const char *url)
 {
     return play_url(url, false);
+}
+
+esp_err_t tater_playback_play_scene(const tater_playback_scene_t *scene)
+{
+    if (!scene || !scene->foreground_url || !scene->foreground_url[0]) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!playback_begin_start()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    playback_log_heap("audio scene start");
+
+    scene_args_t *request = calloc(1, sizeof(*request));
+    if (!request) {
+        return playback_start_failed(ESP_ERR_NO_MEM);
+    }
+    request->foreground_url = strdup(scene->foreground_url);
+    if (!request->foreground_url) {
+        free(request);
+        return playback_start_failed(ESP_ERR_NO_MEM);
+    }
+    if (scene->background_url && scene->background_url[0]) {
+        request->background_url = strdup(scene->background_url);
+        if (!request->background_url) {
+            free(request->foreground_url);
+            free(request);
+            return playback_start_failed(ESP_ERR_NO_MEM);
+        }
+    }
+
+    snprintf(
+        request->scene_id,
+        sizeof(request->scene_id),
+        "%s",
+        scene->scene_id ? scene->scene_id : ""
+    );
+    request->foreground_volume_percent = scene->foreground_volume_percent > 100
+        ? 100
+        : scene->foreground_volume_percent;
+    request->background_volume_percent = scene->background_volume_percent > 100
+        ? 100
+        : scene->background_volume_percent;
+    request->ducking_target_percent = scene->ducking_target_percent > 100
+        ? 100
+        : scene->ducking_target_percent;
+    request->ducking_attack_ms = scene->ducking_attack_ms;
+    request->ducking_release_ms = scene->ducking_release_ms;
+    request->background_fade_out_ms = scene->background_fade_out_ms;
+    request->background_loop = scene->background_loop;
+
+    BaseType_t ok = playback_create_task(
+        scene_task,
+        "tater_scene",
+        PLAYBACK_URL_TASK_STACK,
+        request,
+        5,
+        &s_task,
+        1,
+        &request->task_with_caps
+    );
+    if (ok != pdPASS) {
+        free(request->foreground_url);
+        free(request->background_url);
+        free(request);
+        return playback_start_failed(ESP_ERR_NO_MEM);
+    }
+    playback_end_start();
+    return ESP_OK;
+}
+
+esp_err_t tater_playback_start_media_session(const tater_playback_media_session_t *media)
+{
+    if (!media || !media->url || !media->url[0] || !s_media_session.lock) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!playback_begin_start()) {
+        return ESP_ERR_TIMEOUT;
+    }
+    playback_log_heap("media session request");
+
+    xSemaphoreTake(s_media_session.lock, portMAX_DELAY);
+    free(s_media_session.media_url);
+    s_media_session.media_url = strdup(media->url);
+    if (!s_media_session.media_url) {
+        xSemaphoreGive(s_media_session.lock);
+        return playback_start_failed(ESP_ERR_NO_MEM);
+    }
+    snprintf(
+        s_media_session.session_id,
+        sizeof(s_media_session.session_id),
+        "%s",
+        media->session_id ? media->session_id : ""
+    );
+    snprintf(
+        s_media_session.group_id,
+        sizeof(s_media_session.group_id),
+        "%s",
+        media->group_id ? media->group_id : ""
+    );
+    snprintf(
+        s_media_session.prepare_reply_to,
+        sizeof(s_media_session.prepare_reply_to),
+        "%s",
+        media->prepare_reply_to ? media->prepare_reply_to : ""
+    );
+    s_media_session.media_volume_percent =
+        media->volume_percent > 100 ? 100 : media->volume_percent;
+    s_media_session.media_channel =
+        media->channel <= TATER_PLAYBACK_CHANNEL_MONO
+        ? media->channel
+        : TATER_PLAYBACK_CHANNEL_STEREO;
+    s_media_session.media_loop = media->loop;
+    s_media_session.prepare_requested = media->prepare;
+    s_media_session.prepared = false;
+    s_media_session.committed = !media->prepare;
+    s_media_session.scheduled_start_us = 0;
+    s_media_session.pending_correction_frames = 0;
+    s_media_session.source_frames = 0;
+    s_media_session.output_frames = 0;
+    s_media_session.media_ring_initialized = false;
+    s_media_session.media_decoder = NULL;
+    s_media_session.media_decoder_task = NULL;
+    s_media_session.overlay_ring_initialized = false;
+    s_media_session.overlay_decoder = NULL;
+    s_media_session.overlay_decoder_task = NULL;
+    s_media_session.overlay_pending = false;
+    s_media_session.overlay_active = false;
+    s_media_session.overlay_releasing = false;
+    s_media_session.overlay_started_reported = false;
+    s_media_session.overlay_start_at_us = 0;
+    s_media_session.active = true;
+    s_media_session.accepting_overlays = true;
+    xSemaphoreGive(s_media_session.lock);
+
+    BaseType_t ok = playback_create_task(
+        media_session_task,
+        "tater_media",
+        PLAYBACK_URL_TASK_STACK,
+        &s_media_session,
+        5,
+        &s_task,
+        1,
+        &s_media_session.task_with_caps
+    );
+    if (ok != pdPASS) {
+        xSemaphoreTake(s_media_session.lock, portMAX_DELAY);
+        free(s_media_session.media_url);
+        s_media_session.media_url = NULL;
+        s_media_session.active = false;
+        s_media_session.accepting_overlays = false;
+        xSemaphoreGive(s_media_session.lock);
+        return playback_start_failed(ESP_ERR_NO_MEM);
+    }
+    playback_end_start();
+    return ESP_OK;
+}
+
+esp_err_t tater_playback_commit_media_session(const char *session_id, int64_t start_at_us)
+{
+    if (!session_id || !session_id[0] || !s_media_session.lock || start_at_us <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(s_media_session.lock, portMAX_DELAY);
+    if (
+        !s_media_session.active
+        || !s_media_session.prepare_requested
+        || strcmp(s_media_session.session_id, session_id) != 0
+    ) {
+        xSemaphoreGive(s_media_session.lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_media_session.scheduled_start_us = start_at_us;
+    s_media_session.committed = true;
+    xSemaphoreGive(s_media_session.lock);
+    return ESP_OK;
+}
+
+esp_err_t tater_playback_adjust_media_session(const char *session_id, int32_t correction_frames)
+{
+    if (!session_id || !session_id[0] || !s_media_session.lock) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (correction_frames > PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES) {
+        correction_frames = PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES;
+    } else if (correction_frames < -PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES) {
+        correction_frames = -PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES;
+    }
+
+    xSemaphoreTake(s_media_session.lock, portMAX_DELAY);
+    if (
+        !s_media_session.active
+        || strcmp(s_media_session.session_id, session_id) != 0
+    ) {
+        xSemaphoreGive(s_media_session.lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    int32_t pending = s_media_session.pending_correction_frames + correction_frames;
+    if (pending > PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES) {
+        pending = PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES;
+    } else if (pending < -PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES) {
+        pending = -PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES;
+    }
+    s_media_session.pending_correction_frames = pending;
+    xSemaphoreGive(s_media_session.lock);
+    return ESP_OK;
+}
+
+esp_err_t tater_playback_play_overlay(const tater_playback_overlay_t *overlay)
+{
+    if (!overlay || !overlay->foreground_url || !overlay->foreground_url[0] || !s_media_session.lock) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(s_media_session.lock, portMAX_DELAY);
+    if (
+        !s_media_session.active
+        || !s_media_session.accepting_overlays
+        || s_abort
+        || s_media_session.overlay_pending
+        || s_media_session.overlay_active
+        || s_media_session.overlay_releasing
+        || s_media_session.overlay_ring_initialized
+    ) {
+        xSemaphoreGive(s_media_session.lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t ring_err = scene_pcm_ring_init(
+        &s_media_session.overlay_ring,
+        PLAYBACK_OVERLAY_RING_FRAMES
+    );
+    if (ring_err != ESP_OK) {
+        xSemaphoreGive(s_media_session.lock);
+        return ring_err;
+    }
+    s_media_session.overlay_ring_initialized = true;
+    s_media_session.overlay_url = strdup(overlay->foreground_url);
+    s_media_session.overlay_decoder = calloc(1, sizeof(*s_media_session.overlay_decoder));
+    if (!s_media_session.overlay_url || !s_media_session.overlay_decoder) {
+        free(s_media_session.overlay_url);
+        s_media_session.overlay_url = NULL;
+        free(s_media_session.overlay_decoder);
+        s_media_session.overlay_decoder = NULL;
+        scene_pcm_ring_destroy(&s_media_session.overlay_ring);
+        s_media_session.overlay_ring_initialized = false;
+        xSemaphoreGive(s_media_session.lock);
+        return ESP_ERR_NO_MEM;
+    }
+
+    snprintf(
+        s_media_session.overlay_id,
+        sizeof(s_media_session.overlay_id),
+        "%s",
+        overlay->overlay_id ? overlay->overlay_id : ""
+    );
+    s_media_session.overlay_volume_percent =
+        overlay->foreground_volume_percent > 100 ? 100 : overlay->foreground_volume_percent;
+    s_media_session.ducking_target_percent =
+        overlay->ducking_target_percent > 100 ? 100 : overlay->ducking_target_percent;
+    s_media_session.ducking_attack_ms = overlay->ducking_attack_ms;
+    s_media_session.ducking_release_ms = overlay->ducking_release_ms;
+    s_media_session.overlay_start_at_us = overlay->start_at_us;
+    s_media_session.overlay_decoder->ring = &s_media_session.overlay_ring;
+    s_media_session.overlay_decoder->url = strdup(s_media_session.overlay_url);
+    s_media_session.overlay_decoder->loop = false;
+    s_media_session.overlay_decoder->volume_percent = s_media_session.overlay_volume_percent;
+    s_media_session.overlay_decoder->notify_task = s_task;
+    if (!s_media_session.overlay_decoder->url) {
+        free(s_media_session.overlay_url);
+        s_media_session.overlay_url = NULL;
+        free(s_media_session.overlay_decoder);
+        s_media_session.overlay_decoder = NULL;
+        scene_pcm_ring_destroy(&s_media_session.overlay_ring);
+        s_media_session.overlay_ring_initialized = false;
+        xSemaphoreGive(s_media_session.lock);
+        return ESP_ERR_NO_MEM;
+    }
+
+    BaseType_t ok = playback_create_task(
+        scene_background_task,
+        "tts_overlay",
+        PLAYBACK_SCENE_BACKGROUND_TASK_STACK,
+        s_media_session.overlay_decoder,
+        5,
+        &s_media_session.overlay_decoder_task,
+        0,
+        &s_media_session.overlay_decoder->task_with_caps
+    );
+    if (ok != pdPASS) {
+        media_session_free_decoder(&s_media_session.overlay_decoder);
+        free(s_media_session.overlay_url);
+        s_media_session.overlay_url = NULL;
+        scene_pcm_ring_destroy(&s_media_session.overlay_ring);
+        s_media_session.overlay_ring_initialized = false;
+        xSemaphoreGive(s_media_session.lock);
+        return ESP_ERR_NO_MEM;
+    }
+
+    s_media_session.overlay_pending = true;
+    s_media_session.overlay_active = false;
+    s_media_session.overlay_releasing = false;
+    s_media_session.overlay_started_reported = false;
+    ESP_LOGI(
+        TAG,
+        "overlay queued id=%s duck=%u%% attack=%ums release=%ums start=%" PRId64,
+        s_media_session.overlay_id[0] ? s_media_session.overlay_id : "-",
+        s_media_session.ducking_target_percent,
+        s_media_session.ducking_attack_ms,
+        s_media_session.ducking_release_ms,
+        s_media_session.overlay_start_at_us
+    );
+    xSemaphoreGive(s_media_session.lock);
+    return ESP_OK;
 }
 
 static esp_err_t play_wav_data_local(const uint8_t *data, size_t len, const char *label, bool free_data)
@@ -2185,4 +3850,16 @@ void tater_playback_stop(void)
 bool tater_playback_is_playing(void)
 {
     return s_playing;
+}
+
+bool tater_playback_media_session_active(void)
+{
+    if (!s_media_session.lock) {
+        return false;
+    }
+    xSemaphoreTake(s_media_session.lock, portMAX_DELAY);
+    bool active =
+        s_media_session.active && s_media_session.accepting_overlays && !s_abort;
+    xSemaphoreGive(s_media_session.lock);
+    return active;
 }

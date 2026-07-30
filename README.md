@@ -98,10 +98,128 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 - MP3 streaming decode/playback
 - FLAC streaming decode/playback
 - Compressed-stream jitter buffering for MP3/FLAC
+- Versioned audio scenes with a foreground stream, optional looping background,
+  configurable source volumes, duck level, attack/release, and fade-out
+- Persistent media sessions that keep their decoder position while unrelated
+  TTS is mixed over the media, ducked, and restored
 - Embedded on-device wake sounds
 - Custom wake-sound WAV URL support with persistent cache
 - Server-driven `play.tone` support for diagnostics
 - Per-device volume setting
+
+`audio.scene.start` is backward-compatible with the existing `play.url` path
+and is advertised as audio scene capability version 1. The foreground is
+required; the background is optional and may loop:
+
+```json
+{
+  "type": "audio.scene.start",
+  "payload": {
+    "scene_id": "morning-weather",
+    "foreground": {
+      "url": "https://example.test/weather.mp3",
+      "kind": "tts",
+      "volume_percent": 100
+    },
+    "background": {
+      "url": "https://example.test/morning.flac",
+      "loop": true,
+      "volume_percent": 80
+    },
+    "ducking": {
+      "target_percent": 35,
+      "attack_ms": 150,
+      "release_ms": 350
+    },
+    "finish": {
+      "fade_ms": 500
+    }
+  }
+}
+```
+
+The satellite emits `audio.scene.finished` with `scene_id` and `ok`, followed
+by the legacy `playback.finished` event. `audio.scene.stop` stops the active
+scene.
+
+For music that must continue across unrelated announcements, Tater starts a
+persistent media session:
+
+```json
+{
+  "type": "media.session.start",
+  "payload": {
+    "session_id": "kitchen-song",
+    "media": {
+      "url": "https://example.test/song.mp3",
+      "volume_percent": 100,
+      "loop": false
+    }
+  }
+}
+```
+
+While that decoder remains active, `audio.overlay.start` mixes foreground TTS
+without restarting or seeking the media:
+
+```json
+{
+  "type": "audio.overlay.start",
+  "payload": {
+    "overlay_id": "door-alert",
+    "foreground": {
+      "url": "https://example.test/door-alert.wav",
+      "kind": "tts",
+      "volume_percent": 100
+    },
+    "ducking": {
+      "target_percent": 20,
+      "attack_ms": 150,
+      "release_ms": 350
+    }
+  }
+}
+```
+
+The satellite emits `media.session.started`/`media.session.finished` and
+`audio.overlay.started`/`audio.overlay.finished`. A normal `play.url` received
+during an active media session is automatically promoted to an overlay for
+backward-compatible TTS callers. `media.session.stop` stops the media and any
+active overlay.
+
+For stereo pairs, Tater first measures each satellite's monotonic clock, then
+sends `media.session.prepare` to both members with the same URL and group id.
+Each satellite decodes into its local buffer, selects `left` or `right`, and
+returns `media.session.prepare.result` only after its speaker and buffer are
+ready. Tater then sends an individualized `media.session.commit` containing the
+same future start expressed in that satellite's clock:
+
+```json
+{
+  "type": "media.session.prepare",
+  "payload": {
+    "session_id": "bedroom-song",
+    "group_id": "bedroom-stereo",
+    "media": {
+      "url": "https://example.test/song.mp3",
+      "volume_percent": 100,
+      "loop": false
+    },
+    "routing": {
+      "channel": "left"
+    }
+  }
+}
+```
+
+While grouped playback is active, each member emits
+`media.session.playhead` once per second. Tater projects both source positions
+onto its monotonic clock and sends a bounded `media.session.adjust` to the right
+member when phase error exceeds half a millisecond. Positive adjustments skip
+a few decoded source frames; negative adjustments repeat the most recent frame.
+The correction is deferred during a TTS overlay, so speech mixing and ducking
+stay intact. Scheduled `audio.overlay.start` commands use the same clock mapping
+to duck and center TTS on both members together.
 
 ### LEDs, Buttons, And Device UI
 

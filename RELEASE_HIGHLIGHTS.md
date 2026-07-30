@@ -1,8 +1,20 @@
-- Updates Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box to firmware version 0.2.8.
-- Moves timer ownership entirely onto each satellite so countdowns and alarms continue without Tater tracking or restoring timer state.
-- Supports up to eight concurrent named timers per satellite, including start, list, cancel, snooze, and stop commands.
-- Adds an embedded Zen-style alarm sound plus an alarm-only `stop` wake model, so users can dismiss ringing timers by voice or with the device button.
-- Keeps later timers counting when an earlier alarm is dismissed and intentionally drops timers after a satellite loses power.
-- Adds real PWM screen-brightness control to S3 Box.
-- Adds S3 Box scheduled night dimming with separate normal and overnight brightness levels.
-- Keeps the S3 Box dimming schedule running through temporary network or Tater disconnects after its local time is synchronized.
+- Updates Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box to firmware version 0.3.0.
+- Adds synchronized media prepare/ready/commit sessions so two satellites can
+  buffer independently and begin on one shared future timestamp.
+- Adds local left, right, mono, and stereo routing after decode, allowing a
+  paired satellite to play one channel through both of its physical outputs.
+- Adds satellite clock probes, scheduled TTS overlays, one-second playhead
+  telemetry, and bounded sample corrections for long-running stereo alignment.
+- Preserves per-speaker volume and acoustic delay calibration while drift
+  correction maintains the configured phase relationship.
+- Adds versioned audio scenes with simultaneous foreground TTS and an optional
+  looping WAV, MP3, or FLAC background.
+- Adds configurable foreground/background volume, duck level, attack/release,
+  and background fade-out with graceful foreground-only fallback.
+- Advertises audio-scene, ducking, and looping-background capabilities and
+  correlates completion with `scene_id`.
+- Adds persistent media sessions and TTS overlays so music keeps its decoder
+  position, ducks beneath unrelated speech, and returns to its prior level
+  after the overlay.
+- Automatically promotes legacy foreground `play.url` commands to overlays
+  while a persistent media session is active.

@@ -15,6 +15,7 @@ idf_component_register(
         "network_recovery.c"
         "ota_update.c"
         "playback.c"
+        "playback_mix.c"
         "provisioning.c"
         "tater_config.c"
         "tater_protocol.c"
