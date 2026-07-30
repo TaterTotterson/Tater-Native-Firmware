@@ -17,6 +17,7 @@ idf_component_register(
         "playback.c"
         "playback_mix.c"
         "provisioning.c"
+        "server_url.c"
         "tater_config.c"
         "tater_protocol.c"
         "timer_sound_assets.c"

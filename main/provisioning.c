@@ -19,6 +19,7 @@
 #include "freertos/task.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
+#include "server_url.h"
 
 static const char *TAG = "tater_prov";
 static tater_config_t s_initial;
@@ -211,7 +212,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<form method=post action=/save>"
         "<div class=field><label for=ssid>Wi-Fi SSID</label><input id=ssid name=ssid value=\"%s\" autocomplete=off autocapitalize=none required><div class=hint>Your normal home Wi-Fi network.</div></div>"
         "<div class=field><label for=password>Wi-Fi Password</label><input id=password name=password type=password autocomplete=current-password><div class=hint>Leave blank only for open networks.</div></div>"
-        "<div class=field><label for=server>Tater Server</label><input id=server name=server value=\"%s\" placeholder=\"http://10.4.20.210:8501\" autocapitalize=none required><div class=hint>Use the Tater app/server address this satellite should connect to.</div></div>"
+        "<div class=field><label for=server>Tater Server</label><input id=server name=server value=\"%s\" placeholder=\"http://10.4.20.210:8501\" autocapitalize=none required><div class=hint>Paste the Tater address. HTTP(S), WS(S), and the full native WebSocket URL are accepted.</div></div>"
         "<div class=grid><div class=field><label for=token>Pairing Code / Token</label><input id=token name=token value=\"\" autocapitalize=none autocomplete=one-time-code placeholder=\"123 456\" required><div class=hint>Open Tater Satellites, tap Add Satellite, then enter the code shown there.</div></div>"
         "<div class=field><label for=room>Room</label><input id=room name=room value=\"%s\" placeholder=\"Kitchen\"><div class=hint>Shown in Tater for routing and intercom.</div></div></div>"
         "<div class=field><label for=name>Device Name</label><input id=name name=name value=\"%s\" placeholder=\"Tater Voice PE\"><div class=hint>Friendly name shown in Tater.</div></div>"
@@ -335,6 +336,13 @@ static esp_err_t save_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Wi-Fi SSID, Tater server, and pairing code are required");
         return ESP_OK;
     }
+
+    char normalized_server_url[sizeof(cfg.server_url)];
+    if (!tater_server_normalize_base_url(cfg.server_url, normalized_server_url, sizeof(normalized_server_url))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Enter a valid Tater server address");
+        return ESP_OK;
+    }
+    strlcpy(cfg.server_url, normalized_server_url, sizeof(cfg.server_url));
 
     esp_err_t err = tater_config_save(&cfg);
     if (err != ESP_OK) {

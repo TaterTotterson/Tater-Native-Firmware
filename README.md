@@ -420,6 +420,10 @@ http://192.168.4.1
 - device name
 - room
 
+The server field also accepts a bare hostname/IP address, `ws://` or `wss://`,
+and the full `/api/tater/satellite/v1/ws` endpoint. The firmware normalizes
+these forms automatically.
+
 6. Save. The satellite reboots, joins Wi-Fi, pairs with Tater, and appears in
    the Satellites page.
 

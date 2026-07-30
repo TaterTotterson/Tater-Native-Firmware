@@ -9,6 +9,7 @@
 #include "board.h"
 #include "cJSON.h"
 #include "esp_core_dump.h"
+#include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -27,11 +28,11 @@
 #include "native_settings.h"
 #include "ota_update.h"
 #include "playback.h"
+#include "server_url.h"
 #include "timer_sound_assets.h"
 #include "wake_engine.h"
 
 static const char *TAG = "tater_proto";
-static const char *NATIVE_WS_PATH = "/api/tater/satellite/v1/ws";
 
 #if TATER_BOARD_SAT1
 /*
@@ -567,6 +568,9 @@ static esp_err_t create_websocket_client(void)
         .enable_close_reconnect = true,
         .headers = strlen(s_auth_header) > 0 ? s_auth_header : NULL,
     };
+    if (strncasecmp(s_ws_url, "wss://", 6) == 0) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
     esp_websocket_client_handle_t client = esp_websocket_client_init(&cfg);
     if (!client) {
         return ESP_ERR_NO_MEM;
@@ -1361,36 +1365,14 @@ static void build_device_id(void)
     );
 }
 
-static void build_ws_url(void)
+static bool build_ws_url(void)
 {
-    char base[144];
-    strlcpy(base, s_config.server_url, sizeof(base));
-    if (strstr(base, NATIVE_WS_PATH) != NULL) {
-        strlcpy(s_ws_url, base, sizeof(s_ws_url));
-        return;
+    if (!tater_server_build_ws_url(s_config.server_url, s_ws_url, sizeof(s_ws_url))) {
+        s_ws_url[0] = '\0';
+        ESP_LOGE(TAG, "invalid Tater server URL: %s", s_config.server_url);
+        return false;
     }
-
-    if (strncmp(base, "http://", 7) == 0) {
-        memmove(base + 2, base + 4, strlen(base + 4) + 1);
-        base[0] = 'w';
-        base[1] = 's';
-    } else if (strncmp(base, "https://", 8) == 0) {
-        memmove(base + 3, base + 5, strlen(base + 5) + 1);
-        base[0] = 'w';
-        base[1] = 's';
-        base[2] = 's';
-    } else if (strncmp(base, "ws://", 5) != 0 && strncmp(base, "wss://", 6) != 0) {
-        char tmp[144];
-        strlcpy(tmp, base, sizeof(tmp));
-        snprintf(base, sizeof(base), "ws://%s", tmp);
-    }
-
-    size_t len = strlen(base);
-    while (len > 0 && base[len - 1] == '/') {
-        base[len - 1] = '\0';
-        len--;
-    }
-    snprintf(s_ws_url, sizeof(s_ws_url), "%s%s", base, NATIVE_WS_PATH);
+    return true;
 }
 
 static bool should_log_send(const char *type, int sent)
@@ -2930,6 +2912,14 @@ void tater_protocol_init(
     } else {
         tater_config_defaults(&s_config);
     }
+    char normalized_server_url[sizeof(s_config.server_url)];
+    if (tater_server_normalize_base_url(
+            s_config.server_url,
+            normalized_server_url,
+            sizeof(normalized_server_url)
+        )) {
+        strlcpy(s_config.server_url, normalized_server_url, sizeof(s_config.server_url));
+    }
     s_state_cb = state_cb;
     s_play_url_cb = play_url_cb;
     s_play_tone_cb = play_tone_cb;
@@ -2950,12 +2940,25 @@ void tater_protocol_init(
 
 void tater_protocol_start(void)
 {
-    ESP_ERROR_CHECK(create_websocket_client());
-    ESP_ERROR_CHECK(esp_websocket_client_start(s_client));
     audio_tx_start_task();
-    BaseType_t task_ok = xTaskCreate(reconnect_watchdog_task, "tater_ws_reconnect", 4096, NULL, 4, NULL);
-    if (task_ok != pdPASS) {
-        ESP_LOGE(TAG, "websocket reconnect watchdog task create failed");
+
+    esp_err_t websocket_start_err = ESP_ERR_INVALID_ARG;
+    if (s_ws_url[0]) {
+        websocket_start_err = create_websocket_client();
+        if (websocket_start_err == ESP_OK) {
+            websocket_start_err = esp_websocket_client_start(s_client);
+        }
+    }
+    if (websocket_start_err != ESP_OK) {
+        ESP_LOGE(TAG, "websocket startup failed: %s", esp_err_to_name(websocket_start_err));
+        emit_state(TATER_STATE_ERROR, s_ws_url[0] ? "websocket startup failed" : "invalid server URL");
+    }
+
+    if (s_ws_url[0]) {
+        BaseType_t task_ok = xTaskCreate(reconnect_watchdog_task, "tater_ws_reconnect", 4096, NULL, 4, NULL);
+        if (task_ok != pdPASS) {
+            ESP_LOGE(TAG, "websocket reconnect watchdog task create failed");
+        }
     }
     if (!s_timer_monitor_task) {
         BaseType_t timer_task_ok = xTaskCreate(timer_monitor_task, "tater_timer", 5120, NULL, 4, &s_timer_monitor_task);
