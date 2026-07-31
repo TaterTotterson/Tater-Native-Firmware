@@ -61,6 +61,7 @@ void tater_protocol_send_playback_finished_status(bool ok, bool allow_reopen);
 void tater_protocol_send_audio_scene_finished(const char *scene_id, bool ok);
 void tater_protocol_send_audio_overlay_started(const char *overlay_id);
 void tater_protocol_send_audio_overlay_finished(const char *overlay_id, bool ok);
+void tater_protocol_start_media_session_visual(bool tool_playback);
 void tater_protocol_send_media_session_started(
     const char *session_id,
     const char *group_id,
@@ -68,7 +69,11 @@ void tater_protocol_send_media_session_started(
     int64_t scheduled_start_us,
     int64_t actual_start_us
 );
-void tater_protocol_send_media_session_finished(const char *session_id, bool ok);
+void tater_protocol_send_media_session_finished(
+    const char *session_id,
+    bool ok,
+    bool complete_visual_state
+);
 void tater_protocol_send_media_session_ready(
     const char *session_id,
     const char *group_id,

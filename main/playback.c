@@ -238,6 +238,8 @@ typedef struct {
     uint8_t media_volume_percent;
     tater_playback_channel_t media_channel;
     bool media_loop;
+    bool complete_visual_state;
+    bool tool_visual_state;
     bool prepare_requested;
     bool prepared;
     bool committed;
@@ -2897,6 +2899,8 @@ static void media_session_task(void *arg)
     char prepare_reply_to[TATER_PLAYBACK_REQUEST_ID_MAX] = {0};
     tater_playback_channel_t media_channel = TATER_PLAYBACK_CHANNEL_STEREO;
     bool prepare_requested = false;
+    bool complete_visual_state = false;
+    bool tool_visual_state = false;
 
     if (!session || !session->lock || !session->media_url || !session->media_url[0]) {
         goto done;
@@ -2907,6 +2911,8 @@ static void media_session_task(void *arg)
     snprintf(prepare_reply_to, sizeof(prepare_reply_to), "%s", session->prepare_reply_to);
     media_channel = session->media_channel;
     prepare_requested = session->prepare_requested;
+    complete_visual_state = session->complete_visual_state;
+    tool_visual_state = session->tool_visual_state;
     xSemaphoreGive(session->lock);
     s_playing = true;
     playback_log_heap("media session start");
@@ -2994,6 +3000,9 @@ static void media_session_task(void *arg)
 
     int64_t actual_start_us = esp_timer_get_time();
     tater_playback_mix_init(&mix, 100);
+    if (complete_visual_state) {
+        tater_protocol_start_media_session_visual(tool_visual_state);
+    }
     tater_protocol_send_media_session_started(
         session_id,
         group_id,
@@ -3277,6 +3286,8 @@ done:
         session->prepare_reply_to[0] = '\0';
         session->prepared = false;
         session->committed = false;
+        session->complete_visual_state = false;
+        session->tool_visual_state = false;
         session->scheduled_start_us = 0;
         session->pending_correction_frames = 0;
         session->source_frames = 0;
@@ -3286,7 +3297,11 @@ done:
     playback_mark_finished();
 
     bool ok = !aborted && started_reported && err == ESP_OK;
-    tater_protocol_send_media_session_finished(session_id, ok);
+    tater_protocol_send_media_session_finished(
+        session_id,
+        ok,
+        complete_visual_state
+    );
     ESP_LOGI(
         TAG,
         "media session finished id=%s ok=%d",
@@ -3546,6 +3561,8 @@ esp_err_t tater_playback_start_media_session(const tater_playback_media_session_
         ? media->channel
         : TATER_PLAYBACK_CHANNEL_STEREO;
     s_media_session.media_loop = media->loop;
+    s_media_session.complete_visual_state = media->complete_visual_state;
+    s_media_session.tool_visual_state = media->tool_visual_state;
     s_media_session.prepare_requested = media->prepare;
     s_media_session.prepared = false;
     s_media_session.committed = !media->prepare;

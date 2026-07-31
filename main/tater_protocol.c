@@ -2383,9 +2383,14 @@ static void handle_text_message(const char *data, int len)
         const cJSON *loop_item = cJSON_IsObject(media)
             ? cJSON_GetObjectItem(media, "loop")
             : cJSON_GetObjectItem(payload, "loop");
+        const cJSON *content_type_item = cJSON_IsObject(media)
+            ? cJSON_GetObjectItem(media, "content_type")
+            : cJSON_GetObjectItem(payload, "content_type");
         const cJSON *channel_item = cJSON_IsObject(routing)
             ? cJSON_GetObjectItem(routing, "channel")
             : cJSON_GetObjectItem(payload, "channel");
+        const cJSON *visual_mode_item = cJSON_GetObjectItem(payload, "visual_mode");
+        const cJSON *state_after_item = cJSON_GetObjectItem(payload, "state_after");
         const char *session_id =
             cJSON_IsString(session_id_item) && session_id_item->valuestring
             ? session_id_item->valuestring
@@ -2398,7 +2403,30 @@ static void handle_text_message(const char *data, int len)
             cJSON_IsString(url_item) && url_item->valuestring
             ? url_item->valuestring
             : "";
+        const char *content_type =
+            cJSON_IsString(content_type_item) && content_type_item->valuestring
+            ? content_type_item->valuestring
+            : "";
+        const char *visual_mode =
+            cJSON_IsString(visual_mode_item) && visual_mode_item->valuestring
+            ? visual_mode_item->valuestring
+            : "";
+        const char *state_after =
+            cJSON_IsString(state_after_item) && state_after_item->valuestring
+            ? state_after_item->valuestring
+            : "";
         bool loop = cJSON_IsBool(loop_item) ? cJSON_IsTrue(loop_item) : json_truthy(loop_item);
+        bool transient_tts =
+            strcasecmp(content_type, "tts") == 0
+            || strcasecmp(content_type, "speech") == 0
+            || strcasecmp(content_type, "announcement") == 0;
+        bool complete_visual_state =
+            transient_tts
+            || strcasecmp(visual_mode, "speaking") == 0
+            || strcasecmp(visual_mode, "tool_call") == 0;
+        bool tool_playback =
+            strcasecmp(visual_mode, "tool_call") == 0
+            || strcasecmp(state_after, "tool_call") == 0;
 
         tater_playback_media_session_t media_session = {
             .session_id = session_id,
@@ -2409,6 +2437,8 @@ static void handle_text_message(const char *data, int len)
             .channel = media_channel_from_json(channel_item),
             .loop = loop,
             .prepare = prepare,
+            .complete_visual_state = complete_visual_state,
+            .tool_visual_state = tool_playback,
         };
         esp_err_t media_err = tater_playback_start_media_session(&media_session);
         if (media_err != ESP_OK) {
@@ -2422,16 +2452,21 @@ static void handle_text_message(const char *data, int len)
                     0
                 );
             }
-            tater_protocol_send_media_session_finished(session_id, false);
+            tater_protocol_send_media_session_finished(
+                session_id,
+                false,
+                complete_visual_state
+            );
         } else {
             ESP_LOGI(
                 TAG,
-                "media session queued id=%s group=%s channel=%d loop=%d prepare=%d",
+                "media session queued id=%s group=%s channel=%d loop=%d prepare=%d visual=%d",
                 session_id && session_id[0] ? session_id : "-",
                 group_id && group_id[0] ? group_id : "-",
                 (int)media_session.channel,
                 loop,
-                prepare
+                prepare,
+                complete_visual_state
             );
         }
     } else if (strcmp(type, "media.session.commit") == 0 && cJSON_IsObject(payload)) {
@@ -3510,6 +3545,24 @@ static void send_playback_completion(bool ok, bool allow_reopen, bool emit_playb
     }
 }
 
+static void finish_media_session_visual(bool ok)
+{
+    bool return_armed = s_playback_return_armed;
+    tater_state_t return_state = s_playback_return_state;
+    s_playback_return_armed = false;
+    s_playback_return_state = TATER_STATE_IDLE;
+    clear_playback_visual_active();
+
+    tater_state_t next_state = return_armed ? return_state : TATER_STATE_IDLE;
+    if (!websocket_ready()) {
+        next_state = TATER_STATE_DISCONNECTED;
+    }
+    emit_state(
+        next_state,
+        return_armed ? "playback return" : (ok ? "playback finished" : "playback stopped")
+    );
+}
+
 void tater_protocol_send_playback_finished_status(bool ok, bool allow_reopen)
 {
     send_playback_completion(ok, allow_reopen, true);
@@ -3548,6 +3601,23 @@ void tater_protocol_send_audio_overlay_finished(const char *overlay_id, bool ok)
     send_playback_completion(ok, ok, false);
 }
 
+void tater_protocol_start_media_session_visual(bool tool_playback)
+{
+    if (tool_playback) {
+        s_playback_return_state = TATER_STATE_TOOL_CALL;
+        s_playback_return_armed = true;
+    } else {
+        s_playback_return_state = TATER_STATE_IDLE;
+        s_playback_return_armed = false;
+        s_tool_visual_hold = false;
+    }
+    mark_playback_visual_active();
+    emit_state(
+        tool_playback ? TATER_STATE_TOOL_CALL : TATER_STATE_SPEAKING,
+        tool_playback ? "tool media session" : "tts media session"
+    );
+}
+
 void tater_protocol_send_media_session_started(
     const char *session_id,
     const char *group_id,
@@ -3572,13 +3642,20 @@ void tater_protocol_send_media_session_started(
     send_json(root);
 }
 
-void tater_protocol_send_media_session_finished(const char *session_id, bool ok)
+void tater_protocol_send_media_session_finished(
+    const char *session_id,
+    bool ok,
+    bool complete_visual_state
+)
 {
     cJSON *root = new_envelope("media.session.finished");
     cJSON *payload = cJSON_GetObjectItem(root, "payload");
     cJSON_AddStringToObject(payload, "session_id", session_id ? session_id : "");
     cJSON_AddBoolToObject(payload, "ok", ok);
     send_json(root);
+    if (complete_visual_state) {
+        finish_media_session_visual(ok);
+    }
 }
 
 void tater_protocol_send_media_session_ready(

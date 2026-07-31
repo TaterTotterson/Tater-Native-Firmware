@@ -35,6 +35,8 @@ typedef struct {
     tater_playback_channel_t channel;
     bool loop;
     bool prepare;
+    bool complete_visual_state;
+    bool tool_visual_state;
 } tater_playback_media_session_t;
 
 typedef struct {

@@ -187,6 +187,13 @@ during an active media session is automatically promoted to an overlay for
 backward-compatible TTS callers. `media.session.stop` stops the media and any
 active overlay.
 
+Transient media sessions can identify speech with `media.content_type` and set
+`visual_mode` to `speaking` or `tool_call`. The satellite shows that visual
+state for the lifetime of the TTS session, then returns to the held tool-call
+state when applicable or to its normal idle/disconnected state. Persistent
+music sessions do not complete or replace the satellite's conversational
+visual state.
+
 For stereo pairs, Tater first measures each satellite's monotonic clock, then
 sends `media.session.prepare` to both members with the same URL and group id.
 Each satellite decodes into its local buffer, selects `left` or `right`, and
