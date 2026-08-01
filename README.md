@@ -557,14 +557,24 @@ directly to the USB flash script.
 ### Release Tags
 
 Firmware releases are built by GitHub Actions when a `native-*` tag is pushed.
-For combined releases, all board headers must use the same numeric version and
-the tag uses the shared `native-x.y.z` form.
+Board headers normally share the same numeric version. A board-only update can
+append `-revN` (for example, `native-satellite1-0.3.3-rev1`) without bumping
+unaffected boards. The combined release tag uses the newest board version, so
+that example is released as `native-0.3.3-rev1`. Tater compares both the shared
+three-part version and the board revision.
 
 Example:
 
 ```sh
 git tag native-0.1.33
 git push origin native-0.1.33
+```
+
+For a board-only revision:
+
+```sh
+git tag native-0.3.3-rev1
+git push origin native-0.3.3-rev1
 ```
 
 The release workflow builds `voicepe`, `sat1`, `respeaker_xvf3800`, and

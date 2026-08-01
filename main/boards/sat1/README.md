@@ -6,7 +6,8 @@ Current status:
 
 - included in `platformio.ini` as environment `sat1`
 - included in the combined native release manifest as board key `satellite1`
-- firmware version is kept in step with the shared native release version
+- firmware uses the shared native version plus a board-only `revN` revision
+  when Sat1 changes independently
 - 24 LED ring support through the shared LED implementation
 - GPIO0 action button support through the shared button implementation
 - 48 kHz mic capture downsampled to 16 kHz mono for wake/STT streaming

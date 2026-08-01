@@ -88,12 +88,27 @@ def display_version(version: str) -> str:
     return match.group(1) if match else version
 
 
+def version_key(version: str) -> tuple[int, int, int, int]:
+    """Order a board version by its release and optional board revision."""
+    display = display_version(version)
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", display)
+    if not match:
+        return (0, 0, 0, 0)
+    revision_match = re.search(r"(?:rev|r)[._-]?(\d+)", display[match.end() :], re.IGNORECASE)
+    return (
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3)),
+        int(revision_match.group(1)) if revision_match else 0,
+    )
+
+
 def release_version(board_versions: list[str]) -> str:
-    displays = {display_version(version) for version in board_versions if version}
-    if len(displays) != 1:
-        joined = ", ".join(board_versions)
-        raise SystemExit(f"All selected boards must share a display version. Got: {joined}")
-    return f"native-{next(iter(displays))}"
+    versions = [version for version in board_versions if version]
+    if not versions:
+        raise SystemExit("At least one board firmware version is required.")
+    newest = max(versions, key=version_key)
+    return f"native-{display_version(newest)}"
 
 
 def sha256(path: Path) -> str:
