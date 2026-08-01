@@ -113,8 +113,12 @@ static void expect_direction(const char *name,
         ring_distance(state.angle_index, expected_angle) > 1 ||
         (expected_x_sign > 0 && state.sample_delay <= 0) ||
         (expected_x_sign < 0 && state.sample_delay >= 0) ||
+        (expected_x_sign > 0 && state.sample_delay_q8 <= 0) ||
+        (expected_x_sign < 0 && state.sample_delay_q8 >= 0) ||
         (expected_y_sign > 0 && state.vertical_delay <= 0) ||
         (expected_y_sign < 0 && state.vertical_delay >= 0) ||
+        (expected_y_sign > 0 && state.vertical_delay_q8 <= 0) ||
+        (expected_y_sign < 0 && state.vertical_delay_q8 >= 0) ||
         state.confidence < 64) {
         fprintf(
             stderr,

@@ -15,9 +15,12 @@ Current status:
 - FUSB302B USB-C PD setup path
 - four-microphone XMOS DoA estimation with adaptive room-noise calibration,
   confidence filtering, and directional smoothing
+- four-microphone fractional-delay, delay-and-sum beamforming steered by the
+  XMOS DoA estimate, with smooth direction changes and an automatic omni
+  fallback when speech direction is unavailable
 - directional LEDs reject weak/noise-only updates, hold the last speech
   direction briefly, and then return to a neutral listening glow
-- bundled XMOS factory image `1.0.8`
+- bundled XMOS factory image `1.0.9`
 - boot-time XMOS auto-update when the installed image does not match the bundled image
 - line-out capability advertised to Tater
 - firmware-side AEC shared with Voice PE

@@ -33,6 +33,7 @@
 #include "led_ring/led_ring_servicer.h"
 #include "doa/doa_estimator.h"
 #include "doa/doa_servicer.h"
+#include "beamforming/sat1_beamformer.h"
 
 
 /* Config headers for sw_pll */
@@ -60,23 +61,36 @@ static int32_t saturate_i32_from_i64(int64_t value)
 }
 
 #if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS >= 2
+static sat1_beamformer_t sat1_beamformer;
+
 static void mix_four_mics_for_pipeline(
         int32_t *pipeline_mic_ptr,
         const int32_t full_mic_frames[MIC_ARRAY_CONFIG_MIC_COUNT][MIC_ARRAY_CONFIG_SAMPLES_PER_FRAME],
         size_t frame_count)
 {
+    const int32_t *microphones[SAT1_BEAMFORMER_MIC_COUNT] = {
+        full_mic_frames[0],
+        full_mic_frames[1],
+        full_mic_frames[2],
+        full_mic_frames[3],
+    };
+    doa_estimator_state_t direction = {0};
+    doa_estimator_get_state(&direction);
+    sat1_beamformer_process_frame(&sat1_beamformer,
+                                  pipeline_mic_ptr,
+                                  microphones,
+                                  frame_count,
+                                  &direction);
+
     for (size_t i = 0; i < frame_count; i++) {
         int64_t east = full_mic_frames[0][i];
         int64_t west = full_mic_frames[1][i];
         int64_t north = full_mic_frames[2][i];
         int64_t south = full_mic_frames[3][i];
 
-        int64_t primary = (east + west + north + south) / 4;
-        int64_t spatial_ref = ((east - west) + (north - south)) / 4;
-        int64_t speech_ref = primary + (spatial_ref / 4);
-
-        pipeline_mic_ptr[i] = saturate_i32_from_i64(primary);
-        pipeline_mic_ptr[i + frame_count] = saturate_i32_from_i64(speech_ref);
+        int64_t omni_reference = (east + west + north + south) / 4;
+        pipeline_mic_ptr[i + frame_count] =
+            saturate_i32_from_i64(omni_reference);
     }
 }
 #endif
@@ -195,12 +209,12 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
     if (received == frame_count) {
         int32_t *pipeline_mic_ptr = (int32_t *)pipeline_mic_frames;
 #if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS >= 2
-        mix_four_mics_for_pipeline(pipeline_mic_ptr, full_mic_frames, frame_count);
         doa_estimator_process_frame_4(full_mic_frames[0],
                                       full_mic_frames[1],
                                       full_mic_frames[2],
                                       full_mic_frames[3],
                                       frame_count);
+        mix_four_mics_for_pipeline(pipeline_mic_ptr, full_mic_frames, frame_count);
 #else
         for (int ch = 0; ch < appconfAUDIO_PIPELINE_CHANNELS; ch++) {
             memcpy(&pipeline_mic_ptr[ch * frame_count],
@@ -311,12 +325,12 @@ int audio_pipeline_output(void *output_app_data,
     int32_t tmp[appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE][1][APP_I2S_STEREO_CHANNELS];
     int32_t *tmpptr = (int32_t *)output_audio_frames;
      
-     // 0 : proc 0, AEC+IC+NS+AGC audio
-     // 1 : proc 1, mic 1 audio with AEC applied
-     // 2 : ref 0, overwritten by AEC+IC output
-     // 3 : ref 1, overwritten by AEC+IC+NS output
-     // 4 : mic 0
-     // 5 : mic 1
+     // 0 : steered beam with AEC+NS+AGC
+     // 1 : unused omni mix with AEC
+     // 2 : speaker reference channel 0
+     // 3 : steered beam with AEC+NS
+     // 4 : steered four-mic beam before AEC
+     // 5 : four-mic omni mix before AEC
 
      if (appconfI2S_AUDIO_SAMPLE_RATE == 3*appconfAUDIO_PIPELINE_SAMPLE_RATE) {    
         // duplicate to 48kHz

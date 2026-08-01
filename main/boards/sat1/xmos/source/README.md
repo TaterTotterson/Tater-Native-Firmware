@@ -47,7 +47,7 @@ Then build with:
 
 The build script expects XMOS XTC Tools to be installed. Set `XMOS_TOOL_PATH` if XTC is not installed at `/Applications/XMOS_XTC_15.3.1`.
 
-Run the host-side direction estimator checks with:
+Run the host-side direction estimator and beamformer checks with:
 
 ```bash
 scripts/test_doa_estimator_host.sh
@@ -61,4 +61,8 @@ This source started from `FutureProofHomes/Satellite1-XMOS` at:
 86cf1ee Merge pull request #106 from FutureProofHomes/align_branches
 ```
 
-The current source includes the Sat1 DoA/VoD XMOS additions used by the ESPHome Sat1 package.
+The current source includes the Sat1 four-microphone DoA estimator and its
+fractional-delay, delay-and-sum beamformer. The steered beam is generated before
+the existing two-channel AEC because the bundled XMOS voice library supports at
+most two microphone channels; its second microphone-side channel remains an
+omni mix.

@@ -30,8 +30,8 @@
 
 static const char *TAG = "tater_audio_sat1";
 
-extern const uint8_t _binary_sat1_xmos_1_0_8_factory_bin_start[] asm("_binary_sat1_xmos_1_0_8_factory_bin_start");
-extern const uint8_t _binary_sat1_xmos_1_0_8_factory_bin_end[] asm("_binary_sat1_xmos_1_0_8_factory_bin_end");
+extern const uint8_t _binary_sat1_xmos_1_0_9_factory_bin_start[] asm("_binary_sat1_xmos_1_0_9_factory_bin_start");
+extern const uint8_t _binary_sat1_xmos_1_0_9_factory_bin_end[] asm("_binary_sat1_xmos_1_0_9_factory_bin_end");
 
 #define TATER_I2C_PORT I2C_NUM_0
 #define SAT1_SPI_HOST SPI2_HOST
@@ -52,7 +52,7 @@ extern const uint8_t _binary_sat1_xmos_1_0_8_factory_bin_end[] asm("_binary_sat1
 #define SAT1_DOA_FLAG_FOUR_MIC (1u << 1)
 #define SAT1_XMOS_TARGET_MAJOR 1
 #define SAT1_XMOS_TARGET_MINOR 0
-#define SAT1_XMOS_TARGET_PATCH 8
+#define SAT1_XMOS_TARGET_PATCH 9
 #define SAT1_XMOS_TARGET_PRERELEASE 0
 #define SAT1_XMOS_TARGET_COUNTER 0
 #define SAT1_XMOS_VERSION_READY_TIMEOUT_MS 8000
@@ -84,7 +84,8 @@ static i2s_chan_handle_t s_tx_chan;
 static spi_device_handle_t s_spi;
 static SemaphoreHandle_t s_i2c_mutex;
 static SemaphoreHandle_t s_spi_mutex;
-DMA_ATTR static uint8_t s_spi_transfer_buffer[SAT1_XMOS_FLASH_PAGE_SIZE + 5];
+DMA_ATTR static uint8_t s_spi_tx_buffer[SAT1_XMOS_FLASH_PAGE_SIZE + 5];
+DMA_ATTR static uint8_t s_spi_rx_buffer[SAT1_XMOS_FLASH_PAGE_SIZE + 5];
 static bool s_speaker_ready;
 static bool s_speaker_enabled;
 static bool s_speaker_primed;
@@ -130,7 +131,7 @@ static int16_t read_i16_le(const uint8_t *payload)
 
 static size_t sat1_xmos_target_image_size(void)
 {
-    return (size_t)(_binary_sat1_xmos_1_0_8_factory_bin_end - _binary_sat1_xmos_1_0_8_factory_bin_start);
+    return (size_t)(_binary_sat1_xmos_1_0_9_factory_bin_end - _binary_sat1_xmos_1_0_9_factory_bin_start);
 }
 
 static esp_err_t speaker_session_take(void)
@@ -513,15 +514,16 @@ static esp_err_t spi_init(void)
         .sclk_io_num = TATER_SAT1_SPI_CLK,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = sizeof(s_spi_transfer_buffer),
+        .max_transfer_sz = sizeof(s_spi_tx_buffer),
     };
     /*
-     * This SPI bus only carries short XMOS control and flash messages (at most
-     * 261 bytes). DMA adds no useful throughput here and the driver may allocate
-     * an aligned RX bounce buffer for every odd-sized DOA read. Use the
-     * polling CPU path so DoA reads do not depend on transient DMA memory.
+     * Page program and fast-read commands are 260 and 261 bytes. The ESP32-S3
+     * polling FIFO is limited to 64 bytes, and splitting a flash command across
+     * several driver transactions is not reliable. Use one DMA transaction
+     * backed by dedicated internal buffers so CS stays asserted for the entire
+     * command without allocating transient bounce buffers for DoA reads.
      */
-    esp_err_t err = spi_bus_initialize(SAT1_SPI_HOST, &bus_cfg, SPI_DMA_DISABLED);
+    esp_err_t err = spi_bus_initialize(SAT1_SPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         return err;
     }
@@ -560,37 +562,26 @@ static esp_err_t spi_init(void)
 
 static esp_err_t sat1_spi_transfer(uint8_t *buf, size_t len)
 {
-    if (!s_spi || !buf || len == 0 || len > sizeof(s_spi_transfer_buffer)) {
+    if (!s_spi || !buf || len == 0 || len > sizeof(s_spi_tx_buffer)) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_spi_mutex) {
         xSemaphoreTake(s_spi_mutex, portMAX_DELAY);
     }
-    memcpy(s_spi_transfer_buffer, buf, len);
+    memcpy(s_spi_tx_buffer, buf, len);
+    memset(s_spi_rx_buffer, 0, len);
     gpio_set_level(TATER_SAT1_SPI_CS, 0);
     esp_rom_delay_us(1);
-    esp_err_t err = ESP_OK;
-    size_t offset = 0;
-    while (offset < len) {
-        size_t chunk_len = len - offset;
-        if (chunk_len > SOC_SPI_MAXIMUM_BUFFER_SIZE) {
-            chunk_len = SOC_SPI_MAXIMUM_BUFFER_SIZE;
-        }
-        spi_transaction_t transaction = {
-            .length = chunk_len * 8,
-            .tx_buffer = &s_spi_transfer_buffer[offset],
-            .rx_buffer = &s_spi_transfer_buffer[offset],
-        };
-        err = spi_device_polling_transmit(s_spi, &transaction);
-        if (err != ESP_OK) {
-            break;
-        }
-        offset += chunk_len;
-    }
+    spi_transaction_t transaction = {
+        .length = len * 8,
+        .tx_buffer = s_spi_tx_buffer,
+        .rx_buffer = s_spi_rx_buffer,
+    };
+    esp_err_t err = spi_device_polling_transmit(s_spi, &transaction);
     esp_rom_delay_us(1);
     gpio_set_level(TATER_SAT1_SPI_CS, 1);
     if (err == ESP_OK) {
-        memcpy(buf, s_spi_transfer_buffer, len);
+        memcpy(buf, s_spi_rx_buffer, len);
     }
     if (s_spi_mutex) {
         xSemaphoreGive(s_spi_mutex);
@@ -941,7 +932,7 @@ static void sat1_xmos_set_flash_progress(size_t done, size_t total, uint8_t *las
 
 static esp_err_t sat1_xmos_flash_target_image(void)
 {
-    const uint8_t *image = _binary_sat1_xmos_1_0_8_factory_bin_start;
+    const uint8_t *image = _binary_sat1_xmos_1_0_9_factory_bin_start;
     const size_t image_size = sat1_xmos_target_image_size();
     ESP_RETURN_ON_FALSE(image && image_size > 0, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image missing");
     ESP_RETURN_ON_FALSE(image_size <= SAT1_XMOS_FLASH_TOTAL_SIZE, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image too large");

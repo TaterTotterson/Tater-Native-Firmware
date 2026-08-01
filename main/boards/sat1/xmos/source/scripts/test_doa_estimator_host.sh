@@ -2,7 +2,9 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUTPUT="${TMPDIR:-/tmp}/tater-doa-estimator-test"
+DOA_OUTPUT="${TMPDIR:-/tmp}/tater-doa-estimator-test"
+BEAMFORMER_OUTPUT="${TMPDIR:-/tmp}/tater-sat1-beamformer-test"
+trap 'rm -f "${DOA_OUTPUT}" "${BEAMFORMER_OUTPUT}"' EXIT
 
 cc \
   -std=c11 \
@@ -12,6 +14,18 @@ cc \
   -I "${ROOT_DIR}/satellite-xmos-firmware/src/doa" \
   "${ROOT_DIR}/tests/test_doa_estimator_host.c" \
   "${ROOT_DIR}/satellite-xmos-firmware/src/doa/doa_estimator.c" \
-  -o "${OUTPUT}"
+  -o "${DOA_OUTPUT}"
 
-"${OUTPUT}"
+"${DOA_OUTPUT}"
+
+cc \
+  -std=c11 \
+  -Wall \
+  -Wextra \
+  -Werror \
+  -I "${ROOT_DIR}/satellite-xmos-firmware/src" \
+  "${ROOT_DIR}/tests/test_sat1_beamformer_host.c" \
+  "${ROOT_DIR}/satellite-xmos-firmware/src/beamforming/sat1_beamformer.c" \
+  -o "${BEAMFORMER_OUTPUT}"
+
+"${BEAMFORMER_OUTPUT}"

@@ -7,7 +7,6 @@
 #define DOA_ESTIMATOR_MIN_ENERGY   (4096)
 #define DOA_ESTIMATOR_SCORE_SCALE  (65535U)
 #define DOA_ESTIMATOR_MIN_PEAK_SCORE (12000U)
-#define DOA_ESTIMATOR_LAG_Q8_SCALE (256)
 #define DOA_ESTIMATOR_MIN_VECTOR_Q8 (48)
 #define DOA_ESTIMATOR_HISTORY_SAMPLES (480)
 #define DOA_ESTIMATOR_SMOOTH_NUMERATOR (3)
@@ -384,6 +383,8 @@ static void store_latest_state(const doa_estimator_state_t *next)
 {
     latest_state.sample_delay = next->sample_delay;
     latest_state.vertical_delay = next->vertical_delay;
+    latest_state.sample_delay_q8 = next->sample_delay_q8;
+    latest_state.vertical_delay_q8 = next->vertical_delay_q8;
     latest_state.angle_index = next->angle_index;
     latest_state.confidence = next->confidence;
     latest_state.flags = next->flags;
@@ -409,6 +410,7 @@ void doa_estimator_process_frame(const int32_t *mic0,
 
     if (next.energy >= DOA_ESTIMATOR_MIN_ENERGY && estimate.valid) {
         next.sample_delay = q8_delay_to_samples(estimate.lag_q8);
+        next.sample_delay_q8 = (int16_t)estimate.lag_q8;
         next.confidence = estimate.confidence;
         next.flags = DOA_ESTIMATOR_FLAG_VALID;
     }
@@ -490,6 +492,8 @@ void doa_estimator_process_frame_4(const int32_t *east,
         invalid_direction_frames = 0;
         next.sample_delay = q8_delay_to_samples(smoothed_ew_delay_q8);
         next.vertical_delay = q8_delay_to_samples(smoothed_ns_delay_q8);
+        next.sample_delay_q8 = (int16_t)smoothed_ew_delay_q8;
+        next.vertical_delay_q8 = (int16_t)smoothed_ns_delay_q8;
         next.angle_index = estimate_angle_index(
             smoothed_ew_delay_q8, smoothed_ns_delay_q8);
         next.confidence = confidence;
@@ -516,6 +520,8 @@ void doa_estimator_get_state(doa_estimator_state_t *state)
 
     state->sample_delay = latest_state.sample_delay;
     state->vertical_delay = latest_state.vertical_delay;
+    state->sample_delay_q8 = latest_state.sample_delay_q8;
+    state->vertical_delay_q8 = latest_state.vertical_delay_q8;
     state->angle_index = latest_state.angle_index;
     state->confidence = latest_state.confidence;
     state->flags = latest_state.flags;
