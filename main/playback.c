@@ -62,6 +62,7 @@ struct playback_pcm_sink {
     esp_err_t (*write)(void *ctx, const int16_t *stereo_frames, size_t frame_count);
     esp_err_t (*end)(void *ctx);
     uint8_t volume_percent;
+    volatile uint8_t *live_volume_percent;
 };
 
 typedef struct {
@@ -197,6 +198,9 @@ typedef struct {
     char *url;
     bool loop;
     uint8_t volume_percent;
+    volatile uint8_t *live_volume_percent;
+    uint64_t skip_frames_remaining;
+    uint64_t skipped_frames;
     volatile bool done;
     bool task_with_caps;
     esp_err_t result;
@@ -236,6 +240,7 @@ typedef struct {
     char prepare_reply_to[TATER_PLAYBACK_REQUEST_ID_MAX];
     char *media_url;
     uint8_t media_volume_percent;
+    uint32_t media_start_position_ms;
     tater_playback_channel_t media_channel;
     bool media_loop;
     bool complete_visual_state;
@@ -309,7 +314,10 @@ static uint8_t playback_sink_volume(playback_pcm_sink_t *sink)
     if (!sink) {
         return 100;
     }
-    return sink->volume_percent > 100 ? 100 : sink->volume_percent;
+    uint8_t volume = sink->live_volume_percent
+        ? *sink->live_volume_percent
+        : sink->volume_percent;
+    return volume > 100 ? 100 : volume;
 }
 
 static void playback_log_heap(const char *label)
@@ -2139,7 +2147,10 @@ static size_t scene_pcm_ring_read(
     return 0;
 }
 
-static bool scene_pcm_ring_wait_prebuffer(scene_pcm_ring_t *ring)
+static bool scene_pcm_ring_wait_prebuffer(
+    scene_pcm_ring_t *ring,
+    uint32_t timeout_ms
+)
 {
     if (!ring || !ring->lock) {
         return false;
@@ -2148,7 +2159,9 @@ static bool scene_pcm_ring_wait_prebuffer(scene_pcm_ring_t *ring)
     const size_t target_frames =
         ((size_t)TATER_SPK_SAMPLE_RATE * PLAYBACK_SCENE_PREBUFFER_MS) / 1000;
     TickType_t started = xTaskGetTickCount();
-    TickType_t timeout = pdMS_TO_TICKS(PLAYBACK_SCENE_PREBUFFER_TIMEOUT_MS);
+    TickType_t timeout = pdMS_TO_TICKS(
+        timeout_ms > 0 ? timeout_ms : PLAYBACK_SCENE_PREBUFFER_TIMEOUT_MS
+    );
     while (!s_abort) {
         xSemaphoreTake(ring->lock, portMAX_DELAY);
         size_t fill_frames = ring->fill_frames;
@@ -2194,14 +2207,42 @@ static void scene_pcm_ring_snapshot(
 
 static esp_err_t scene_background_sink_begin(void *ctx)
 {
-    scene_pcm_ring_t *ring = (scene_pcm_ring_t *)ctx;
-    return ring && !ring->stop ? ESP_OK : ESP_ERR_INVALID_STATE;
+    scene_background_args_t *request = (scene_background_args_t *)ctx;
+    return request && request->ring && !request->ring->stop
+        ? ESP_OK
+        : ESP_ERR_INVALID_STATE;
 }
 
 static esp_err_t scene_background_sink_end(void *ctx)
 {
     (void)ctx;
     return ESP_OK;
+}
+
+static esp_err_t scene_background_sink_write(
+    void *ctx,
+    const int16_t *stereo_frames,
+    size_t frame_count
+)
+{
+    scene_background_args_t *request = (scene_background_args_t *)ctx;
+    if (!request || !request->ring || !stereo_frames || frame_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t skip = request->skip_frames_remaining > frame_count
+        ? frame_count
+        : (size_t)request->skip_frames_remaining;
+    request->skip_frames_remaining -= skip;
+    request->skipped_frames += skip;
+    if (skip >= frame_count) {
+        return ESP_OK;
+    }
+    return scene_pcm_ring_write(
+        request->ring,
+        stereo_frames + (skip * TATER_SPK_CHANNELS),
+        frame_count - skip
+    );
 }
 
 static void scene_background_task(void *arg)
@@ -2212,11 +2253,12 @@ static void scene_background_task(void *arg)
 
     if (request && request->ring && request->url && request->url[0]) {
         playback_pcm_sink_t sink = {
-            .ctx = request->ring,
+            .ctx = request,
             .begin = scene_background_sink_begin,
-            .write = scene_pcm_ring_write,
+            .write = scene_background_sink_write,
             .end = scene_background_sink_end,
             .volume_percent = request->volume_percent,
+            .live_volume_percent = request->live_volume_percent,
         };
         do {
             err = stream_audio_url(request->url, &sink);
@@ -2594,7 +2636,10 @@ static void scene_task(void *arg)
                     free(background_request);
                     background_request = NULL;
                 } else {
-                    background_ready = scene_pcm_ring_wait_prebuffer(&background_ring);
+                    background_ready = scene_pcm_ring_wait_prebuffer(
+                        &background_ring,
+                        PLAYBACK_SCENE_PREBUFFER_TIMEOUT_MS
+                    );
                     if (!background_ready) {
                         ESP_LOGW(TAG, "audio scene background unavailable; playing foreground only");
                     }
@@ -2901,6 +2946,7 @@ static void media_session_task(void *arg)
     bool prepare_requested = false;
     bool complete_visual_state = false;
     bool tool_visual_state = false;
+    uint32_t start_position_ms = 0;
 
     if (!session || !session->lock || !session->media_url || !session->media_url[0]) {
         goto done;
@@ -2913,6 +2959,7 @@ static void media_session_task(void *arg)
     prepare_requested = session->prepare_requested;
     complete_visual_state = session->complete_visual_state;
     tool_visual_state = session->tool_visual_state;
+    start_position_ms = session->media_start_position_ms;
     xSemaphoreGive(session->lock);
     s_playing = true;
     playback_log_heap("media session start");
@@ -2932,6 +2979,9 @@ static void media_session_task(void *arg)
     session->media_decoder->url = strdup(session->media_url);
     session->media_decoder->loop = session->media_loop;
     session->media_decoder->volume_percent = session->media_volume_percent;
+    session->media_decoder->live_volume_percent = &session->media_volume_percent;
+    session->media_decoder->skip_frames_remaining =
+        ((uint64_t)start_position_ms * (uint64_t)TATER_SPK_SAMPLE_RATE) / 1000ULL;
     session->media_decoder->notify_task = xTaskGetCurrentTaskHandle();
     if (!session->media_decoder->url) {
         err = ESP_ERR_NO_MEM;
@@ -2953,7 +3003,19 @@ static void media_session_task(void *arg)
         goto done;
     }
 
-    if (!scene_pcm_ring_wait_prebuffer(&session->media_ring)) {
+    uint32_t media_prebuffer_timeout_ms = PLAYBACK_SCENE_PREBUFFER_TIMEOUT_MS;
+    if (start_position_ms > 0) {
+        uint64_t seek_timeout_ms =
+            (uint64_t)PLAYBACK_SCENE_PREBUFFER_TIMEOUT_MS
+            + ((uint64_t)start_position_ms / 15ULL);
+        media_prebuffer_timeout_ms = seek_timeout_ms > 60000ULL
+            ? 60000U
+            : (uint32_t)seek_timeout_ms;
+    }
+    if (!scene_pcm_ring_wait_prebuffer(
+            &session->media_ring,
+            media_prebuffer_timeout_ms
+        )) {
         err = session->media_decoder->done
             ? session->media_decoder->result
             : ESP_ERR_TIMEOUT;
@@ -3012,6 +3074,8 @@ static void media_session_task(void *arg)
     );
     started_reported = true;
     last_playhead_us = actual_start_us;
+    source_frames_written =
+        ((uint64_t)start_position_ms * (uint64_t)TATER_SPK_SAMPLE_RATE) / 1000ULL;
     ESP_LOGI(
         TAG,
         "media session started id=%s group=%s channel=%s scheduled=%" PRId64 " actual=%" PRId64,
@@ -3168,8 +3232,7 @@ static void media_session_task(void *arg)
 
         int64_t now_us = esp_timer_get_time();
         if (
-            group_id[0]
-            && now_us - last_playhead_us
+            now_us - last_playhead_us
                 >= ((int64_t)PLAYBACK_MEDIA_PLAYHEAD_INTERVAL_MS * 1000LL)
         ) {
             size_t buffered_frames = 0;
@@ -3289,6 +3352,7 @@ done:
         session->complete_visual_state = false;
         session->tool_visual_state = false;
         session->scheduled_start_us = 0;
+        session->media_start_position_ms = 0;
         session->pending_correction_frames = 0;
         session->source_frames = 0;
         session->output_frames = 0;
@@ -3556,6 +3620,7 @@ esp_err_t tater_playback_start_media_session(const tater_playback_media_session_
     );
     s_media_session.media_volume_percent =
         media->volume_percent > 100 ? 100 : media->volume_percent;
+    s_media_session.media_start_position_ms = media->start_position_ms;
     s_media_session.media_channel =
         media->channel <= TATER_PLAYBACK_CHANNEL_MONO
         ? media->channel
@@ -3655,6 +3720,32 @@ esp_err_t tater_playback_adjust_media_session(const char *session_id, int32_t co
         pending = -PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES;
     }
     s_media_session.pending_correction_frames = pending;
+    xSemaphoreGive(s_media_session.lock);
+    return ESP_OK;
+}
+
+esp_err_t tater_playback_set_media_session_volume(
+    const char *session_id,
+    uint8_t volume_percent
+)
+{
+    if (!s_media_session.lock) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (volume_percent > 100) {
+        volume_percent = 100;
+    }
+
+    xSemaphoreTake(s_media_session.lock, portMAX_DELAY);
+    if (
+        !s_media_session.active
+        || (session_id && session_id[0]
+            && strcmp(s_media_session.session_id, session_id) != 0)
+    ) {
+        xSemaphoreGive(s_media_session.lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_media_session.media_volume_percent = volume_percent;
     xSemaphoreGive(s_media_session.lock);
     return ESP_OK;
 }

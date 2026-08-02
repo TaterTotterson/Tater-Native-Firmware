@@ -153,8 +153,24 @@ persistent media session:
     "media": {
       "url": "https://example.test/song.mp3",
       "volume_percent": 100,
+      "start_position_ms": 0,
       "loop": false
     }
+  }
+}
+```
+
+`start_position_ms` optionally begins decoding at a requested track position.
+Tater uses it when the Music Core progress bar is moved or its rewind/forward
+controls are pressed. Active media-session volume can be changed without
+restarting the track:
+
+```json
+{
+  "type": "media.session.volume",
+  "payload": {
+    "session_id": "kitchen-song",
+    "volume_percent": 42
   }
 }
 ```

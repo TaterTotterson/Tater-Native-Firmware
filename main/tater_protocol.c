@@ -2168,10 +2168,12 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "stereo_channel_selection", true);
     cJSON_AddBoolToObject(caps, "media_playhead_telemetry", true);
     cJSON_AddBoolToObject(caps, "media_drift_correction", true);
+    cJSON_AddBoolToObject(caps, "media_session_volume", true);
+    cJSON_AddBoolToObject(caps, "media_session_start_position", true);
     cJSON_AddBoolToObject(caps, "synchronized_tts_overlays", true);
     cJSON_AddNumberToObject(caps, "media_sample_rate_hz", TATER_SPK_SAMPLE_RATE);
     cJSON_AddNumberToObject(caps, "audio_scene_version", 1);
-    cJSON_AddNumberToObject(caps, "audio_session_version", 2);
+    cJSON_AddNumberToObject(caps, "audio_session_version", 3);
     cJSON_AddItemToObject(payload, "capabilities", caps);
     send_json(root);
 }
@@ -2380,6 +2382,9 @@ static void handle_text_message(const char *data, int len)
         const cJSON *volume_item = cJSON_IsObject(media)
             ? cJSON_GetObjectItem(media, "volume_percent")
             : cJSON_GetObjectItem(payload, "volume_percent");
+        const cJSON *start_position_item = cJSON_IsObject(media)
+            ? cJSON_GetObjectItem(media, "start_position_ms")
+            : cJSON_GetObjectItem(payload, "start_position_ms");
         const cJSON *loop_item = cJSON_IsObject(media)
             ? cJSON_GetObjectItem(media, "loop")
             : cJSON_GetObjectItem(payload, "loop");
@@ -2427,6 +2432,12 @@ static void handle_text_message(const char *data, int len)
         bool tool_playback =
             strcasecmp(visual_mode, "tool_call") == 0
             || strcasecmp(state_after, "tool_call") == 0;
+        int64_t raw_start_position_ms = json_i64(start_position_item, 0);
+        uint32_t start_position_ms = raw_start_position_ms <= 0
+            ? 0
+            : (raw_start_position_ms > UINT32_MAX
+                ? UINT32_MAX
+                : (uint32_t)raw_start_position_ms);
 
         tater_playback_media_session_t media_session = {
             .session_id = session_id,
@@ -2434,6 +2445,7 @@ static void handle_text_message(const char *data, int len)
             .prepare_reply_to = prepare ? request_id : "",
             .url = url,
             .volume_percent = (uint8_t)json_u16_clamped(volume_item, 100, 100),
+            .start_position_ms = start_position_ms,
             .channel = media_channel_from_json(channel_item),
             .loop = loop,
             .prepare = prepare,
@@ -2485,6 +2497,25 @@ static void handle_text_message(const char *data, int len)
             request_id,
             commit_err == ESP_OK,
             commit_err == ESP_OK ? "" : esp_err_to_name(commit_err)
+        );
+    } else if (strcmp(type, "media.session.volume") == 0 && cJSON_IsObject(payload)) {
+        const cJSON *session_id_item = cJSON_GetObjectItem(payload, "session_id");
+        const cJSON *volume_item = cJSON_GetObjectItem(payload, "volume_percent");
+        const char *session_id =
+            cJSON_IsString(session_id_item) && session_id_item->valuestring
+            ? session_id_item->valuestring
+            : "";
+        uint8_t volume_percent =
+            (uint8_t)json_u16_clamped(volume_item, 100, 100);
+        esp_err_t volume_err = tater_playback_set_media_session_volume(
+            session_id,
+            volume_percent
+        );
+        send_simple_result(
+            "media.session.volume.result",
+            request_id,
+            volume_err == ESP_OK,
+            volume_err == ESP_OK ? "" : esp_err_to_name(volume_err)
         );
     } else if (strcmp(type, "media.session.adjust") == 0 && cJSON_IsObject(payload)) {
         const cJSON *session_id_item = cJSON_GetObjectItem(payload, "session_id");
