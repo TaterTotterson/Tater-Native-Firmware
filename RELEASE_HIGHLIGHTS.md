@@ -3,6 +3,6 @@
 - Makes satellite WebSocket playback more resilient by tolerating isolated JSON send failures and rate-limiting Sat1 button diagnostics that could otherwise flood the control connection during sustained audio.
 - Derives default device IDs and names from the selected hardware, reports a stable hardware ID, and repairs the legacy Voice PE default name on non-Voice PE boards.
 - Adds adaptive microphone-activity gating for steadier Voice PE and ReSpeaker direction LEDs, including noise-floor tracking and brief direction hold behavior.
-- Updates Sat1's embedded XMOS firmware to 1.1.0 with playback-aware talker locking, four-tap fractional-delay beamforming, per-microphone gain calibration, unhealthy-microphone fallback, and expanded DoA diagnostics.
+- Updates Sat1's embedded XMOS firmware to 1.1.0 with playback-aware talker locking, four-tap fractional-delay beamforming, per-microphone gain calibration, unhealthy-microphone fallback, and expanded DoA diagnostics. When a voice session begins, XMOS holds the initial speaker direction so the beamformer stays focused instead of chasing reflections or background noise; Sat1's directional LED shows where that active microphone beam is aimed.
 - Includes the Sat1 XMOS 1.1.0 production factory image and a separate lab-only four-channel raw USB microphone capture image with matching source and host tests.
 - Refreshes the embedded Hey Tater wake-word model.
