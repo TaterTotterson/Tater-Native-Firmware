@@ -12,6 +12,7 @@ idf_component_register(
         "boards/voice_pe/led_ring_voice_pe.c"
         "cache_storage.c"
         "doa_activity_gate.c"
+        "doa_direction_memory.c"
         "native_settings.c"
         "network_recovery.c"
         "ota_update.c"
@@ -53,14 +54,14 @@ target_add_binary_data(${COMPONENT_LIB} "models/stop.tflite" BINARY)
 if(TATER_NATIVE_BUILD_ENV STREQUAL "voicepe")
     target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "sat1")
-    target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_0_factory.bin" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "respeaker_xvf3800")
     target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "s3_box")
     message(STATUS "Building S3 Box target without XMOS firmware payload")
 else()
     target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin" BINARY)
-    target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_0_factory.bin" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin" BINARY)
     target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin" BINARY)
 endif()
 target_add_binary_data(${COMPONENT_LIB} "wake_sounds/blip2.wav" BINARY)

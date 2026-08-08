@@ -71,9 +71,11 @@ This source started from `FutureProofHomes/Satellite1-XMOS` at:
 86cf1ee Merge pull request #106 from FutureProofHomes/align_branches
 ```
 
-Version 1.1.0 includes the Sat1 four-microphone DoA estimator, playback-aware
-talker locking, a four-tap fractional-delay beamformer, slow per-microphone gain
+Version 1.1.1 includes the Sat1 four-microphone DoA estimator, host-controlled
+steering modes, a four-tap fractional-delay beamformer, slow per-microphone gain
 calibration, failed/noisy/clipping microphone fallback, and extended device
-control diagnostics. The steered beam is generated before the existing
-two-channel AEC because the bundled XMOS voice library supports at most two
-microphone channels; its second microphone-side channel remains an omni mix.
+control diagnostics. Production firmware continuously follows valid talker
+directions and requests omni steering while speaker playback is active. The
+steered beam is generated before the existing two-channel AEC because the
+bundled XMOS voice library supports at most two microphone channels; its second
+microphone-side channel remains an omni mix.

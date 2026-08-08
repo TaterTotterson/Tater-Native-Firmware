@@ -1,8 +1,4 @@
-- Updates Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box to firmware version 0.3.5.
-- Replaces abrupt synchronized-playback frame drops/repeats with gradual rate slewing, and adds automatic underrun rebuffering, timeline rejoining, a short recovery fade, and recovery telemetry.
-- Makes satellite WebSocket playback more resilient by tolerating isolated JSON send failures and rate-limiting Sat1 button diagnostics that could otherwise flood the control connection during sustained audio.
-- Derives default device IDs and names from the selected hardware, reports a stable hardware ID, and repairs the legacy Voice PE default name on non-Voice PE boards.
-- Adds adaptive microphone-activity gating for steadier Voice PE and ReSpeaker direction LEDs, including noise-floor tracking and brief direction hold behavior.
-- Updates Sat1's embedded XMOS firmware to 1.1.0 with playback-aware talker locking, four-tap fractional-delay beamforming, per-microphone gain calibration, unhealthy-microphone fallback, and expanded DoA diagnostics. When a voice session begins, XMOS holds the initial speaker direction so the beamformer stays focused instead of chasing reflections or background noise; Sat1's directional LED shows where that active microphone beam is aimed.
-- Includes the Sat1 XMOS 1.1.0 production factory image and a separate lab-only four-channel raw USB microphone capture image with matching source and host tests.
-- Refreshes the embedded Hey Tater wake-word model.
+- Updates Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box to firmware version 0.3.6.
+- Restores continuous Sat1 talker tracking during voice sessions so a moving user, or an initially incorrect direction estimate, can be followed and corrected. Sat1 uses omni steering while its speaker is active instead of freezing an old beam direction.
+- Aims the sound-reactive voice-ring reply animation toward the direction observed most often during the user's listening turn. Short DoA jumps contribute too few votes to move the reply direction.
+- Updates Sat1's bundled production XMOS image and OTA target to version 1.1.1. The lab-only raw four-channel USB image remains a separate testing and calibration tool and is not used for device updates.

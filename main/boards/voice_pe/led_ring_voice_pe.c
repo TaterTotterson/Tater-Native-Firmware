@@ -6,6 +6,7 @@
 
 #include "audio_i2s.h"
 #include "board.h"
+#include "doa_direction_memory.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -61,6 +62,7 @@ static float s_direction_scores[TATER_LED_COUNT];
 static int s_listening_dominant_led = TATER_LED_COUNT / 2;
 static int64_t s_listening_last_update_us;
 static int64_t s_listening_last_valid_us;
+static tater_doa_direction_memory_t s_reply_direction;
 
 #if TATER_BOARD_SAT1
 #define SAT1_DOA_MIN_CONFIDENCE (12)
@@ -408,6 +410,18 @@ static bool current_doa_position(float *position, uint8_t *confidence)
         *confidence = doa.confidence;
     }
     return true;
+}
+
+static void remember_listening_direction(void)
+{
+    float position = 0.0f;
+    uint8_t confidence = 0;
+    if (current_doa_position(&position, &confidence)) {
+        tater_doa_direction_memory_observe(
+            &s_reply_direction,
+            position,
+            confidence);
+    }
 }
 
 static void directional_listening(rgb_t color)
@@ -782,6 +796,12 @@ static void equalizer(uint32_t tick, rgb_t color)
 static void replying(uint32_t tick, rgb_t color)
 {
     int center = TATER_LED_COUNT / 2;
+    uint8_t reply_direction = (uint8_t)center;
+    if (tater_doa_direction_memory_dominant(
+            &s_reply_direction,
+            &reply_direction)) {
+        center = reply_direction;
+    }
     float audio_level = tater_audio_speaker_level() * 5.5f;
     if (audio_level > 1.0f) {
         audio_level = 1.0f;
@@ -806,7 +826,7 @@ static void replying(uint32_t tick, rgb_t color)
     float alpha = target_radius > s_speaking_radius ? 0.45f : 0.20f;
     s_speaking_radius += (target_radius - s_speaking_radius) * alpha;
 
-    int sweep = (tick / 2) % TATER_LED_COUNT;
+    int sweep = (center + (int)(tick / 2)) % TATER_LED_COUNT;
 
     for (int i = 0; i < TATER_LED_COUNT; i++) {
         int dist = ring_distance(i, center);
@@ -1098,6 +1118,22 @@ static void render(void)
         s_listening_last_update_us = 0;
         s_listening_last_valid_us = 0;
         memset(s_thinking_levels, 0, sizeof(s_thinking_levels));
+        if (s_state == TATER_STATE_LISTENING ||
+            s_state == TATER_STATE_IDLE ||
+            s_state == TATER_STATE_DISCONNECTED ||
+            s_state == TATER_STATE_PROVISIONING ||
+            s_state == TATER_STATE_TIMER ||
+            s_state == TATER_STATE_OTA ||
+            s_state == TATER_STATE_ERROR) {
+            tater_doa_direction_memory_reset(
+                &s_reply_direction,
+                TATER_LED_COUNT,
+                TATER_LED_COUNT / 2);
+        }
+    }
+
+    if (s_state == TATER_STATE_LISTENING) {
+        remember_listening_direction();
     }
 
     if (render_setup_reset_feedback()) {

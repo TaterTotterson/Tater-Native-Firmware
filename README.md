@@ -259,6 +259,8 @@ center TTS on grouped members together.
 - Directional listening animation from XMOS DoA where available, with adaptive
   speech/noise gating, confidence filtering, a brief direction hold, and a
   neutral listening state when no active talker is detected
+- Sound-reactive voice-ring replies aim toward the direction observed most
+  often during the preceding listening turn
 - Tool-call visual hold until the final response
 - Display targets render Tater state, clock/date, assistant name, volume/mute,
   and Tater-provided status/stat cards instead of LED-ring animations
@@ -301,10 +303,11 @@ Satellite1 / Sat1:
 - PCM5122/TAS2780 speaker path setup
 - FUSB302B USB-C PD setup path
 - Four-microphone XMOS DoA estimation with noise calibration, confidence
-  filtering, playback-aware talker locking, fractional-delay beamforming,
+  filtering, continuous talker tracking, playback omni fallback,
+  fractional-delay beamforming,
   per-microphone gain calibration, unhealthy-microphone fallback, and expanded
   firmware/diagnostic reporting
-- XMOS firmware auto-update to `1.1.0` when the installed version differs
+- XMOS firmware auto-update to `1.1.1` when the installed version differs
 - Lab-only four-channel raw USB microphone capture image for independent mic
   measurement; this diagnostic image is not embedded in normal Sat1 firmware
 - Line-out capability advertised to Tater
@@ -340,7 +343,7 @@ ESP32-S3-BOX-3 Display:
 
 - M4A/AAC and OGG/Vorbis are intentionally not included until there is a real
   need for them.
-- A Sat1 boot that must install or recover XMOS `1.1.0` can take about 20
+- A Sat1 boot that must install or recover XMOS `1.1.1` can take about 20
   seconds before the satellite connects. Later boots verify the version and
   skip reflashing.
 - S3 Box display feed depends on Tater being reachable; the display falls back

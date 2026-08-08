@@ -30,8 +30,8 @@
 
 static const char *TAG = "tater_audio_sat1";
 
-extern const uint8_t _binary_sat1_xmos_1_1_0_factory_bin_start[] asm("_binary_sat1_xmos_1_1_0_factory_bin_start");
-extern const uint8_t _binary_sat1_xmos_1_1_0_factory_bin_end[] asm("_binary_sat1_xmos_1_1_0_factory_bin_end");
+extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_start[] asm("_binary_sat1_xmos_1_1_1_factory_bin_start");
+extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_end[] asm("_binary_sat1_xmos_1_1_1_factory_bin_end");
 
 #define TATER_I2C_PORT I2C_NUM_0
 #define SAT1_SPI_HOST SPI2_HOST
@@ -53,14 +53,12 @@ extern const uint8_t _binary_sat1_xmos_1_1_0_factory_bin_end[] asm("_binary_sat1
 #define SAT1_DOA_DIAGNOSTICS_PAYLOAD_LEN 48
 #define SAT1_DOA_FLAG_VALID (1u << 0)
 #define SAT1_DOA_FLAG_FOUR_MIC (1u << 1)
-#define SAT1_DOA_CONTROL_PLAYBACK_ACTIVE (1u << 0)
-#define SAT1_DOA_CONTROL_VOICE_LOCK (1u << 1)
-#define SAT1_DOA_VOICE_LOCK_HOLD_US 1200000
+#define SAT1_DOA_CONTROL_FORCE_OMNI (1u << 2)
 #define SAT1_DOA_CONTROL_HEARTBEAT_US 1000000
 #define SAT1_DOA_PLAYBACK_LEVEL_THRESHOLD 0.004f
 #define SAT1_XMOS_TARGET_MAJOR 1
 #define SAT1_XMOS_TARGET_MINOR 1
-#define SAT1_XMOS_TARGET_PATCH 0
+#define SAT1_XMOS_TARGET_PATCH 1
 #define SAT1_XMOS_TARGET_PRERELEASE 0
 #define SAT1_XMOS_TARGET_COUNTER 0
 #define SAT1_XMOS_VERSION_READY_TIMEOUT_MS 8000
@@ -139,7 +137,7 @@ static int16_t read_i16_le(const uint8_t *payload)
 
 static size_t sat1_xmos_target_image_size(void)
 {
-    return (size_t)(_binary_sat1_xmos_1_1_0_factory_bin_end - _binary_sat1_xmos_1_1_0_factory_bin_start);
+    return (size_t)(_binary_sat1_xmos_1_1_1_factory_bin_end - _binary_sat1_xmos_1_1_1_factory_bin_start);
 }
 
 static esp_err_t speaker_session_take(void)
@@ -941,7 +939,7 @@ static void sat1_xmos_set_flash_progress(size_t done, size_t total, uint8_t *las
 
 static esp_err_t sat1_xmos_flash_target_image(void)
 {
-    const uint8_t *image = _binary_sat1_xmos_1_1_0_factory_bin_start;
+    const uint8_t *image = _binary_sat1_xmos_1_1_1_factory_bin_start;
     const size_t image_size = sat1_xmos_target_image_size();
     ESP_RETURN_ON_FALSE(image && image_size > 0, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image missing");
     ESP_RETURN_ON_FALSE(image_size <= SAT1_XMOS_FLASH_TOTAL_SIZE, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image too large");
@@ -1158,21 +1156,11 @@ static esp_err_t sat1_sync_doa_control(int64_t now_us)
 {
     static uint8_t last_sent_flags = 0xff;
     static int64_t last_send_us;
-    static int64_t voice_lock_until_us;
-
-    bool voice_active = tater_protocol_voice_active() &&
-                        tater_protocol_is_connected();
-    if (voice_active) {
-        voice_lock_until_us = now_us + SAT1_DOA_VOICE_LOCK_HOLD_US;
-    }
 
     uint8_t flags = 0;
     if (s_speaker_enabled &&
         tater_audio_speaker_level() >= SAT1_DOA_PLAYBACK_LEVEL_THRESHOLD) {
-        flags |= SAT1_DOA_CONTROL_PLAYBACK_ACTIVE;
-    }
-    if (voice_active || now_us < voice_lock_until_us) {
-        flags |= SAT1_DOA_CONTROL_VOICE_LOCK;
+        flags |= SAT1_DOA_CONTROL_FORCE_OMNI;
     }
 
     bool heartbeat_due = last_send_us == 0 ||

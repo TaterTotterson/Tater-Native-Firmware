@@ -17,11 +17,11 @@ Current status:
 - four-microphone XMOS DoA estimation with adaptive room-noise calibration,
   confidence filtering, and directional smoothing
 - four-microphone fractional-delay, delay-and-sum beamforming steered by the
-  XMOS DoA estimate, with smooth direction changes and an automatic omni
-  fallback when speech direction is unavailable
+  XMOS DoA estimate, with continuous direction tracking, per-microphone gain
+  calibration and health fallback, and automatic omni steering during playback
 - directional LEDs reject weak/noise-only updates, hold the last speech
   direction briefly, and then return to a neutral listening glow
-- bundled XMOS factory image `1.0.9`
+- bundled production XMOS factory image `1.1.1`
 - boot-time XMOS auto-update when the installed image does not match the bundled image
 - line-out capability advertised to Tater
 - firmware-side AEC shared with Voice PE
