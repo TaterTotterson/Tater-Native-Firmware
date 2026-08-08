@@ -9,12 +9,23 @@
 typedef struct {
     int16_t sample_delay;
     int16_t vertical_delay;
+    int16_t sample_delay_q8;
+    int16_t vertical_delay_q8;
+    int16_t beam_delay_q8[4];
+    uint16_t mic_gain_q15[4];
     uint8_t confidence;
     uint8_t angle_index;
+    uint8_t control_flags;
+    uint8_t mode_flags;
+    uint8_t active_mic_mask;
+    uint8_t signal_active;
+    uint8_t mic_health_flags[4];
     bool valid;
     bool four_mic;
     uint32_t energy;
+    uint32_t noise_floor_energy;
     uint32_t mic_energy[4];
+    uint32_t mic_level[4];
     uint32_t frame_counter;
     uint32_t age_ms;
 } tater_audio_doa_t;

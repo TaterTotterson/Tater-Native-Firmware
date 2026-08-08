@@ -29,6 +29,15 @@ static uint8_t invalid_direction_frames;
 static uint32_t noise_floor_energy;
 static uint8_t noise_calibration_frames;
 static uint8_t signal_energy_active;
+static volatile uint8_t requested_control_flags;
+static volatile uint8_t active_mic_mask = 0x0f;
+static int16_t held_ew_delay_q8;
+static int16_t held_ns_delay_q8;
+static uint8_t held_angle_index;
+static uint8_t held_confidence;
+static uint8_t steering_lock_valid;
+static uint8_t playback_freeze_valid;
+static uint8_t steering_mode_flags;
 
 typedef struct {
     int lag;
@@ -138,17 +147,25 @@ static uint32_t mic_energy(const int32_t *mic, size_t frame_count)
 }
 
 static uint32_t mean_four_mic_energy(const uint32_t mic_energy_values[4],
-                                     size_t frame_count)
+                                     size_t frame_count,
+                                     uint8_t mic_mask)
 {
     if (frame_count == 0) {
         return 0;
     }
 
-    uint64_t total = (uint64_t)mic_energy_values[0] +
-                     (uint64_t)mic_energy_values[1] +
-                     (uint64_t)mic_energy_values[2] +
-                     (uint64_t)mic_energy_values[3];
-    uint64_t mean = total / ((uint64_t)frame_count * 4U);
+    uint64_t total = 0;
+    uint32_t count = 0;
+    for (size_t mic = 0; mic < 4; mic++) {
+        if ((mic_mask & (1u << mic)) != 0) {
+            total += mic_energy_values[mic];
+            count++;
+        }
+    }
+    if (count == 0) {
+        return 0;
+    }
+    uint64_t mean = total / ((uint64_t)frame_count * count);
     return mean > UINT32_MAX ? UINT32_MAX : (uint32_t)mean;
 }
 
@@ -379,6 +396,103 @@ static uint8_t direction_confidence(const pair_estimate_t *ew,
     return (uint8_t)(weighted / total_weight);
 }
 
+static void clear_published_direction(doa_estimator_state_t *state)
+{
+    state->sample_delay = 0;
+    state->vertical_delay = 0;
+    state->sample_delay_q8 = 0;
+    state->vertical_delay_q8 = 0;
+    state->angle_index = 12;
+    state->confidence = 0;
+    state->flags &= (uint8_t)~(DOA_ESTIMATOR_FLAG_VALID |
+                               DOA_ESTIMATOR_FLAG_LOCKED |
+                               DOA_ESTIMATOR_FLAG_PLAYBACK);
+}
+
+static void capture_held_direction(const doa_estimator_state_t *state)
+{
+    held_ew_delay_q8 = state->sample_delay_q8;
+    held_ns_delay_q8 = state->vertical_delay_q8;
+    held_angle_index = state->angle_index;
+    held_confidence = state->confidence;
+}
+
+static void publish_held_direction(doa_estimator_state_t *state,
+                                   uint8_t state_flag)
+{
+    state->sample_delay_q8 = held_ew_delay_q8;
+    state->vertical_delay_q8 = held_ns_delay_q8;
+    state->sample_delay = q8_delay_to_samples(held_ew_delay_q8);
+    state->vertical_delay = q8_delay_to_samples(held_ns_delay_q8);
+    state->angle_index = held_angle_index;
+    state->confidence = held_confidence;
+    state->flags |= DOA_ESTIMATOR_FLAG_VALID | state_flag;
+}
+
+static uint8_t capture_latest_or_candidate(
+    const doa_estimator_state_t *candidate)
+{
+    if ((latest_state.flags & DOA_ESTIMATOR_FLAG_VALID) != 0 &&
+        (latest_state.flags & DOA_ESTIMATOR_FLAG_FOUR_MIC) != 0) {
+        doa_estimator_state_t previous = {0};
+        previous.sample_delay_q8 = latest_state.sample_delay_q8;
+        previous.vertical_delay_q8 = latest_state.vertical_delay_q8;
+        previous.angle_index = latest_state.angle_index;
+        previous.confidence = latest_state.confidence;
+        capture_held_direction(&previous);
+        return 1;
+    }
+    if ((candidate->flags & DOA_ESTIMATOR_FLAG_VALID) != 0) {
+        capture_held_direction(candidate);
+        return 1;
+    }
+    return 0;
+}
+
+static void apply_steering_control(doa_estimator_state_t *next)
+{
+    uint8_t control = requested_control_flags &
+                      DOA_ESTIMATOR_CONTROL_MASK;
+    steering_mode_flags = 0;
+
+    if ((control & DOA_ESTIMATOR_CONTROL_FORCE_OMNI) != 0) {
+        steering_lock_valid = 0;
+        playback_freeze_valid = 0;
+        steering_mode_flags = DOA_ESTIMATOR_MODE_FORCE_OMNI;
+        clear_published_direction(next);
+        return;
+    }
+
+    if ((control & DOA_ESTIMATOR_CONTROL_VOICE_LOCK) != 0) {
+        playback_freeze_valid = 0;
+        if (!steering_lock_valid) {
+            steering_lock_valid = capture_latest_or_candidate(next);
+        }
+        if (steering_lock_valid) {
+            steering_mode_flags = DOA_ESTIMATOR_MODE_LOCKED;
+            publish_held_direction(next, DOA_ESTIMATOR_FLAG_LOCKED);
+        }
+        return;
+    }
+    steering_lock_valid = 0;
+
+    if ((control & DOA_ESTIMATOR_CONTROL_PLAYBACK_ACTIVE) != 0) {
+        if (!playback_freeze_valid) {
+            playback_freeze_valid = capture_latest_or_candidate(next);
+        }
+        steering_mode_flags = DOA_ESTIMATOR_MODE_PLAYBACK_FROZEN;
+        if (playback_freeze_valid) {
+            publish_held_direction(next, DOA_ESTIMATOR_FLAG_PLAYBACK);
+        } else {
+            clear_published_direction(next);
+            next->flags |= DOA_ESTIMATOR_FLAG_PLAYBACK;
+        }
+        return;
+    }
+
+    playback_freeze_valid = 0;
+}
+
 static void store_latest_state(const doa_estimator_state_t *next)
 {
     latest_state.sample_delay = next->sample_delay;
@@ -437,8 +551,12 @@ void doa_estimator_process_frame_4(const int32_t *east,
     next.angle_index = 12;
     next.flags = DOA_ESTIMATOR_FLAG_FOUR_MIC;
 
+    uint8_t mic_mask = active_mic_mask;
+    if (mic_mask == 0) {
+        mic_mask = 0x0f;
+    }
     uint32_t frame_energy =
-        mean_four_mic_energy(next.mic_energy, frame_count);
+        mean_four_mic_energy(next.mic_energy, frame_count, mic_mask);
     if (!four_mic_signal_present(frame_energy)) {
         /*
          * Never mix low-level room noise into the correlation history. The
@@ -454,16 +572,23 @@ void doa_estimator_process_frame_4(const int32_t *east,
             smoothed_ew_delay_q8 = 0;
             smoothed_ns_delay_q8 = 0;
         }
+        apply_steering_control(&next);
         store_latest_state(&next);
         return;
     }
 
     size_t history_count = append_four_mic_history(
         east, west, north, south, frame_count);
-    pair_estimate_t ew = estimate_pair(
-        four_mic_history[0], four_mic_history[1], history_count);
-    pair_estimate_t ns = estimate_pair(
-        four_mic_history[2], four_mic_history[3], history_count);
+    pair_estimate_t ew = {0};
+    pair_estimate_t ns = {0};
+    if ((mic_mask & 0x03u) == 0x03u) {
+        ew = estimate_pair(
+            four_mic_history[0], four_mic_history[1], history_count);
+    }
+    if ((mic_mask & 0x0cu) == 0x0cu) {
+        ns = estimate_pair(
+            four_mic_history[2], four_mic_history[3], history_count);
+    }
 
     int ew_delay_q8 = ew.valid ? ew.lag_q8 : 0;
     int ns_delay_q8 = ns.valid ? ns.lag_q8 : 0;
@@ -509,6 +634,7 @@ void doa_estimator_process_frame_4(const int32_t *east,
         }
     }
 
+    apply_steering_control(&next);
     store_latest_state(&next);
 }
 
@@ -530,6 +656,33 @@ void doa_estimator_get_state(doa_estimator_state_t *state)
     memcpy(state->mic_energy, (const void *)latest_state.mic_energy, sizeof(state->mic_energy));
 }
 
+void doa_estimator_get_diagnostics(doa_estimator_diagnostics_t *diagnostics)
+{
+    if (diagnostics == NULL) {
+        return;
+    }
+
+    diagnostics->steering_delay_q8 = latest_state.sample_delay_q8;
+    diagnostics->vertical_steering_delay_q8 = latest_state.vertical_delay_q8;
+    diagnostics->noise_floor_energy = noise_floor_energy;
+    diagnostics->signal_active = signal_energy_active;
+    diagnostics->control_flags = requested_control_flags &
+                                 DOA_ESTIMATOR_CONTROL_MASK;
+    diagnostics->mode_flags = steering_mode_flags;
+    diagnostics->active_mic_mask = active_mic_mask;
+}
+
+void doa_estimator_set_control(uint8_t control_flags)
+{
+    requested_control_flags = control_flags & DOA_ESTIMATOR_CONTROL_MASK;
+}
+
+void doa_estimator_set_mic_health(uint8_t mic_mask)
+{
+    mic_mask &= 0x0f;
+    active_mic_mask = mic_mask != 0 ? mic_mask : 0x0f;
+}
+
 void doa_estimator_reset(void)
 {
     memset((void *)&latest_state, 0, sizeof(latest_state));
@@ -542,4 +695,13 @@ void doa_estimator_reset(void)
     noise_floor_energy = 0;
     noise_calibration_frames = 0;
     signal_energy_active = 0;
+    requested_control_flags = 0;
+    active_mic_mask = 0x0f;
+    held_ew_delay_q8 = 0;
+    held_ns_delay_q8 = 0;
+    held_angle_index = 12;
+    held_confidence = 0;
+    steering_lock_valid = 0;
+    playback_freeze_valid = 0;
+    steering_mode_flags = 0;
 }

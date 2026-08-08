@@ -9,6 +9,7 @@
 
 #include "audio_aec.h"
 #include "board.h"
+#include "doa_activity_gate.h"
 #include "driver/i2c.h"
 #include "driver/i2s_std.h"
 #include "esp_check.h"
@@ -82,6 +83,7 @@ extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_end[] asm("_binary_xvf3800_i2
 #define RESPEAKER_XVF_WAKE_DIAG_INTERVAL_US 2000000
 #define RESPEAKER_XVF_DOA_READ_ATTEMPTS 8
 #define RESPEAKER_XVF_DOA_LED_OFFSET 5
+#define RESPEAKER_XVF_ACTIVITY_FRESH_US 250000
 
 static i2s_chan_handle_t s_rx_chan;
 static i2s_chan_handle_t s_tx_chan;
@@ -101,6 +103,11 @@ static tater_audio_doa_t s_doa;
 static int64_t s_doa_update_us;
 static uint32_t s_doa_failed_reads;
 static uint32_t s_doa_frame_counter;
+static tater_doa_activity_gate_t s_mic_activity_gate;
+static bool s_mic_signal_active;
+static uint32_t s_mic_mean_abs;
+static uint32_t s_mic_noise_floor;
+static int64_t s_mic_activity_update_us;
 static portMUX_TYPE s_xmos_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static tater_audio_xmos_status_t s_xmos_status = {
     .target_major = XVF_TARGET_MAJOR,
@@ -556,12 +563,31 @@ static esp_err_t xvf_read_doa(tater_audio_doa_t *out)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
+    bool signal_active = false;
+    uint32_t mic_mean_abs = 0;
+    uint32_t noise_floor = 0;
+    int64_t activity_update_us = 0;
+    portENTER_CRITICAL(&s_doa_lock);
+    signal_active = s_mic_signal_active;
+    mic_mean_abs = s_mic_mean_abs;
+    noise_floor = s_mic_noise_floor;
+    activity_update_us = s_mic_activity_update_us;
+    portEXIT_CRITICAL(&s_doa_lock);
+
+    int64_t now_us = esp_timer_get_time();
+    bool activity_fresh = activity_update_us > 0 &&
+                          now_us >= activity_update_us &&
+                          now_us - activity_update_us <=
+                              RESPEAKER_XVF_ACTIVITY_FRESH_US;
+
     memset(out, 0, sizeof(*out));
-    out->valid = true;
+    out->valid = signal_active && activity_fresh;
     out->four_mic = true;
-    out->confidence = 32;
+    out->confidence = out->valid ? 32 : 0;
     out->angle_index = value.angle_index;
-    out->energy = 1;
+    out->energy = mic_mean_abs;
+    out->noise_floor_energy = noise_floor;
+    out->signal_active = out->valid;
     out->frame_counter = ++s_doa_frame_counter;
     return ESP_OK;
 }
@@ -650,6 +676,13 @@ esp_err_t tater_audio_i2s_init(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(xvf_configure_runtime_gpo());
     ESP_RETURN_ON_ERROR(i2s_init_duplex(), TAG, "i2s init failed");
     tater_audio_aec_init();
+    tater_doa_activity_gate_reset(&s_mic_activity_gate);
+    portENTER_CRITICAL(&s_doa_lock);
+    s_mic_signal_active = false;
+    s_mic_mean_abs = 0;
+    s_mic_noise_floor = 0;
+    s_mic_activity_update_us = 0;
+    portEXIT_CRITICAL(&s_doa_lock);
     return ESP_OK;
 }
 
@@ -704,6 +737,25 @@ static void mic_level_stats(const int16_t *samples, size_t count, uint32_t *peak
     if (mean_out) {
         *mean_out = count ? (uint32_t)(sum / count) : 0;
     }
+}
+
+static void update_doa_mic_activity(uint32_t peak, uint32_t mean_abs)
+{
+    bool signal_active = tater_doa_activity_gate_update(
+        &s_mic_activity_gate,
+        peak,
+        mean_abs
+    );
+    uint32_t noise_floor =
+        tater_doa_activity_gate_noise_floor(&s_mic_activity_gate);
+    int64_t now_us = esp_timer_get_time();
+
+    portENTER_CRITICAL(&s_doa_lock);
+    s_mic_signal_active = signal_active;
+    s_mic_mean_abs = mean_abs;
+    s_mic_noise_floor = noise_floor;
+    s_mic_activity_update_us = now_us;
+    portEXIT_CRITICAL(&s_doa_lock);
 }
 
 static float clamp_audio_level(float level)
@@ -800,10 +852,15 @@ static void audio_task(void *arg)
 
         uint32_t wake_peak = 0;
         uint32_t wake_mean = 0;
+        mic_level_stats(wake_mono, out_frames, &wake_peak, &wake_mean);
+
+        if (active) {
+            tater_audio_aec_process_mic(stream_mono, out_frames);
+        }
         uint32_t stream_peak = 0;
         uint32_t stream_mean = 0;
-        mic_level_stats(wake_mono, out_frames, &wake_peak, &wake_mean);
         mic_level_stats(stream_mono, out_frames, &stream_peak, &stream_mean);
+        update_doa_mic_activity(stream_peak, stream_mean);
 
         tater_wake_engine_note_audio(wake_mono, out_frames);
         if (!active) {
@@ -824,7 +881,6 @@ static void audio_task(void *arg)
         }
 
         if (active) {
-            tater_audio_aec_process_mic(stream_mono, out_frames);
             if (active_chunks < 3) {
                 ESP_LOGI(
                     TAG,

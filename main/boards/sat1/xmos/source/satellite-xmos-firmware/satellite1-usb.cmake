@@ -23,6 +23,8 @@ foreach(FFVA_PL_CFG ${FFVA_FD_PIPELINE_CONFIGS})
         appconfUSB_AUDIO_ENABLED=1
         appconfUSB_AUDIO_MODE=1
         appconfUSB_CDC_ENABLED=1
+        appconfAUDIO_PIPELINE_CHANNELS=2
+        appconfUSB_AUDIO_RAW_MIC_CAPTURE=0
         
         appconfAEC_REF_DEFAULT=appconfAEC_REF_USB
         appconfI2S_MODE=appconfI2S_MODE_MASTER
@@ -212,3 +214,79 @@ foreach(FFVA_PL_CFG ${FFVA_FD_PIPELINE_CONFIGS})
 
     unset(DATA_PARTITION_FILE_LIST)
 endforeach()
+
+#******************************************************************************
+# Raw four-microphone USB capture harness
+#
+# This target intentionally bypasses AEC/NS/AGC and publishes four 16 kHz,
+# 16-bit channels in E, W, N, S order. It is a lab image, separate from the
+# production fixed-delay image and its two-channel AEC constraint.
+#******************************************************************************
+set(SAT1_RAW4_TARGET satellite1_usb_firmware_raw4)
+set(SAT1_RAW4_COMPILE_DEFINITIONS
+    ${APP_COMPILE_DEFINITIONS}
+    appconfDEVICE_CTRL_SPI=0
+    appconfEXTERNAL_MCLK=0
+    appconfI2S_ENABLED=1
+    appconfUSB_ENABLED=1
+    appconfUSB_AUDIO_ENABLED=1
+    appconfUSB_AUDIO_MODE=1
+    appconfUSB_AUDIO_RAW_MIC_CAPTURE=1
+    appconfUSB_CDC_ENABLED=1
+    appconfAEC_REF_DEFAULT=appconfAEC_REF_USB
+    appconfI2S_MODE=appconfI2S_MODE_MASTER
+    appconfI2S_AUDIO_SAMPLE_RATE=16000
+    appconfAUDIO_SPK_PL_SR_FACTOR=1
+    appconfAUDIO_PIPELINE_CHANNELS=4
+    appconfPIPELINE_BYPASS=1
+)
+
+foreach(SAT1_RAW4_TILE 0 1)
+    set(SAT1_RAW4_TILE_TARGET tile${SAT1_RAW4_TILE}_${SAT1_RAW4_TARGET})
+    add_executable(${SAT1_RAW4_TILE_TARGET} EXCLUDE_FROM_ALL)
+    target_sources(${SAT1_RAW4_TILE_TARGET} PUBLIC ${APP_SOURCES})
+    target_include_directories(${SAT1_RAW4_TILE_TARGET} PUBLIC ${APP_INCLUDES})
+    target_compile_definitions(${SAT1_RAW4_TILE_TARGET}
+        PUBLIC
+            ${SAT1_RAW4_COMPILE_DEFINITIONS}
+            THIS_XCORE_TILE=${SAT1_RAW4_TILE}
+    )
+    target_compile_options(${SAT1_RAW4_TILE_TARGET} PRIVATE ${APP_COMPILER_FLAGS})
+    target_link_libraries(${SAT1_RAW4_TILE_TARGET}
+        PUBLIC
+            ${APP_COMMON_LINK_LIBRARIES}
+            fph::ffva::satellite1-usb
+            fph::ffva::ap::empty
+            sln_voice::app::ffva::sp::passthrough
+    )
+    target_link_options(${SAT1_RAW4_TILE_TARGET} PRIVATE ${APP_LINK_OPTIONS})
+endforeach()
+
+set(VERSIONING_CMD "build")
+if(USE_DEV_TRACKING)
+    list(APPEND VERSIONING_CMD "--track")
+endif()
+add_custom_target(${SAT1_RAW4_TARGET}_versioning
+    COMMAND ${Python3_EXECUTABLE} ${VERSIONING_SCRIPT} ${VERSIONING_CMD} ${SAT1_RAW4_TARGET}
+    COMMENT "Running versioning.py build ${SAT1_RAW4_TARGET}"
+    VERBATIM
+)
+add_dependencies(tile0_${SAT1_RAW4_TARGET} ${SAT1_RAW4_TARGET}_versioning)
+add_dependencies(tile1_${SAT1_RAW4_TARGET} ${SAT1_RAW4_TARGET}_versioning)
+
+merge_binaries(${SAT1_RAW4_TARGET}
+               tile0_${SAT1_RAW4_TARGET}
+               tile1_${SAT1_RAW4_TARGET}
+               1)
+create_run_target(${SAT1_RAW4_TARGET})
+create_debug_target(${SAT1_RAW4_TARGET})
+create_upgrade_img_target(${SAT1_RAW4_TARGET}
+                          ${XTC_VERSION_MAJOR}
+                          ${XTC_VERSION_MINOR})
+create_flash_image_target(
+    #[[ Target ]]              ${SAT1_RAW4_TARGET}
+    #[[ Boot Partition Size ]] 0x100000
+)
+
+unset(SAT1_RAW4_COMPILE_DEFINITIONS)
+unset(SAT1_RAW4_TARGET)

@@ -1,13 +1,8 @@
-- Updates Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box to firmware
-  version 0.3.4.
-- Adds live volume changes for active music sessions so Tater's Music Core
-  player can adjust satellite and stereo-pair playback without restarting the
-  track.
-- Adds media-session start positions for draggable player seeking and
-  15-second rewind or forward controls across supported audio formats.
-- Extends seek prebuffering for later positions in MP3 and FLAC tracks while
-  keeping synchronized stereo members aligned at the same playback offset.
-- Reports playhead telemetry for both individual and grouped media sessions so
-  Tater can keep player progress current.
-- Keeps unrelated TTS overlays, music ducking, and post-announcement playback
-  restoration working with live volume and seek controls.
+- Updates Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box to firmware version 0.3.5.
+- Replaces abrupt synchronized-playback frame drops/repeats with gradual rate slewing, and adds automatic underrun rebuffering, timeline rejoining, a short recovery fade, and recovery telemetry.
+- Makes satellite WebSocket playback more resilient by tolerating isolated JSON send failures and rate-limiting Sat1 button diagnostics that could otherwise flood the control connection during sustained audio.
+- Derives default device IDs and names from the selected hardware, reports a stable hardware ID, and repairs the legacy Voice PE default name on non-Voice PE boards.
+- Adds adaptive microphone-activity gating for steadier Voice PE and ReSpeaker direction LEDs, including noise-floor tracking and brief direction hold behavior.
+- Updates Sat1's embedded XMOS firmware to 1.1.0 with playback-aware talker locking, four-tap fractional-delay beamforming, per-microphone gain calibration, unhealthy-microphone fallback, and expanded DoA diagnostics.
+- Includes the Sat1 XMOS 1.1.0 production factory image and a separate lab-only four-channel raw USB microphone capture image with matching source and host tests.
+- Refreshes the embedded Hey Tater wake-word model.

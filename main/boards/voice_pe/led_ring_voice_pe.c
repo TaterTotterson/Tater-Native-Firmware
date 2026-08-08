@@ -66,9 +66,7 @@ static int64_t s_listening_last_valid_us;
 #define SAT1_DOA_MIN_CONFIDENCE (12)
 #endif
 
-#if TATER_BOARD_SAT1 || TATER_BOARD_RESPEAKER_XVF3800
 #define DIRECTIONAL_DOA_HOLD_US (800000)
-#endif
 
 static uint8_t scale(uint8_t value)
 {
@@ -446,11 +444,9 @@ static void directional_listening(rgb_t color)
     float doa_position = center_led;
     uint8_t doa_confidence = 0;
     bool has_valid_doa = current_doa_position(&doa_position, &doa_confidence);
-#if TATER_BOARD_SAT1 || TATER_BOARD_RESPEAKER_XVF3800
     bool had_recent_direction =
         s_listening_last_valid_us > 0 &&
         now_us - s_listening_last_valid_us <= DIRECTIONAL_DOA_HOLD_US;
-#endif
     if (s_animation_tick == 0) {
         for (int i = 0; i < TATER_LED_COUNT; i++) {
             s_direction_scores[i] = 0.0f;
@@ -463,7 +459,6 @@ static void directional_listening(rgb_t color)
     }
 
     if (has_valid_doa) {
-#if TATER_BOARD_SAT1 || TATER_BOARD_RESPEAKER_XVF3800
         if (!had_recent_direction) {
             for (int i = 0; i < TATER_LED_COUNT; i++) {
                 s_direction_scores[i] = 0.0f;
@@ -473,7 +468,6 @@ static void directional_listening(rgb_t color)
             s_listening_dominant_led =
                 (int)(doa_position + 0.5f) % TATER_LED_COUNT;
         }
-#endif
         float diff_for_filter = doa_position - s_listening_delay;
         if (diff_for_filter > ((float)TATER_LED_COUNT / 2.0f)) {
             diff_for_filter -= (float)TATER_LED_COUNT;
@@ -492,20 +486,14 @@ static void directional_listening(rgb_t color)
         if (sample_seconds <= 0.0f || sample_seconds > 0.20f) {
             sample_seconds = 0.05f;
         }
-#if TATER_BOARD_SAT1 || TATER_BOARD_RESPEAKER_XVF3800
         for (int i = 0; i < TATER_LED_COUNT; i++) {
             s_direction_scores[i] *= 0.78f;
             if (s_direction_scores[i] < 0.0005f) {
                 s_direction_scores[i] = 0.0f;
             }
         }
-#endif
-#if TATER_BOARD_SAT1 || TATER_BOARD_RESPEAKER_XVF3800
         uint8_t weighted_confidence = doa_confidence > 48 ? 48 : doa_confidence;
         float sample_weight = sample_seconds * (1.0f + ((float)weighted_confidence * 0.07f));
-#else
-        float sample_weight = sample_seconds * (1.0f + ((float)doa_confidence * 0.20f));
-#endif
         s_direction_scores[target_led] += sample_weight;
         s_direction_scores[(target_led + 1) % TATER_LED_COUNT] += sample_weight * 0.28f;
         s_direction_scores[(target_led + TATER_LED_COUNT - 1) % TATER_LED_COUNT] += sample_weight * 0.28f;
@@ -521,7 +509,6 @@ static void directional_listening(rgb_t color)
                 best_led = i;
             }
         }
-#if TATER_BOARD_SAT1 || TATER_BOARD_RESPEAKER_XVF3800
         int current_led = s_listening_dominant_led;
         if (current_led < 0 || current_led >= TATER_LED_COUNT) {
             current_led = (int)center_led;
@@ -531,9 +518,6 @@ static void directional_listening(rgb_t color)
             s_listening_dominant_led = best_led;
         }
         target_position = (float)s_listening_dominant_led;
-#else
-        s_listening_dominant_led = best_led;
-#endif
 
         float diff = target_position - s_listening_position;
         if (diff > ((float)TATER_LED_COUNT / 2.0f)) {
@@ -547,27 +531,14 @@ static void directional_listening(rgb_t color)
             s_listening_position = target_position;
         }
     }
-#if TATER_BOARD_SAT1 || TATER_BOARD_RESPEAKER_XVF3800
     else if (!had_recent_direction) {
         for (int i = 0; i < TATER_LED_COUNT; i++) {
             s_direction_scores[i] = 0.0f;
         }
     }
-#else
-    else if (s_listening_last_valid_us == 0 || now_us - s_listening_last_valid_us > 350000) {
-        float diff = center_led - s_listening_position;
-        if (diff > ((float)TATER_LED_COUNT / 2.0f)) {
-            diff -= (float)TATER_LED_COUNT;
-        } else if (diff < -((float)TATER_LED_COUNT / 2.0f)) {
-            diff += (float)TATER_LED_COUNT;
-        }
-        s_listening_position += diff * 0.14f;
-    }
-#endif
 
     s_listening_position = wrap_position(s_listening_position);
 
-#if TATER_BOARD_SAT1 || TATER_BOARD_RESPEAKER_XVF3800
     bool show_direction = has_valid_doa || had_recent_direction;
     if (!show_direction) {
 #if TATER_BOARD_RESPEAKER_XVF3800
@@ -586,7 +557,6 @@ static void directional_listening(rgb_t color)
         }
         return;
     }
-#endif
 
     for (int i = 0; i < TATER_LED_COUNT; i++) {
         float dist = ring_distance_f((float)i, s_listening_position);

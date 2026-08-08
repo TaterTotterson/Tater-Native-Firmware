@@ -10,10 +10,13 @@
 #include "doa_cmds.h"
 #include "doa_estimator.h"
 #include "doa_servicer.h"
+#include "beamforming/sat1_beamformer.h"
 #include "servicer.h"
 
 static control_cmd_info_t doa_servicer_cmd_map[] = {
     { DOA_SERVICER_CMD_READ_STATE, DOA_SERVICER_STATE_NUM_VALUES, sizeof(uint8_t), CMD_READ_ONLY },
+    { DOA_SERVICER_CMD_READ_DIAGNOSTICS, DOA_SERVICER_DIAGNOSTICS_NUM_VALUES, sizeof(uint8_t), CMD_READ_ONLY },
+    { DOA_SERVICER_CMD_SET_CONTROL, DOA_SERVICER_CONTROL_NUM_VALUES, sizeof(uint8_t), CMD_WRITE_ONLY },
 };
 
 static void store_u16_le(uint8_t *dst, uint16_t value)
@@ -76,6 +79,39 @@ static control_ret_t doa_servicer_read_cmd(control_resid_t resid,
         return CONTROL_SUCCESS;
     }
 
+    case DOA_SERVICER_CMD_READ_DIAGNOSTICS:
+    {
+        doa_estimator_diagnostics_t doa = {0};
+        sat1_beamformer_diagnostics_t beam;
+        memset(&beam, 0, sizeof(beam));
+        doa_estimator_get_diagnostics(&doa);
+        sat1_beamformer_get_diagnostics(&beam);
+
+        store_u16_le(&payload_ptr[0],
+                     (uint16_t)doa.steering_delay_q8);
+        store_u16_le(&payload_ptr[2],
+                     (uint16_t)doa.vertical_steering_delay_q8);
+        store_u32_le(&payload_ptr[4], doa.noise_floor_energy);
+        payload_ptr[8] = doa.signal_active;
+        payload_ptr[9] = doa.control_flags;
+        payload_ptr[10] = doa.mode_flags;
+        payload_ptr[11] = beam.active_mic_mask != 0
+                              ? beam.active_mic_mask
+                              : doa.active_mic_mask;
+        for (size_t mic = 0; mic < SAT1_BEAMFORMER_MIC_COUNT; mic++) {
+            store_u16_le(&payload_ptr[12 + (mic * 2)],
+                         (uint16_t)beam.current_delay_q8[mic]);
+            store_u16_le(&payload_ptr[20 + (mic * 2)],
+                         beam.mic_gain_q15[mic]);
+            payload_ptr[28 + mic] = beam.mic_health_flags[mic];
+            store_u32_le(&payload_ptr[32 + (mic * 4)],
+                         beam.mic_level[mic]);
+        }
+
+        payload[0] = CONTROL_SUCCESS;
+        return CONTROL_SUCCESS;
+    }
+
     default:
         payload[0] = CONTROL_BAD_COMMAND;
         return CONTROL_BAD_COMMAND;
@@ -89,7 +125,29 @@ static control_ret_t doa_servicer_write_cmd(control_resid_t resid,
                                             size_t payload_len,
                                             void *app_data)
 {
-    return CONTROL_BAD_COMMAND;
+    servicer_t *servicer = (servicer_t *)app_data;
+    control_resource_info_t *current_res_info = get_res_info(resid, servicer);
+    if (current_res_info == NULL) {
+        return CONTROL_BAD_RESOURCE;
+    }
+
+    control_cmd_info_t *current_cmd_info;
+    control_ret_t ret = validate_cmd(&current_cmd_info,
+                                     current_res_info,
+                                     cmd,
+                                     payload,
+                                     payload_len);
+    if (ret != CONTROL_SUCCESS) {
+        return ret;
+    }
+
+    switch (CONTROL_CMD_CLEAR_READ(cmd)) {
+    case DOA_SERVICER_CMD_SET_CONTROL:
+        doa_estimator_set_control(payload[0]);
+        return CONTROL_SUCCESS;
+    default:
+        return CONTROL_BAD_COMMAND;
+    }
 }
 
 void doa_servicer_init(servicer_t *servicer)

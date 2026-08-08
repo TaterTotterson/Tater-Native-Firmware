@@ -69,6 +69,7 @@ static tater_ota_url_callback_t s_ota_url_cb;
 static tater_state_t s_current_state = TATER_STATE_DISCONNECTED;
 static tater_config_t s_config;
 static char s_device_id[48];
+static char s_hardware_id[13];
 static char s_ws_url[192];
 static char s_auth_header[160];
 static char s_pending_reopen_conversation_id[48];
@@ -121,6 +122,11 @@ static bool s_recreate_client_on_reconnect;
 static volatile bool s_ws_lifecycle_restart;
 static uint32_t s_ws_restart_count;
 static uint32_t s_ws_restart_failures;
+static int s_last_json_send_result;
+static uint32_t s_json_send_failure_total;
+static uint32_t s_json_send_failure_streak;
+static uint32_t s_json_send_failures_tolerated;
+static char s_last_json_send_type[32];
 
 static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 static int send_audio_locked(const int16_t *pcm, size_t sample_count, TickType_t timeout);
@@ -163,6 +169,7 @@ typedef struct {
 #define TATER_WS_RECONNECT_MIN_INTERVAL_MS 10000
 #define TATER_WS_HELLO_ACK_TIMEOUT_MS 5000
 #define TATER_WS_RESTART_FAILURE_LIMIT 3
+#define TATER_JSON_SEND_LINK_DOWN_FAILURES 3
 #define TATER_PLAYBACK_VISUAL_HOLD_MS 30000
 
 #define TATER_AUDIO_PREROLL_SAMPLES (TATER_MIC_SAMPLE_RATE)
@@ -1350,15 +1357,26 @@ static void format_xmos_version(
     }
 }
 
-static void build_device_id(void)
+static void build_device_identity(void)
 {
     uint8_t mac[6] = {0};
     esp_read_mac(mac, ESP_MAC_WIFI_STA);
     snprintf(
+        s_hardware_id,
+        sizeof(s_hardware_id),
+        "%02x%02x%02x%02x%02x%02x",
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
+    );
+    snprintf(
         s_device_id,
         sizeof(s_device_id),
         "%s-%02x%02x%02x",
-        CONFIG_TATER_DEVICE_ID_PREFIX,
+        TATER_DEVICE_ID_PREFIX,
         mac[3],
         mac[4],
         mac[5]
@@ -1378,7 +1396,7 @@ static bool build_ws_url(void)
 static bool should_log_send(const char *type, int sent)
 {
     if (sent < 0) {
-        return true;
+        return false;
     }
     return strcmp(type, "hello") == 0
         || strcmp(type, "status") == 0
@@ -1408,24 +1426,59 @@ static int send_json(cJSON *root)
     }
 
     bool attempted = false;
+    bool send_failed = false;
+    bool transport_connected_after = false;
+    bool mark_down = false;
+    uint32_t failure_streak = 0;
     int sent = -1;
+    size_t wire_len = strlen(wire);
     xSemaphoreTake(s_send_lock, portMAX_DELAY);
     if (is_hello ? websocket_transport_ready() : websocket_ready()) {
         attempted = true;
         sent = send_websocket_message_locked(
             wire,
-            strlen(wire),
+            wire_len,
             false,
             pdMS_TO_TICKS(1000),
             TATER_WS_TX_FRAGMENT_SIZE
         );
+        s_last_json_send_result = sent;
+        strlcpy(s_last_json_send_type, type, sizeof(s_last_json_send_type));
+        send_failed = sent != (int)wire_len;
+        if (!send_failed) {
+            s_json_send_failure_streak = 0;
+        } else {
+            s_json_send_failure_total++;
+            s_json_send_failure_streak++;
+            failure_streak = s_json_send_failure_streak;
+            transport_connected_after =
+                s_client && esp_websocket_client_is_connected(s_client);
+            mark_down =
+                !transport_connected_after
+                || failure_streak >= TATER_JSON_SEND_LINK_DOWN_FAILURES;
+            if (!mark_down) {
+                s_json_send_failures_tolerated++;
+            }
+        }
     }
     xSemaphoreGive(s_send_lock);
-    if (attempted && should_log_send(type, sent)) {
-        ESP_LOGI(TAG, "json send type=%s bytes=%u result=%d", type, (unsigned)strlen(wire), sent);
+    if (attempted && !send_failed && should_log_send(type, sent)) {
+        ESP_LOGI(TAG, "json send type=%s bytes=%u result=%d", type, (unsigned)wire_len, sent);
     }
-    if (attempted && sent < 0) {
-        mark_link_down("websocket send failed");
+    if (attempted && send_failed) {
+        ESP_LOGW(
+            TAG,
+            "json send failed type=%s bytes=%u result=%d streak=%lu/%u transport_connected=%d",
+            type,
+            (unsigned)wire_len,
+            sent,
+            (unsigned long)failure_streak,
+            TATER_JSON_SEND_LINK_DOWN_FAILURES,
+            transport_connected_after
+        );
+        if (mark_down) {
+            mark_link_down("websocket send failure threshold");
+        }
     }
     cJSON_free(wire);
     return sent;
@@ -2135,6 +2188,7 @@ static void send_hello(void)
     cJSON *root = new_envelope("hello");
     cJSON *payload = cJSON_GetObjectItem(root, "payload");
     cJSON_AddStringToObject(payload, "device_id", s_device_id);
+    cJSON_AddStringToObject(payload, "hardware_id", s_hardware_id);
     cJSON_AddStringToObject(payload, "device_name", s_config.device_name);
     cJSON_AddStringToObject(payload, "board", TATER_BOARD_ID);
     cJSON_AddStringToObject(payload, "firmware_version", TATER_FIRMWARE_VERSION);
@@ -2168,12 +2222,14 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "stereo_channel_selection", true);
     cJSON_AddBoolToObject(caps, "media_playhead_telemetry", true);
     cJSON_AddBoolToObject(caps, "media_drift_correction", true);
+    cJSON_AddBoolToObject(caps, "media_rate_slew", true);
+    cJSON_AddBoolToObject(caps, "media_underrun_recovery", true);
     cJSON_AddBoolToObject(caps, "media_session_volume", true);
     cJSON_AddBoolToObject(caps, "media_session_start_position", true);
     cJSON_AddBoolToObject(caps, "synchronized_tts_overlays", true);
     cJSON_AddNumberToObject(caps, "media_sample_rate_hz", TATER_SPK_SAMPLE_RATE);
     cJSON_AddNumberToObject(caps, "audio_scene_version", 1);
-    cJSON_AddNumberToObject(caps, "audio_session_version", 3);
+    cJSON_AddNumberToObject(caps, "audio_session_version", 4);
     cJSON_AddItemToObject(payload, "capabilities", caps);
     send_json(root);
 }
@@ -2904,6 +2960,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
     case WEBSOCKET_EVENT_CONNECTED:
         s_connected = true;
         s_hello_acked = false;
+        s_json_send_failure_streak = 0;
         s_link_down_started_us = 0;
         s_last_reconnect_attempt_us = 0;
         clear_voice_capture_state();
@@ -2997,7 +3054,7 @@ void tater_protocol_init(
     if (audio_tx_err != ESP_OK) {
         ESP_LOGE(TAG, "audio tx queue init failed: %s", esp_err_to_name(audio_tx_err));
     }
-    build_device_id();
+    build_device_identity();
     build_ws_url();
     if (strlen(s_config.token) > 0) {
         snprintf(s_auth_header, sizeof(s_auth_header), "X-Tater-Token: %s\r\n", s_config.token);
@@ -3193,6 +3250,15 @@ void tater_protocol_send_status(const char *state)
     cJSON_AddBoolToObject(transport, "lifecycle_restart_active", s_ws_lifecycle_restart);
     cJSON_AddNumberToObject(transport, "lifecycle_restarts", s_ws_restart_count);
     cJSON_AddNumberToObject(transport, "lifecycle_restart_failures", s_ws_restart_failures);
+    cJSON_AddNumberToObject(transport, "json_send_failure_total", s_json_send_failure_total);
+    cJSON_AddNumberToObject(transport, "json_send_failure_streak", s_json_send_failure_streak);
+    cJSON_AddNumberToObject(transport, "json_send_failures_tolerated", s_json_send_failures_tolerated);
+    cJSON_AddNumberToObject(transport, "last_json_send_result", s_last_json_send_result);
+    cJSON_AddStringToObject(
+        transport,
+        "last_json_send_type",
+        s_last_json_send_type[0] ? s_last_json_send_type : ""
+    );
     cJSON_AddItemToObject(payload, "transport", transport);
     cJSON_AddItemToObject(payload, "reset", reset_diag_json());
 #if TATER_BOARD_SAT1
@@ -3234,15 +3300,39 @@ void tater_protocol_send_status(const char *state)
         cJSON_AddNumberToObject(xmos, "confidence", doa.confidence);
         cJSON_AddNumberToObject(xmos, "sample_delay", doa.sample_delay);
         cJSON_AddNumberToObject(xmos, "vertical_delay", doa.vertical_delay);
+        cJSON_AddNumberToObject(xmos, "sample_delay_q8", doa.sample_delay_q8);
+        cJSON_AddNumberToObject(xmos, "vertical_delay_q8", doa.vertical_delay_q8);
         cJSON_AddNumberToObject(xmos, "angle_index", doa.angle_index);
         cJSON_AddBoolToObject(xmos, "four_mic", doa.four_mic);
         cJSON_AddNumberToObject(xmos, "energy", doa.energy);
+        cJSON_AddNumberToObject(xmos, "noise_floor_energy", doa.noise_floor_energy);
+        cJSON_AddBoolToObject(xmos, "signal_active", doa.signal_active != 0);
+        cJSON_AddNumberToObject(xmos, "control_flags", doa.control_flags);
+        cJSON_AddNumberToObject(xmos, "mode_flags", doa.mode_flags);
+        cJSON_AddNumberToObject(xmos, "active_mic_mask", doa.active_mic_mask);
         cJSON *mic_energy = cJSON_CreateArray();
         if (mic_energy) {
             for (size_t i = 0; i < 4; i++) {
                 cJSON_AddItemToArray(mic_energy, cJSON_CreateNumber(doa.mic_energy[i]));
             }
             cJSON_AddItemToObject(xmos, "mic_energy", mic_energy);
+        }
+        cJSON *mic_health = cJSON_CreateArray();
+        cJSON *mic_gain = cJSON_CreateArray();
+        cJSON *beam_delay = cJSON_CreateArray();
+        if (mic_health && mic_gain && beam_delay) {
+            for (size_t i = 0; i < 4; i++) {
+                cJSON_AddItemToArray(mic_health, cJSON_CreateNumber(doa.mic_health_flags[i]));
+                cJSON_AddItemToArray(mic_gain, cJSON_CreateNumber(doa.mic_gain_q15[i]));
+                cJSON_AddItemToArray(beam_delay, cJSON_CreateNumber(doa.beam_delay_q8[i]));
+            }
+            cJSON_AddItemToObject(xmos, "mic_health", mic_health);
+            cJSON_AddItemToObject(xmos, "mic_gain_q15", mic_gain);
+            cJSON_AddItemToObject(xmos, "beam_delay_q8", beam_delay);
+        } else {
+            cJSON_Delete(mic_health);
+            cJSON_Delete(mic_gain);
+            cJSON_Delete(beam_delay);
         }
         cJSON_AddNumberToObject(xmos, "frame_counter", doa.frame_counter);
         cJSON_AddNumberToObject(xmos, "age_ms", doa.age_ms);
@@ -3718,7 +3808,11 @@ void tater_protocol_send_media_session_playhead(
     uint32_t buffered_frames,
     int64_t satellite_time_us,
     int64_t scheduled_start_us,
-    int32_t correction_frames
+    int32_t correction_frames,
+    bool rebuffering,
+    uint32_t underrun_events,
+    uint32_t rejoin_count,
+    uint64_t rejoin_frames
 )
 {
     cJSON *root = new_envelope("media.session.playhead");
@@ -3733,6 +3827,10 @@ void tater_protocol_send_media_session_playhead(
     cJSON_AddNumberToObject(payload, "satellite_time_us", (double)satellite_time_us);
     cJSON_AddNumberToObject(payload, "scheduled_start_us", (double)scheduled_start_us);
     cJSON_AddNumberToObject(payload, "correction_frames", correction_frames);
+    cJSON_AddBoolToObject(payload, "rebuffering", rebuffering);
+    cJSON_AddNumberToObject(payload, "underrun_events", underrun_events);
+    cJSON_AddNumberToObject(payload, "rejoin_count", rejoin_count);
+    cJSON_AddNumberToObject(payload, "rejoin_frames", (double)rejoin_frames);
     send_json(root);
 }
 

@@ -22,12 +22,19 @@ config TATER_SATELLITE_TOKEN
         Used as X-Tater-Token when Tater API auth is enabled.
 
 config TATER_DEVICE_ID_PREFIX
-    string "Device ID prefix"
+    string "Legacy device ID prefix"
     default "voicepe"
+    help
+        Retained for older sdkconfig files. Native multi-board builds derive
+        identity from the selected board so one board cannot masquerade as
+        another because of a stale build configuration.
 
 config TATER_DEVICE_NAME
-    string "Device name"
+    string "Legacy device name"
     default "Tater Voice PE"
+    help
+        Retained for older sdkconfig files. Each board supplies its own default
+        name; names chosen during provisioning still take precedence.
 
 config TATER_ROOM
     string "Room"

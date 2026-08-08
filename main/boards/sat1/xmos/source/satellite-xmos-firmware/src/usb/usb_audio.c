@@ -128,9 +128,11 @@ void usb_audio_send(rtos_intertile_t *intertile_ctx,
     samp_t usb_audio_in_frame[appconfAUDIO_PIPELINE_FRAME_ADVANCE][CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX];
     int32_t *frame_buf_ptr = (int32_t *) frame_buffers;
 
-#if CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX == 2
+#if !appconfUSB_AUDIO_RAW_MIC_CAPTURE && \
+    CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX == 2
     const int src_32_shift = 16;
-#elif CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX == 4
+#elif !appconfUSB_AUDIO_RAW_MIC_CAPTURE && \
+      CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX == 4
     const int src_32_shift = 0;
 #endif
 
@@ -141,7 +143,11 @@ void usb_audio_send(rtos_intertile_t *intertile_ctx,
     for(int ch=0; ch<CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX; ch++) {
         for (int i=0; i<appconfAUDIO_PIPELINE_FRAME_ADVANCE; i++) {
             if (ch < num_chans) {
+#if appconfUSB_AUDIO_RAW_MIC_CAPTURE
+                const int channel_shift = 16 - 6;
+#else
                 const int channel_shift = (ch == 2 || ch == 3) ? src_32_shift : 16 - 6;
+#endif
                 usb_audio_in_frame[i][ch] = frame_buf_ptr[i+(appconfAUDIO_PIPELINE_FRAME_ADVANCE*ch)] >> channel_shift;
             }
         }

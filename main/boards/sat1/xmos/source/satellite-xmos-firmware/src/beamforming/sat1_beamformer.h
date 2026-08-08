@@ -7,16 +7,35 @@
 
 #define SAT1_BEAMFORMER_MIC_COUNT (4)
 #define SAT1_BEAMFORMER_HISTORY_SAMPLES \
-    (DOA_ESTIMATOR_MAX_LAG_SAMPLES + 1)
+    (DOA_ESTIMATOR_MAX_LAG_SAMPLES + 3)
+
+#define SAT1_MIC_HEALTH_DEAD     (1u << 0)
+#define SAT1_MIC_HEALTH_NOISY    (1u << 1)
+#define SAT1_MIC_HEALTH_CLIPPING (1u << 2)
 
 typedef struct {
     int32_t history[SAT1_BEAMFORMER_MIC_COUNT]
                    [SAT1_BEAMFORMER_HISTORY_SAMPLES];
     int16_t current_delay_q8[SAT1_BEAMFORMER_MIC_COUNT];
+    uint32_t mic_level_ema[SAT1_BEAMFORMER_MIC_COUNT];
+    uint16_t mic_gain_q15[SAT1_BEAMFORMER_MIC_COUNT];
+    uint8_t mic_health_flags[SAT1_BEAMFORMER_MIC_COUNT];
+    uint8_t mic_fault_streak[SAT1_BEAMFORMER_MIC_COUNT];
+    uint8_t mic_recovery_streak[SAT1_BEAMFORMER_MIC_COUNT];
+    uint16_t calibration_frames;
+    uint8_t active_mic_mask;
     uint8_t invalid_direction_frames;
     uint8_t has_direction;
     uint8_t initialized;
 } sat1_beamformer_t;
+
+typedef struct {
+    int16_t current_delay_q8[SAT1_BEAMFORMER_MIC_COUNT];
+    uint32_t mic_level[SAT1_BEAMFORMER_MIC_COUNT];
+    uint16_t mic_gain_q15[SAT1_BEAMFORMER_MIC_COUNT];
+    uint8_t mic_health_flags[SAT1_BEAMFORMER_MIC_COUNT];
+    uint8_t active_mic_mask;
+} sat1_beamformer_diagnostics_t;
 
 /*
  * Four-microphone fractional-delay delay-and-sum beamformer.
@@ -33,3 +52,5 @@ void sat1_beamformer_process_frame(
     const doa_estimator_state_t *direction);
 
 void sat1_beamformer_reset(sat1_beamformer_t *beamformer);
+void sat1_beamformer_get_diagnostics(
+    sat1_beamformer_diagnostics_t *diagnostics);

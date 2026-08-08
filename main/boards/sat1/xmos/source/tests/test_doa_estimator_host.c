@@ -133,6 +133,78 @@ static void expect_direction(const char *name,
     }
 }
 
+static void expect_playback_aware_locking(const int east[4],
+                                          const int west[4],
+                                          const int south[4])
+{
+    doa_estimator_state_t state = run_direction_case(east);
+    if (!(state.flags & DOA_ESTIMATOR_FLAG_VALID)) {
+        fprintf(stderr, "control test could not acquire initial direction\n");
+        exit(1);
+    }
+
+    doa_estimator_set_control(DOA_ESTIMATOR_CONTROL_VOICE_LOCK);
+    feed_direction(west, TEST_FRAMES, 1);
+    doa_estimator_get_state(&state);
+    if (!(state.flags & DOA_ESTIMATOR_FLAG_LOCKED) ||
+        ring_distance(state.angle_index, 18) > 1) {
+        fprintf(stderr,
+                "voice lock moved: flags=%u angle=%u\n",
+                state.flags,
+                state.angle_index);
+        exit(1);
+    }
+
+    doa_estimator_set_control(DOA_ESTIMATOR_CONTROL_PLAYBACK_ACTIVE);
+    feed_direction(south, TEST_FRAMES, 1);
+    doa_estimator_get_state(&state);
+    if (!(state.flags & DOA_ESTIMATOR_FLAG_PLAYBACK) ||
+        ring_distance(state.angle_index, 18) > 1) {
+        fprintf(stderr,
+                "playback freeze moved: flags=%u angle=%u\n",
+                state.flags,
+                state.angle_index);
+        exit(1);
+    }
+
+    doa_estimator_diagnostics_t diagnostics = {0};
+    doa_estimator_get_diagnostics(&diagnostics);
+    if (!(diagnostics.mode_flags &
+          DOA_ESTIMATOR_MODE_PLAYBACK_FROZEN) ||
+        diagnostics.control_flags !=
+            DOA_ESTIMATOR_CONTROL_PLAYBACK_ACTIVE) {
+        fprintf(stderr,
+                "playback diagnostics failed: mode=%u control=%u\n",
+                diagnostics.mode_flags,
+                diagnostics.control_flags);
+        exit(1);
+    }
+
+    doa_estimator_set_control(0);
+    feed_direction(west, TEST_FRAMES, 1);
+    doa_estimator_get_state(&state);
+    if (!(state.flags & DOA_ESTIMATOR_FLAG_VALID) ||
+        ring_distance(state.angle_index, 6) > 1) {
+        fprintf(stderr,
+                "unlock did not resume scanning: flags=%u angle=%u\n",
+                state.flags,
+                state.angle_index);
+        exit(1);
+    }
+
+    doa_estimator_set_control(DOA_ESTIMATOR_CONTROL_FORCE_OMNI);
+    feed_direction(east, 1, 1);
+    doa_estimator_get_state(&state);
+    if ((state.flags & DOA_ESTIMATOR_FLAG_VALID) ||
+        state.angle_index != 12) {
+        fprintf(stderr,
+                "force omni failed: flags=%u angle=%u\n",
+                state.flags,
+                state.angle_index);
+        exit(1);
+    }
+}
+
 int main(void)
 {
     build_source_audio();
@@ -221,6 +293,8 @@ int main(void)
             transition_state.confidence);
         return 1;
     }
+
+    expect_playback_aware_locking(east, west, south);
 
     puts("DoA estimator host tests passed.");
     return 0;

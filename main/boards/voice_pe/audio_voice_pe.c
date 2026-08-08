@@ -8,6 +8,7 @@
 
 #include "audio_aec.h"
 #include "board.h"
+#include "doa_activity_gate.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "driver/i2s_std.h"
@@ -39,6 +40,11 @@ static portMUX_TYPE s_doa_lock = portMUX_INITIALIZER_UNLOCKED;
 static tater_audio_doa_t s_doa;
 static int64_t s_doa_update_us;
 static uint32_t s_doa_failed_reads;
+static tater_doa_activity_gate_t s_mic_activity_gate;
+static bool s_mic_signal_active;
+static uint32_t s_mic_mean_abs;
+static uint32_t s_mic_noise_floor;
+static int64_t s_mic_activity_update_us;
 static portMUX_TYPE s_xmos_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static tater_audio_xmos_status_t s_xmos_status = {
     .target_major = 1,
@@ -86,6 +92,7 @@ extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_end[] asm("_binary_ffva
 #define DOA_STATE_PAYLOAD_LEN 12
 #define DOA_STATE_RESPONSE_LEN (DOA_STATE_PAYLOAD_LEN + 1)
 #define DOA_FLAG_VALID (1u << 0)
+#define VOICE_PE_DOA_ACTIVITY_FRESH_US 250000
 
 #define AIC3204_PAGE_CTRL 0x00
 #define AIC3204_SW_RST 0x01
@@ -729,10 +736,33 @@ static esp_err_t xmos_read_doa(tater_audio_doa_t *out)
     ESP_RETURN_ON_FALSE(resp[0] == CTRL_DONE, ESP_FAIL, TAG, "xmos doa response not ready");
 
     const uint8_t *payload = &resp[1];
+    bool signal_active = false;
+    uint32_t mic_mean_abs = 0;
+    uint32_t noise_floor = 0;
+    int64_t activity_update_us = 0;
+    portENTER_CRITICAL(&s_doa_lock);
+    signal_active = s_mic_signal_active;
+    mic_mean_abs = s_mic_mean_abs;
+    noise_floor = s_mic_noise_floor;
+    activity_update_us = s_mic_activity_update_us;
+    portEXIT_CRITICAL(&s_doa_lock);
+
+    int64_t now_us = esp_timer_get_time();
+    bool activity_fresh = activity_update_us > 0 &&
+                          now_us >= activity_update_us &&
+                          now_us - activity_update_us <=
+                              VOICE_PE_DOA_ACTIVITY_FRESH_US;
+    bool hardware_valid = (payload[3] & DOA_FLAG_VALID) != 0;
+
     out->sample_delay = (int16_t)((uint16_t)payload[0] | ((uint16_t)payload[1] << 8));
-    out->confidence = payload[2];
-    out->valid = (payload[3] & DOA_FLAG_VALID) != 0;
+    out->confidence = hardware_valid && signal_active && activity_fresh
+        ? payload[2]
+        : 0;
+    out->valid = hardware_valid && signal_active && activity_fresh;
+    out->signal_active = signal_active && activity_fresh;
     out->energy = read_u32_le(&payload[4]);
+    out->noise_floor_energy = noise_floor;
+    out->mic_level[0] = mic_mean_abs;
     out->frame_counter = read_u32_le(&payload[8]);
     out->age_ms = 0;
     return ESP_OK;
@@ -957,6 +987,13 @@ esp_err_t tater_audio_i2s_init(void)
     ESP_LOGI(TAG, "mic i2s ready bclk=%d ws=%d din=%d", TATER_MIC_I2S_BCLK, TATER_MIC_I2S_WS, TATER_MIC_I2S_DIN);
     ESP_ERROR_CHECK_WITHOUT_ABORT(speaker_i2s_init());
     tater_audio_aec_init();
+    tater_doa_activity_gate_reset(&s_mic_activity_gate);
+    portENTER_CRITICAL(&s_doa_lock);
+    s_mic_signal_active = false;
+    s_mic_mean_abs = 0;
+    s_mic_noise_floor = 0;
+    s_mic_activity_update_us = 0;
+    portEXIT_CRITICAL(&s_doa_lock);
     return ESP_OK;
 }
 
@@ -970,6 +1007,40 @@ static int16_t pcm32_to_pcm16(int32_t sample)
         return INT16_MIN;
     }
     return (int16_t)v;
+}
+
+static void update_doa_mic_activity(const int16_t *samples, size_t count)
+{
+    uint32_t peak = 0;
+    uint64_t sum_abs = 0;
+    if (samples) {
+        for (size_t i = 0; i < count; i++) {
+            int32_t sample = samples[i];
+            uint32_t magnitude = sample < 0
+                ? (uint32_t)(-sample)
+                : (uint32_t)sample;
+            if (magnitude > peak) {
+                peak = magnitude;
+            }
+            sum_abs += magnitude;
+        }
+    }
+    uint32_t mean_abs = count ? (uint32_t)(sum_abs / count) : 0;
+    bool signal_active = tater_doa_activity_gate_update(
+        &s_mic_activity_gate,
+        peak,
+        mean_abs
+    );
+    uint32_t noise_floor =
+        tater_doa_activity_gate_noise_floor(&s_mic_activity_gate);
+    int64_t now_us = esp_timer_get_time();
+
+    portENTER_CRITICAL(&s_doa_lock);
+    s_mic_signal_active = signal_active;
+    s_mic_mean_abs = mean_abs;
+    s_mic_noise_floor = noise_floor;
+    s_mic_activity_update_us = now_us;
+    portEXIT_CRITICAL(&s_doa_lock);
 }
 
 static float clamp_audio_level(float level)
@@ -1060,6 +1131,7 @@ static void audio_task(void *arg)
         }
 
         tater_audio_aec_process_mic(mono, frames);
+        update_doa_mic_activity(mono, frames);
         tater_wake_engine_note_audio(mono, frames);
         tater_wake_engine_process(mono, frames);
 

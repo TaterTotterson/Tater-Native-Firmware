@@ -8,7 +8,7 @@ NINJA_BIN="${NINJA_BIN:-/opt/homebrew/opt/ninja/bin/ninja}"
 PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/bin/python3.10}"
 VENV_DIR="${ROOT_DIR}/.venv"
 BUILD_DIR="${ROOT_DIR}/build"
-TARGET="satellite1_firmware_fixed_delay"
+TARGET="${SAT1_XMOS_TARGET:-satellite1_firmware_fixed_delay}"
 CLEAN_BUILD="${XMOS_CLEAN_BUILD:-1}"
 
 if [[ ! -x "${XTC_DIR}/bin/xcc" ]]; then

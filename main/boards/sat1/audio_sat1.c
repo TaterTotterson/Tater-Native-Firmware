@@ -30,8 +30,8 @@
 
 static const char *TAG = "tater_audio_sat1";
 
-extern const uint8_t _binary_sat1_xmos_1_0_9_factory_bin_start[] asm("_binary_sat1_xmos_1_0_9_factory_bin_start");
-extern const uint8_t _binary_sat1_xmos_1_0_9_factory_bin_end[] asm("_binary_sat1_xmos_1_0_9_factory_bin_end");
+extern const uint8_t _binary_sat1_xmos_1_1_0_factory_bin_start[] asm("_binary_sat1_xmos_1_1_0_factory_bin_start");
+extern const uint8_t _binary_sat1_xmos_1_1_0_factory_bin_end[] asm("_binary_sat1_xmos_1_1_0_factory_bin_end");
 
 #define TATER_I2C_PORT I2C_NUM_0
 #define SAT1_SPI_HOST SPI2_HOST
@@ -47,12 +47,20 @@ extern const uint8_t _binary_sat1_xmos_1_0_9_factory_bin_end[] asm("_binary_sat1
 #define SAT1_GPIO_READ_PORT SAT1_CONTROL_CMD_READ_BIT
 #define SAT1_DOA_RESOURCE_ID 231
 #define SAT1_DOA_READ_STATE SAT1_CONTROL_CMD_READ_BIT
+#define SAT1_DOA_READ_DIAGNOSTICS (1 | SAT1_CONTROL_CMD_READ_BIT)
+#define SAT1_DOA_SET_CONTROL 2
 #define SAT1_DOA_STATE_PAYLOAD_LEN 32
+#define SAT1_DOA_DIAGNOSTICS_PAYLOAD_LEN 48
 #define SAT1_DOA_FLAG_VALID (1u << 0)
 #define SAT1_DOA_FLAG_FOUR_MIC (1u << 1)
+#define SAT1_DOA_CONTROL_PLAYBACK_ACTIVE (1u << 0)
+#define SAT1_DOA_CONTROL_VOICE_LOCK (1u << 1)
+#define SAT1_DOA_VOICE_LOCK_HOLD_US 1200000
+#define SAT1_DOA_CONTROL_HEARTBEAT_US 1000000
+#define SAT1_DOA_PLAYBACK_LEVEL_THRESHOLD 0.004f
 #define SAT1_XMOS_TARGET_MAJOR 1
-#define SAT1_XMOS_TARGET_MINOR 0
-#define SAT1_XMOS_TARGET_PATCH 9
+#define SAT1_XMOS_TARGET_MINOR 1
+#define SAT1_XMOS_TARGET_PATCH 0
 #define SAT1_XMOS_TARGET_PRERELEASE 0
 #define SAT1_XMOS_TARGET_COUNTER 0
 #define SAT1_XMOS_VERSION_READY_TIMEOUT_MS 8000
@@ -131,7 +139,7 @@ static int16_t read_i16_le(const uint8_t *payload)
 
 static size_t sat1_xmos_target_image_size(void)
 {
-    return (size_t)(_binary_sat1_xmos_1_0_9_factory_bin_end - _binary_sat1_xmos_1_0_9_factory_bin_start);
+    return (size_t)(_binary_sat1_xmos_1_1_0_factory_bin_end - _binary_sat1_xmos_1_1_0_factory_bin_start);
 }
 
 static esp_err_t speaker_session_take(void)
@@ -701,19 +709,22 @@ esp_err_t tater_audio_sat1_read_buttons(uint8_t *buttons)
     uint8_t direct_buttons = (direct_high != 0 || direct_low == 0) ? direct_high : direct_low;
 
     static bool have_diag = false;
-    static bool last_status_valid = false;
-    static bool last_direct_valid = false;
     static uint8_t last_status_buttons = 0xff;
-    static uint8_t last_direct_port = 0xff;
+    static uint8_t last_direct_buttons = 0xff;
     static int64_t last_diag_us = 0;
     int64_t now_us = esp_timer_get_time();
-    bool diag_changed =
+    /*
+     * The direct SPI validity bit can flicker while the XMOS audio path is
+     * busy.  Reporting every validity transition synchronously over the
+     * control WebSocket can flood the socket during sustained playback.
+     * Report real button changes immediately and sample transport validity
+     * once per minute instead.
+     */
+    bool buttons_changed =
         !have_diag
-        || status_valid != last_status_valid
-        || direct_valid != last_direct_valid
         || status_buttons != last_status_buttons
-        || direct_port != last_direct_port;
-    if (diag_changed || now_us - last_diag_us > 60000000) {
+        || (direct_valid && direct_buttons != last_direct_buttons);
+    if (buttons_changed || now_us - last_diag_us > 60000000) {
         char message[128] = {0};
         snprintf(
             message,
@@ -728,10 +739,8 @@ esp_err_t tater_audio_sat1_read_buttons(uint8_t *buttons)
         ESP_LOGI(TAG, "%s", message);
         tater_protocol_send_log("info", message);
         have_diag = true;
-        last_status_valid = status_valid;
-        last_direct_valid = direct_valid;
         last_status_buttons = status_buttons;
-        last_direct_port = direct_port;
+        last_direct_buttons = direct_buttons;
         last_diag_us = now_us;
     }
 
@@ -932,7 +941,7 @@ static void sat1_xmos_set_flash_progress(size_t done, size_t total, uint8_t *las
 
 static esp_err_t sat1_xmos_flash_target_image(void)
 {
-    const uint8_t *image = _binary_sat1_xmos_1_0_9_factory_bin_start;
+    const uint8_t *image = _binary_sat1_xmos_1_1_0_factory_bin_start;
     const size_t image_size = sat1_xmos_target_image_size();
     ESP_RETURN_ON_FALSE(image && image_size > 0, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image missing");
     ESP_RETURN_ON_FALSE(image_size <= SAT1_XMOS_FLASH_TOTAL_SIZE, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image too large");
@@ -1119,6 +1128,69 @@ static esp_err_t sat1_read_doa(tater_audio_doa_t *out)
     out->mic_energy[1] = read_u32_le(&payload[20]);
     out->mic_energy[2] = read_u32_le(&payload[24]);
     out->mic_energy[3] = read_u32_le(&payload[28]);
+
+    uint8_t diagnostics[SAT1_DOA_DIAGNOSTICS_PAYLOAD_LEN] = {0};
+    if (sat1_control_transfer(SAT1_DOA_RESOURCE_ID,
+                              SAT1_DOA_READ_DIAGNOSTICS,
+                              diagnostics,
+                              sizeof(diagnostics))) {
+        out->sample_delay_q8 = read_i16_le(&diagnostics[0]);
+        out->vertical_delay_q8 = read_i16_le(&diagnostics[2]);
+        out->noise_floor_energy = read_u32_le(&diagnostics[4]);
+        out->signal_active = diagnostics[8];
+        out->control_flags = diagnostics[9];
+        out->mode_flags = diagnostics[10];
+        out->active_mic_mask = diagnostics[11];
+        for (size_t mic = 0; mic < 4; mic++) {
+            out->beam_delay_q8[mic] =
+                read_i16_le(&diagnostics[12 + (mic * 2)]);
+            out->mic_gain_q15[mic] = (uint16_t)read_i16_le(
+                &diagnostics[20 + (mic * 2)]);
+            out->mic_health_flags[mic] = diagnostics[28 + mic];
+            out->mic_level[mic] =
+                read_u32_le(&diagnostics[32 + (mic * 4)]);
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t sat1_sync_doa_control(int64_t now_us)
+{
+    static uint8_t last_sent_flags = 0xff;
+    static int64_t last_send_us;
+    static int64_t voice_lock_until_us;
+
+    bool voice_active = tater_protocol_voice_active() &&
+                        tater_protocol_is_connected();
+    if (voice_active) {
+        voice_lock_until_us = now_us + SAT1_DOA_VOICE_LOCK_HOLD_US;
+    }
+
+    uint8_t flags = 0;
+    if (s_speaker_enabled &&
+        tater_audio_speaker_level() >= SAT1_DOA_PLAYBACK_LEVEL_THRESHOLD) {
+        flags |= SAT1_DOA_CONTROL_PLAYBACK_ACTIVE;
+    }
+    if (voice_active || now_us < voice_lock_until_us) {
+        flags |= SAT1_DOA_CONTROL_VOICE_LOCK;
+    }
+
+    bool heartbeat_due = last_send_us == 0 ||
+                         now_us - last_send_us >=
+                             SAT1_DOA_CONTROL_HEARTBEAT_US;
+    if (flags == last_sent_flags && !heartbeat_due) {
+        return ESP_OK;
+    }
+
+    uint8_t payload[1] = {flags};
+    if (!sat1_control_transfer(SAT1_DOA_RESOURCE_ID,
+                               SAT1_DOA_SET_CONTROL,
+                               payload,
+                               sizeof(payload))) {
+        return ESP_FAIL;
+    }
+    last_sent_flags = flags;
+    last_send_us = now_us;
     return ESP_OK;
 }
 
@@ -1137,10 +1209,25 @@ static void doa_task(void *arg)
 {
     (void)arg;
     while (true) {
+        int64_t now_us = esp_timer_get_time();
+        static uint32_t control_failures;
+        esp_err_t control_err = sat1_sync_doa_control(now_us);
+        if (control_err != ESP_OK) {
+            control_failures++;
+            if (control_failures == 1 || (control_failures % 50) == 0) {
+                ESP_LOGW(TAG,
+                         "sat1 doa control write failed count=%lu",
+                         (unsigned long)control_failures);
+            }
+        } else if (control_failures != 0) {
+            ESP_LOGI(TAG, "sat1 doa control recovered");
+            control_failures = 0;
+        }
+
         tater_audio_doa_t snapshot = {0};
         esp_err_t err = sat1_read_doa(&snapshot);
         if (err == ESP_OK) {
-            int64_t now_us = esp_timer_get_time();
+            now_us = esp_timer_get_time();
             if (!s_doa_have_frame_counter || snapshot.frame_counter != s_doa_last_frame_counter) {
                 s_doa_have_frame_counter = true;
                 s_doa_last_frame_counter = snapshot.frame_counter;
@@ -1158,19 +1245,31 @@ static void doa_task(void *arg)
                 s_doa_last_log_us = now_us;
                 ESP_LOGI(
                     TAG,
-                    "sat1 doa valid=%u four_mic=%u angle=%u x=%d y=%d conf=%u energy=%" PRIu32
-                    " mic=%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32,
+                    "sat1 doa valid=%u four_mic=%u angle=%u x=%d/%d y=%d/%d conf=%u energy=%" PRIu32
+                    " noise=%" PRIu32 " gate=%u control=0x%02x mode=0x%02x active=0x%02x"
+                    " health=%02x,%02x,%02x,%02x gain=%u,%u,%u,%u",
                     snapshot.valid,
                     snapshot.four_mic,
                     snapshot.angle_index,
                     snapshot.sample_delay,
+                    snapshot.sample_delay_q8,
                     snapshot.vertical_delay,
+                    snapshot.vertical_delay_q8,
                     snapshot.confidence,
                     snapshot.energy,
-                    snapshot.mic_energy[0],
-                    snapshot.mic_energy[1],
-                    snapshot.mic_energy[2],
-                    snapshot.mic_energy[3]
+                    snapshot.noise_floor_energy,
+                    snapshot.signal_active,
+                    snapshot.control_flags,
+                    snapshot.mode_flags,
+                    snapshot.active_mic_mask,
+                    snapshot.mic_health_flags[0],
+                    snapshot.mic_health_flags[1],
+                    snapshot.mic_health_flags[2],
+                    snapshot.mic_health_flags[3],
+                    snapshot.mic_gain_q15[0],
+                    snapshot.mic_gain_q15[1],
+                    snapshot.mic_gain_q15[2],
+                    snapshot.mic_gain_q15[3]
                 );
             }
         } else {

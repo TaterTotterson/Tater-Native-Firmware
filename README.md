@@ -237,12 +237,15 @@ same future start expressed in that satellite's clock:
 
 While grouped playback is active, each member emits
 `media.session.playhead` once per second. Tater projects both source positions
-onto its monotonic clock and sends a bounded `media.session.adjust` to the right
-member when phase error exceeds half a millisecond. Positive adjustments skip
-a few decoded source frames; negative adjustments repeat the most recent frame.
-The correction is deferred during a TTS overlay, so speech mixing and ducking
-stay intact. Scheduled `audio.overlay.start` commands use the same clock mapping
-to duck and center TTS on both members together.
+onto its monotonic clock and sends a bounded `media.session.adjust` when phase
+error grows. The satellite distributes each correction over time and resamples
+small source-rate differences into fixed-size hardware output blocks, avoiding
+an abrupt dropped or repeated frame. If a stream underruns, the satellite
+rebuilds its buffer, skips forward to the shared wall-clock timeline, and fades
+back in while reporting rebuffer, underrun, and rejoin telemetry. Corrections
+are deferred during a TTS overlay, so speech mixing and ducking stay intact.
+Scheduled `audio.overlay.start` commands use the same clock mapping to duck and
+center TTS on grouped members together.
 
 ### LEDs, Buttons, And Device UI
 
@@ -253,9 +256,9 @@ to duck and center TTS on both members together.
   Wi-Fi, connecting, disconnected, and error states
 - Per-device LED color, true 0-100% brightness, and animation settings
 - Stable, low-glow disconnected state without random idle LED flashes
-- Directional listening animation from XMOS DoA where available, with
-  speech/confidence gating, a brief direction hold, and a neutral listening
-  state on Sat1 and ReSpeaker
+- Directional listening animation from XMOS DoA where available, with adaptive
+  speech/noise gating, confidence filtering, a brief direction hold, and a
+  neutral listening state when no active talker is detected
 - Tool-call visual hold until the final response
 - Display targets render Tater state, clock/date, assistant name, volume/mute,
   and Tater-provided status/stat cards instead of LED-ring animations
@@ -298,8 +301,12 @@ Satellite1 / Sat1:
 - PCM5122/TAS2780 speaker path setup
 - FUSB302B USB-C PD setup path
 - Four-microphone XMOS DoA estimation with noise calibration, confidence
-  filtering, smoothing, and firmware version/status reporting
-- XMOS firmware auto-update to `1.0.8` when the installed version differs
+  filtering, playback-aware talker locking, fractional-delay beamforming,
+  per-microphone gain calibration, unhealthy-microphone fallback, and expanded
+  firmware/diagnostic reporting
+- XMOS firmware auto-update to `1.1.0` when the installed version differs
+- Lab-only four-channel raw USB microphone capture image for independent mic
+  measurement; this diagnostic image is not embedded in normal Sat1 firmware
 - Line-out capability advertised to Tater
 
 ReSpeaker XVF3800:
@@ -333,7 +340,7 @@ ESP32-S3-BOX-3 Display:
 
 - M4A/AAC and OGG/Vorbis are intentionally not included until there is a real
   need for them.
-- A Sat1 boot that must install or recover XMOS `1.0.8` can take about 20
+- A Sat1 boot that must install or recover XMOS `1.1.0` can take about 20
   seconds before the satellite connects. Later boots verify the version and
   skip reflashing.
 - S3 Box display feed depends on Tater being reachable; the display falls back

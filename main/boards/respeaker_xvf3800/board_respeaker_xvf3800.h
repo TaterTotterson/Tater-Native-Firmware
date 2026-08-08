@@ -3,7 +3,9 @@
 #include "driver/gpio.h"
 
 #define TATER_BOARD_ID "respeaker-xvf3800"
-#define TATER_FIRMWARE_VERSION "native-respeaker-xvf3800-0.3.4"
+#define TATER_DEVICE_ID_PREFIX "respeaker-xvf3800"
+#define TATER_DEFAULT_DEVICE_NAME "Tater ReSpeaker XVF3800"
+#define TATER_FIRMWARE_VERSION "native-respeaker-xvf3800-0.3.5"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6

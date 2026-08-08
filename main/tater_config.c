@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "board.h"
 #include "esp_check.h"
 #include "nvs.h"
 
@@ -26,7 +27,7 @@ void tater_config_defaults(tater_config_t *config)
     safe_copy(config->wifi_password, sizeof(config->wifi_password), CONFIG_TATER_WIFI_PASSWORD);
     safe_copy(config->server_url, sizeof(config->server_url), CONFIG_TATER_SERVER_URL);
     safe_copy(config->token, sizeof(config->token), CONFIG_TATER_SATELLITE_TOKEN);
-    safe_copy(config->device_name, sizeof(config->device_name), CONFIG_TATER_DEVICE_NAME);
+    safe_copy(config->device_name, sizeof(config->device_name), TATER_DEFAULT_DEVICE_NAME);
     safe_copy(config->room, sizeof(config->room), CONFIG_TATER_ROOM);
     config->provisioned = false;
 }
@@ -65,7 +66,16 @@ esp_err_t tater_config_load(tater_config_t *config)
         safe_copy(config->server_url, sizeof(config->server_url), CONFIG_TATER_SERVER_URL);
     }
     if (strlen(config->device_name) == 0) {
-        safe_copy(config->device_name, sizeof(config->device_name), CONFIG_TATER_DEVICE_NAME);
+        safe_copy(config->device_name, sizeof(config->device_name), TATER_DEFAULT_DEVICE_NAME);
+#if !TATER_BOARD_VOICE_PE
+    } else if (strcmp(config->device_name, "Tater Voice PE") == 0) {
+        /*
+         * Early multi-board images accidentally persisted the VoicePE default
+         * on every board. Correct that known default without touching a name
+         * the user chose themselves.
+         */
+        safe_copy(config->device_name, sizeof(config->device_name), TATER_DEFAULT_DEVICE_NAME);
+#endif
     }
     return ESP_OK;
 }

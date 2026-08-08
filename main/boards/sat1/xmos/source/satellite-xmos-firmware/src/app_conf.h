@@ -141,6 +141,10 @@
 #define appconfUSB_AUDIO_MODE      appconfUSB_AUDIO_RELEASE
 #endif
 
+#ifndef appconfUSB_AUDIO_RAW_MIC_CAPTURE
+#define appconfUSB_AUDIO_RAW_MIC_CAPTURE 0
+#endif
+
 #define appconfSPI_AUDIO_RELEASE   0
 #define appconfSPI_AUDIO_TESTING   1
 #ifndef appconfSPI_AUDIO_MODE

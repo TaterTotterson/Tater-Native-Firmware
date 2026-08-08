@@ -53,6 +53,16 @@ Run the host-side direction estimator and beamformer checks with:
 scripts/test_doa_estimator_host.sh
 ```
 
+Build the lab-only four-channel USB capture image with:
+
+```bash
+XMOS_CLEAN_BUILD=0 SAT1_XMOS_TARGET=satellite1_usb_firmware_raw4 ./build_sat1_fixed_delay.sh
+```
+
+It enumerates as `SATELLITE1 Raw 4-Mic` and exposes four 16 kHz, 16-bit
+channels in East, West, North, South order. This target bypasses the production
+AEC/NS/AGC path so the physical microphones can be measured independently.
+
 ## Current Source Base
 
 This source started from `FutureProofHomes/Satellite1-XMOS` at:
@@ -61,8 +71,9 @@ This source started from `FutureProofHomes/Satellite1-XMOS` at:
 86cf1ee Merge pull request #106 from FutureProofHomes/align_branches
 ```
 
-The current source includes the Sat1 four-microphone DoA estimator and its
-fractional-delay, delay-and-sum beamformer. The steered beam is generated before
-the existing two-channel AEC because the bundled XMOS voice library supports at
-most two microphone channels; its second microphone-side channel remains an
-omni mix.
+Version 1.1.0 includes the Sat1 four-microphone DoA estimator, playback-aware
+talker locking, a four-tap fractional-delay beamformer, slow per-microphone gain
+calibration, failed/noisy/clipping microphone fallback, and extended device
+control diagnostics. The steered beam is generated before the existing
+two-channel AEC because the bundled XMOS voice library supports at most two
+microphone channels; its second microphone-side channel remains an omni mix.

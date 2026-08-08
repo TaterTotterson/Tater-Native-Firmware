@@ -90,6 +90,10 @@ void tater_protocol_send_media_session_playhead(
     uint32_t buffered_frames,
     int64_t satellite_time_us,
     int64_t scheduled_start_us,
-    int32_t correction_frames
+    int32_t correction_frames,
+    bool rebuffering,
+    uint32_t underrun_events,
+    uint32_t rejoin_count,
+    uint64_t rejoin_frames
 );
 void tater_protocol_send_ota_status(const char *status, int progress, const char *message);

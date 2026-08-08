@@ -318,9 +318,17 @@ uint8_t const* tud_descriptor_configuration_cb(uint8_t index)
  char const *string_desc_arr[] = {
     (const char[]) {0x09, 0x04}, // 0: is supported language is English (0x0409)
     "XMOS",                      // 1: Manufacturer
+#if appconfUSB_AUDIO_RAW_MIC_CAPTURE
+    "SATELLITE1 Raw 4-Mic",      // 2: Product
+#else
     "SATELLITE1",                // 2: Product
+#endif
     "123456",                    // 3: Serials
+#if appconfUSB_AUDIO_RAW_MIC_CAPTURE
+    "SATELLITE1 Raw E W N S",    // 4: Audio Interface
+#else
     "SATELLITE1",                // 4: Audio Interface
+#endif
     "DFU FACTORY",               // 5: DFU device
     "DFU UPGRADE",               // 6: DFU device
     "DFU DATAPARTITION",         // 7: DFU device

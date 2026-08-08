@@ -49,6 +49,9 @@ volatile int aec_ref_source = appconfAEC_REF_DEFAULT;
 rtos_osal_queue_t *ref_input_queue;
 #endif
 
+#if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && \
+    appconfAUDIO_PIPELINE_CHANNELS >= 2 && \
+    appconfAUDIO_PIPELINE_CHANNELS < MIC_ARRAY_CONFIG_MIC_COUNT
 static int32_t saturate_i32_from_i64(int64_t value)
 {
     if (value > INT32_MAX) {
@@ -60,7 +63,6 @@ static int32_t saturate_i32_from_i64(int64_t value)
     return (int32_t)value;
 }
 
-#if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS >= 2
 static sat1_beamformer_t sat1_beamformer;
 
 static void mix_four_mics_for_pipeline(
@@ -209,6 +211,13 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
     if (received == frame_count) {
         int32_t *pipeline_mic_ptr = (int32_t *)pipeline_mic_frames;
 #if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS >= 2
+        sat1_beamformer_diagnostics_t beam_diagnostics;
+        memset(&beam_diagnostics, 0, sizeof(beam_diagnostics));
+        sat1_beamformer_get_diagnostics(&beam_diagnostics);
+        if (beam_diagnostics.active_mic_mask != 0) {
+            doa_estimator_set_mic_health(
+                beam_diagnostics.active_mic_mask);
+        }
         doa_estimator_process_frame_4(full_mic_frames[0],
                                       full_mic_frames[1],
                                       full_mic_frames[2],

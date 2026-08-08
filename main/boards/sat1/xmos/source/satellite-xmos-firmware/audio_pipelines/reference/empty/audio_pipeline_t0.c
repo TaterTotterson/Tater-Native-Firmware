@@ -59,7 +59,7 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
                                appconfAUDIO_PIPELINE_FRAME_ADVANCE);
 }
 
-void empty_stage(void)
+static void empty_stage(void)
 {
     ;
 }

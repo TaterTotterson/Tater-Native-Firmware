@@ -202,12 +202,116 @@ static void expect_direction_hold_and_release(void)
     }
 }
 
+static void expect_cubic_fractional_interpolation(void)
+{
+    int32_t quadratic_mics[SAT1_BEAMFORMER_MIC_COUNT][TOTAL_SAMPLES];
+    for (size_t mic = 0; mic < SAT1_BEAMFORMER_MIC_COUNT; mic++) {
+        for (size_t sample = 0; sample < TOTAL_SAMPLES; sample++) {
+            quadratic_mics[mic][sample] =
+                4 * (int32_t)sample * (int32_t)sample;
+        }
+    }
+
+    sat1_beamformer_t beamformer;
+    sat1_beamformer_reset(&beamformer);
+    doa_estimator_state_t direction = {
+        .sample_delay_q8 = DOA_ESTIMATOR_LAG_Q8_SCALE,
+        .flags = DOA_ESTIMATOR_FLAG_VALID | DOA_ESTIMATOR_FLAG_FOUR_MIC,
+    };
+
+    for (size_t frame = 0; frame < TEST_FRAMES; frame++) {
+        const int32_t *microphones[SAT1_BEAMFORMER_MIC_COUNT];
+        int32_t output[FRAME_SAMPLES];
+        for (size_t mic = 0; mic < SAT1_BEAMFORMER_MIC_COUNT; mic++) {
+            microphones[mic] =
+                &quadratic_mics[mic][frame * FRAME_SAMPLES];
+        }
+        sat1_beamformer_process_frame(&beamformer,
+                                      output,
+                                      microphones,
+                                      FRAME_SAMPLES,
+                                      &direction);
+        if (frame == 0) {
+            continue;
+        }
+
+        for (size_t sample = 0; sample < FRAME_SAMPLES; sample++) {
+            int32_t n = (int32_t)((frame * FRAME_SAMPLES) + sample);
+            int32_t east = (2 * n - 5) * (2 * n - 5);
+            int32_t west = (2 * n - 3) * (2 * n - 3);
+            int32_t north_south = 4 * (n - 2) * (n - 2);
+            int32_t expected =
+                (east + west + (2 * north_south)) / 4;
+            if (output[sample] != expected) {
+                fprintf(stderr,
+                        "cubic interpolation failed at %d: got=%d expected=%d\n",
+                        n,
+                        output[sample],
+                        expected);
+                exit(1);
+            }
+        }
+    }
+}
+
+static void expect_failed_mic_fallback(void)
+{
+    int32_t silent[FRAME_SAMPLES] = {0};
+    const int32_t *microphones[SAT1_BEAMFORMER_MIC_COUNT] = {
+        silent,
+        microphone_audio[1],
+        microphone_audio[2],
+        microphone_audio[3],
+    };
+    doa_estimator_state_t invalid = {
+        .flags = DOA_ESTIMATOR_FLAG_FOUR_MIC,
+    };
+    sat1_beamformer_t beamformer;
+    sat1_beamformer_reset(&beamformer);
+    int32_t output[FRAME_SAMPLES];
+
+    for (size_t frame = 0; frame < 24; frame++) {
+        sat1_beamformer_process_frame(&beamformer,
+                                      output,
+                                      microphones,
+                                      FRAME_SAMPLES,
+                                      &invalid);
+    }
+    if ((beamformer.active_mic_mask & 0x01u) != 0 ||
+        !(beamformer.mic_health_flags[0] & SAT1_MIC_HEALTH_DEAD)) {
+        fprintf(stderr,
+                "dead mic was not removed: mask=0x%02x health=0x%02x\n",
+                beamformer.active_mic_mask,
+                beamformer.mic_health_flags[0]);
+        exit(1);
+    }
+
+    microphones[0] = microphone_audio[0];
+    for (size_t frame = 0; frame < 160; frame++) {
+        sat1_beamformer_process_frame(&beamformer,
+                                      output,
+                                      microphones,
+                                      FRAME_SAMPLES,
+                                      &invalid);
+    }
+    if ((beamformer.active_mic_mask & 0x01u) == 0 ||
+        beamformer.mic_health_flags[0] != 0) {
+        fprintf(stderr,
+                "recovered mic was not restored: mask=0x%02x health=0x%02x\n",
+                beamformer.active_mic_mask,
+                beamformer.mic_health_flags[0]);
+        exit(1);
+    }
+}
+
 int main(void)
 {
     build_directional_audio();
     expect_directional_gain();
     expect_fractional_steering();
+    expect_cubic_fractional_interpolation();
     expect_direction_hold_and_release();
+    expect_failed_mic_fallback();
     puts("Sat1 beamformer host tests passed.");
     return 0;
 }

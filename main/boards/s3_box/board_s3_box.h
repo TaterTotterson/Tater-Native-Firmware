@@ -4,7 +4,9 @@
 #include "driver/spi_master.h"
 
 #define TATER_BOARD_ID "s3-box"
-#define TATER_FIRMWARE_VERSION "native-s3-box-0.3.4"
+#define TATER_DEVICE_ID_PREFIX "s3box"
+#define TATER_DEFAULT_DEVICE_NAME "Tater S3 Box"
+#define TATER_FIRMWARE_VERSION "native-s3-box-0.3.5"
 
 #define TATER_I2C_SDA GPIO_NUM_8
 #define TATER_I2C_SCL GPIO_NUM_18

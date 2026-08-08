@@ -62,7 +62,7 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
     return AUDIO_PIPELINE_FREE_FRAME;
 }
 
-void empty_stage(void)
+static void empty_stage(void)
 {
     ;
 }

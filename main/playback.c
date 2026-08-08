@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 #include "native_settings.h"
 #include "playback_mix.h"
+#include "playback_sync.h"
 #include "tater_protocol.h"
 
 static const char *TAG = "tater_playback";
@@ -48,6 +49,9 @@ static const uint32_t PLAYBACK_SCENE_PREBUFFER_MS = 250;
 static const uint32_t PLAYBACK_SCENE_PREBUFFER_TIMEOUT_MS = 5000;
 static const uint32_t PLAYBACK_MEDIA_PREPARE_TIMEOUT_MS = 30000;
 static const uint32_t PLAYBACK_MEDIA_PLAYHEAD_INTERVAL_MS = 1000;
+static const uint32_t PLAYBACK_MEDIA_REBUFFER_MS = 250;
+static const uint32_t PLAYBACK_MEDIA_REJOIN_TOLERANCE_FRAMES = 24;
+static const uint32_t PLAYBACK_MEDIA_REJOIN_FADE_MS = 20;
 static const int32_t PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES = 480;
 static const size_t PLAYBACK_SCENE_BACKGROUND_RING_FRAMES = 2 * TATER_SPK_SAMPLE_RATE;
 static const size_t PLAYBACK_MEDIA_RING_FRAMES = 2 * TATER_SPK_SAMPLE_RATE;
@@ -249,7 +253,7 @@ typedef struct {
     bool prepared;
     bool committed;
     int64_t scheduled_start_us;
-    int32_t pending_correction_frames;
+    tater_playback_sync_slew_t correction_slew;
     uint64_t source_frames;
     uint64_t output_frames;
     scene_pcm_ring_t media_ring;
@@ -2205,6 +2209,23 @@ static void scene_pcm_ring_snapshot(
     xSemaphoreGive(ring->lock);
 }
 
+static size_t scene_pcm_ring_discard(scene_pcm_ring_t *ring, size_t frame_count)
+{
+    if (!ring || !ring->lock || frame_count == 0) {
+        return 0;
+    }
+    xSemaphoreTake(ring->lock, portMAX_DELAY);
+    size_t discarded = frame_count < ring->fill_frames ? frame_count : ring->fill_frames;
+    if (discarded > 0) {
+        ring->read_frame = (ring->read_frame + discarded) % ring->capacity_frames;
+        ring->fill_frames -= discarded;
+        ring->total_read_frames += discarded;
+        xSemaphoreGive(ring->can_write);
+    }
+    xSemaphoreGive(ring->lock);
+    return discarded;
+}
+
 static esp_err_t scene_background_sink_begin(void *ctx)
 {
     scene_background_args_t *request = (scene_background_args_t *)ctx;
@@ -2905,21 +2926,31 @@ static bool media_session_wait_until(int64_t start_at_us)
     return false;
 }
 
-static int32_t media_session_take_correction(media_session_state_t *session)
+static int32_t media_session_take_correction_step(media_session_state_t *session)
 {
     if (!session || !session->lock) {
         return 0;
     }
     xSemaphoreTake(session->lock, portMAX_DELAY);
-    int32_t correction = session->pending_correction_frames;
-    if (correction > (int32_t)PLAYBACK_MIX_CHUNK_FRAMES) {
-        correction = PLAYBACK_MIX_CHUNK_FRAMES;
-    } else if (correction < -(int32_t)PLAYBACK_MIX_CHUNK_FRAMES) {
-        correction = -(int32_t)PLAYBACK_MIX_CHUNK_FRAMES;
-    }
-    session->pending_correction_frames -= correction;
+    int32_t correction = tater_playback_sync_slew_next_step(
+        &session->correction_slew,
+        PLAYBACK_MIX_CHUNK_FRAMES
+    );
     xSemaphoreGive(session->lock);
     return correction;
+}
+
+static void media_session_restore_correction_step(
+    media_session_state_t *session,
+    int32_t correction
+)
+{
+    if (!session || !session->lock || correction == 0) {
+        return;
+    }
+    xSemaphoreTake(session->lock, portMAX_DELAY);
+    tater_playback_sync_slew_restore_step(&session->correction_slew, correction);
+    xSemaphoreGive(session->lock);
 }
 
 static void media_session_task(void *arg)
@@ -2931,11 +2962,15 @@ static void media_session_task(void *arg)
     bool ready_reported = false;
     bool started_reported = false;
     bool media_finished = false;
-    bool have_last_media_frame = false;
-    int16_t last_media_frame[TATER_SPK_CHANNELS] = {0};
+    bool rebuffering = false;
     uint64_t source_frames_written = 0;
     uint64_t output_frames_written = 0;
+    uint64_t rejoin_frames_total = 0;
+    uint64_t start_position_frames = 0;
     int32_t correction_since_report = 0;
+    uint32_t underrun_events = 0;
+    uint32_t rejoin_count = 0;
+    uint32_t recovery_fade_frames_remaining = 0;
     int64_t scheduled_start_us = 0;
     int64_t last_playhead_us = 0;
     tater_playback_mix_state_t mix;
@@ -3074,8 +3109,9 @@ static void media_session_task(void *arg)
     );
     started_reported = true;
     last_playhead_us = actual_start_us;
-    source_frames_written =
+    start_position_frames =
         ((uint64_t)start_position_ms * (uint64_t)TATER_SPK_SAMPLE_RATE) / 1000ULL;
+    source_frames_written = start_position_frames;
     ESP_LOGI(
         TAG,
         "media session started id=%s group=%s channel=%s scheduled=%" PRId64 " actual=%" PRId64,
@@ -3086,10 +3122,10 @@ static void media_session_task(void *arg)
         actual_start_us
     );
 
+    int16_t media_input_frames[(PLAYBACK_MIX_CHUNK_FRAMES + 1) * TATER_SPK_CHANNELS];
     int16_t media_frames[PLAYBACK_MIX_CHUNK_FRAMES * TATER_SPK_CHANNELS];
     int16_t foreground_frames[PLAYBACK_MIX_CHUNK_FRAMES * TATER_SPK_CHANNELS];
     int16_t mixed_frames[PLAYBACK_MIX_CHUNK_FRAMES * TATER_SPK_CHANNELS];
-    int16_t correction_frames[PLAYBACK_MIX_CHUNK_FRAMES * TATER_SPK_CHANNELS];
 
     while (!s_abort) {
         size_t media_fill = 0;
@@ -3146,57 +3182,137 @@ static void media_session_task(void *arg)
             }
         }
 
-        if (!has_overlay && have_last_media_frame) {
-            int32_t correction = media_session_take_correction(session);
-            if (correction > 0) {
-                size_t discard_target = (size_t)correction;
-                size_t discarded = scene_pcm_ring_read(
-                    &session->media_ring,
-                    correction_frames,
-                    discard_target,
-                    0
-                );
-                source_frames_written += discarded;
-                correction_since_report += (int32_t)discarded;
-                if (discarded < discard_target) {
-                    xSemaphoreTake(session->lock, portMAX_DELAY);
-                    session->pending_correction_frames +=
-                        (int32_t)(discard_target - discarded);
-                    xSemaphoreGive(session->lock);
-                }
-            } else if (correction < 0) {
-                size_t repeat_frames = (size_t)(-correction);
-                for (size_t frame = 0; frame < repeat_frames; frame++) {
-                    correction_frames[frame * TATER_SPK_CHANNELS] = last_media_frame[0];
-                    correction_frames[(frame * TATER_SPK_CHANNELS) + 1] =
-                        last_media_frame[TATER_SPK_CHANNELS > 1 ? 1 : 0];
-                }
-                err = tater_audio_write_speaker_frames(correction_frames, repeat_frames);
-                if (err != ESP_OK) {
-                    break;
-                }
-                output_frames_written += repeat_frames;
-                correction_since_report -= (int32_t)repeat_frames;
-            }
-        }
-
+        memset(media_input_frames, 0, sizeof(media_input_frames));
         memset(media_frames, 0, sizeof(media_frames));
         memset(foreground_frames, 0, sizeof(foreground_frames));
-        size_t got_media = scene_pcm_ring_read(
-            &session->media_ring,
-            media_frames,
-            PLAYBACK_MIX_CHUNK_FRAMES,
-            media_finished ? 0 : pdMS_TO_TICKS(30)
-        );
-        source_frames_written += got_media;
-        if (got_media > 0) {
-            tater_playback_route_channel(media_channel, media_frames, got_media);
-            last_media_frame[0] =
-                media_frames[(got_media - 1) * TATER_SPK_CHANNELS];
-            last_media_frame[TATER_SPK_CHANNELS > 1 ? 1 : 0] =
-                media_frames[((got_media - 1) * TATER_SPK_CHANNELS)
-                    + (TATER_SPK_CHANNELS > 1 ? 1 : 0)];
-            have_last_media_frame = true;
+        bool recovery_silence = false;
+        if (rebuffering && !has_overlay) {
+            size_t recovery_fill = 0;
+            bool recovery_ended = false;
+            scene_pcm_ring_snapshot(
+                &session->media_ring,
+                &recovery_fill,
+                &recovery_ended
+            );
+            size_t recovery_prebuffer_frames =
+                ((size_t)TATER_SPK_SAMPLE_RATE * PLAYBACK_MEDIA_REBUFFER_MS) / 1000;
+            int64_t recovery_now_us = esp_timer_get_time();
+            uint64_t desired_source_frames = start_position_frames;
+            if (recovery_now_us > scheduled_start_us) {
+                desired_source_frames +=
+                    ((uint64_t)(recovery_now_us - scheduled_start_us)
+                        * (uint64_t)TATER_SPK_SAMPLE_RATE) / 1000000ULL;
+            }
+            if (recovery_fill >= recovery_prebuffer_frames || recovery_ended) {
+                uint64_t phase_gap = desired_source_frames > source_frames_written
+                    ? desired_source_frames - source_frames_written
+                    : 0;
+                size_t retain_frames = recovery_ended ? 0 : recovery_prebuffer_frames;
+                size_t available_to_discard = recovery_fill > retain_frames
+                    ? recovery_fill - retain_frames
+                    : 0;
+                size_t discard_target = phase_gap < (uint64_t)available_to_discard
+                    ? (size_t)phase_gap
+                    : available_to_discard;
+                size_t discarded = scene_pcm_ring_discard(
+                    &session->media_ring,
+                    discard_target
+                );
+                source_frames_written += discarded;
+                rejoin_frames_total += discarded;
+                if (
+                    source_frames_written + PLAYBACK_MEDIA_REJOIN_TOLERANCE_FRAMES
+                        >= desired_source_frames
+                ) {
+                    rebuffering = false;
+                    rejoin_count++;
+                    recovery_fade_frames_remaining =
+                        ((uint32_t)TATER_SPK_SAMPLE_RATE
+                            * PLAYBACK_MEDIA_REJOIN_FADE_MS) / 1000;
+                    ESP_LOGI(
+                        TAG,
+                        "media session timeline rejoined id=%s skipped=%" PRIu64 " rejoins=%u",
+                        session_id[0] ? session_id : "-",
+                        rejoin_frames_total,
+                        (unsigned)rejoin_count
+                    );
+                }
+            }
+            recovery_silence = rebuffering;
+        }
+
+        size_t media_output_frames = 0;
+        size_t got_media = 0;
+        if (recovery_silence) {
+            media_output_frames = PLAYBACK_MIX_CHUNK_FRAMES;
+        } else {
+            int32_t correction = !has_overlay
+                ? media_session_take_correction_step(session)
+                : 0;
+            size_t requested_media_frames = (size_t)(
+                (int32_t)PLAYBACK_MIX_CHUNK_FRAMES + correction
+            );
+            got_media = scene_pcm_ring_read(
+                &session->media_ring,
+                media_input_frames,
+                requested_media_frames,
+                media_finished ? 0 : pdMS_TO_TICKS(30)
+            );
+            source_frames_written += got_media;
+
+            size_t current_fill = 0;
+            bool current_ended = false;
+            scene_pcm_ring_snapshot(&session->media_ring, &current_fill, &current_ended);
+            (void)current_fill;
+            if (got_media == requested_media_frames && got_media > 0) {
+                tater_playback_sync_resample_stereo(
+                    media_input_frames,
+                    got_media,
+                    media_frames,
+                    PLAYBACK_MIX_CHUNK_FRAMES
+                );
+                media_output_frames = PLAYBACK_MIX_CHUNK_FRAMES;
+                correction_since_report += correction;
+            } else {
+                media_session_restore_correction_step(session, correction);
+                media_output_frames = got_media < PLAYBACK_MIX_CHUNK_FRAMES
+                    ? got_media
+                    : PLAYBACK_MIX_CHUNK_FRAMES;
+                if (media_output_frames > 0) {
+                    memcpy(
+                        media_frames,
+                        media_input_frames,
+                        media_output_frames * TATER_SPK_CHANNELS * sizeof(int16_t)
+                    );
+                }
+                if (!current_ended && !has_overlay) {
+                    rebuffering = true;
+                    underrun_events++;
+                    media_output_frames = PLAYBACK_MIX_CHUNK_FRAMES;
+                    ESP_LOGW(
+                        TAG,
+                        "media session underrun id=%s got=%u wanted=%u events=%u",
+                        session_id[0] ? session_id : "-",
+                        (unsigned)got_media,
+                        (unsigned)requested_media_frames,
+                        (unsigned)underrun_events
+                    );
+                }
+            }
+            if (media_output_frames > 0) {
+                tater_playback_route_channel(
+                    media_channel,
+                    media_frames,
+                    media_output_frames
+                );
+                tater_playback_sync_fade_in(
+                    media_frames,
+                    media_output_frames,
+                    &recovery_fade_frames_remaining,
+                    ((uint32_t)TATER_SPK_SAMPLE_RATE
+                        * PLAYBACK_MEDIA_REJOIN_FADE_MS) / 1000
+                );
+            }
         }
         size_t got_foreground = 0;
         bool release_after_write = false;
@@ -3214,7 +3330,9 @@ static void media_session_task(void *arg)
             release_after_write = overlay_ended && overlay_fill == 0;
         }
 
-        size_t output_frames = got_media > got_foreground ? got_media : got_foreground;
+        size_t output_frames = media_output_frames > got_foreground
+            ? media_output_frames
+            : got_foreground;
         if (output_frames > 0) {
             tater_playback_mix_frames(
                 &mix,
@@ -3256,7 +3374,11 @@ static void media_session_task(void *arg)
                 (uint32_t)buffered_frames,
                 now_us,
                 scheduled_start_us,
-                correction_since_report
+                correction_since_report,
+                rebuffering,
+                underrun_events,
+                rejoin_count,
+                rejoin_frames_total
             );
             correction_since_report = 0;
             last_playhead_us = now_us;
@@ -3353,7 +3475,7 @@ done:
         session->tool_visual_state = false;
         session->scheduled_start_us = 0;
         session->media_start_position_ms = 0;
-        session->pending_correction_frames = 0;
+        tater_playback_sync_slew_init(&session->correction_slew);
         session->source_frames = 0;
         session->output_frames = 0;
         xSemaphoreGive(session->lock);
@@ -3632,7 +3754,7 @@ esp_err_t tater_playback_start_media_session(const tater_playback_media_session_
     s_media_session.prepared = false;
     s_media_session.committed = !media->prepare;
     s_media_session.scheduled_start_us = 0;
-    s_media_session.pending_correction_frames = 0;
+    tater_playback_sync_slew_init(&s_media_session.correction_slew);
     s_media_session.source_frames = 0;
     s_media_session.output_frames = 0;
     s_media_session.media_ring_initialized = false;
@@ -3713,13 +3835,12 @@ esp_err_t tater_playback_adjust_media_session(const char *session_id, int32_t co
         xSemaphoreGive(s_media_session.lock);
         return ESP_ERR_INVALID_STATE;
     }
-    int32_t pending = s_media_session.pending_correction_frames + correction_frames;
-    if (pending > PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES) {
-        pending = PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES;
-    } else if (pending < -PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES) {
-        pending = -PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES;
-    }
-    s_media_session.pending_correction_frames = pending;
+    tater_playback_sync_slew_queue(
+        &s_media_session.correction_slew,
+        correction_frames,
+        TATER_SPK_SAMPLE_RATE,
+        PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES
+    );
     xSemaphoreGive(s_media_session.lock);
     return ESP_OK;
 }
