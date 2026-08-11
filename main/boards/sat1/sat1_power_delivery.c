@@ -71,6 +71,7 @@
 #define PD_MAX_REQUEST_MV 20000
 
 #define SAT1_PD_READY_BIT (1u << 0)
+#define SAT1_PD_STARTUP_DELAY_MS 2000
 #define SAT1_PD_NEGOTIATION_TIMEOUT_MS 6500
 #define SAT1_PD_GET_SOURCE_CAP_INTERVAL_MS 1800
 
@@ -494,6 +495,10 @@ static esp_err_t fusb_initialize(uint8_t *device_id_out, uint8_t *cc_pin_out)
 static void pd_task(void *arg)
 {
     (void)arg;
+    // Match the official Satellite1 firmware's stabilization window before
+    // resetting the FUSB302B or changing the USB-C power contract.
+    vTaskDelay(pdMS_TO_TICKS(SAT1_PD_STARTUP_DELAY_MS));
+
     uint8_t device_id = 0;
     uint8_t cc_pin = 0;
     esp_err_t err = fusb_initialize(&device_id, &cc_pin);

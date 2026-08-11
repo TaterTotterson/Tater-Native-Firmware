@@ -49,11 +49,12 @@ USB-C power negotiation lives in:
 main/boards/sat1/sat1_power_delivery.c
 ```
 
-The speaker always starts from the safe 5 V TAS2780 profile. A fixed USB-PD
-source profile up to 20 V is requested through the FUSB302B; after `PS_RDY`,
+The speaker always starts from the safe 5 V TAS2780 profile. After the official
+firmware's two-second startup stabilization window, a fixed USB-PD source
+profile up to 20 V is requested through the FUSB302B; after `PS_RDY`,
 contracts of 9 V or higher select TAS2780 power mode 2. Missing controllers,
 5 V-only adapters, rejected requests, and negotiation timeouts remain on power
-mode 0, so the same image is safe for newer board revisions. Early public
+mode 0, preserving the existing amplifier profile on newer revisions. Early public
 Beta.1/rev4.1 boards require the higher-voltage contract (or their documented
 VBAT hardware modification) for the onboard speaker rail to operate.
 
