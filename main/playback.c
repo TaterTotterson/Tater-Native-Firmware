@@ -3365,11 +3365,17 @@ static void media_session_task(void *arg)
             session->source_frames = source_frames_written;
             session->output_frames = output_frames_written;
             xSemaphoreGive(session->lock);
+            uint64_t rendered_frames = tater_playback_sync_rendered_source_frames(
+                source_frames_written,
+                start_position_frames,
+                TATER_MEDIA_RENDER_LATENCY_FRAMES
+            );
             tater_protocol_send_media_session_playhead(
                 session_id,
                 group_id,
                 media_session_channel_name(media_channel),
                 source_frames_written,
+                rendered_frames,
                 output_frames_written,
                 (uint32_t)buffered_frames,
                 now_us,

@@ -1,7 +1,5 @@
-- Releases Satellite1 firmware `0.3.6-rev3`; Voice PE, ReSpeaker XVF3800, and S3 Box remain on `0.3.6`.
-- Reworks Satellite1 USB-PD around the official FPH controller lifecycle: configure the FUSB302B first, wait two seconds before CC/PD traffic, receive PD messages from GPIO1 interrupts, and use five-second recovery stages with one soft reset.
-- Keeps the USB-PD task alive after the first contract so later source messages and resets can be handled without restarting the board.
-- Adds native FUSB302B USB-C Power Delivery negotiation for Satellite1 and requests the highest fixed source profile up to 20 V.
-- Selects TAS2780 power mode 2 only after an explicit USB-PD contract of at least 9 V, restoring the onboard speaker power path used by early Beta.1/rev4.1 boards.
-- Keeps the TAS2780 on its existing 5 V profile when PD is unavailable, rejected, or limited to 5 V.
-- Adds power-contract and TAS2780 diagnostics to device status and boot/playback logs.
+- Releases Satellite1, Voice PE, ReSpeaker XVF3800, and S3 Box firmware `0.3.7`.
+- Adds a rendered-audio clock to every native ESP satellite so mixed playback groups use the same speaker-facing timing model as Tater ThirdReality S420 firmware.
+- Reports the source frame actually reaching the speaker after accounting for each board's configured I2S DMA queue instead of treating queued decoder output as already rendered.
+- Moves Satellite1 and ReSpeaker silence priming before the synchronized start deadline, removing their built-in late first sample without adding an artificial playback delay.
+- Keeps normal gradual drift correction active after the synchronized start for stable long-running stereo and multi-room playback.

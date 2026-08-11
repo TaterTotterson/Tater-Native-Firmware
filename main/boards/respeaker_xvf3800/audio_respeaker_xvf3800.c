@@ -94,6 +94,7 @@ static bool s_speaker_ready;
 static bool s_speaker_enabled;
 static bool s_speaker_primed;
 static bool s_speaker_session_active;
+static void speaker_prime_silence(void);
 static bool s_xvf_muted;
 static portMUX_TYPE s_speaker_level_lock = portMUX_INITIALIZER_UNLOCKED;
 static float s_speaker_audio_level;
@@ -935,6 +936,7 @@ esp_err_t tater_audio_speaker_begin(void)
     }
     s_speaker_enabled = true;
     s_speaker_primed = false;
+    speaker_prime_silence();
     s_speaker_session_active = true;
     return ESP_OK;
 }

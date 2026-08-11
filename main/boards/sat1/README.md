@@ -5,7 +5,7 @@ Native board implementation for Satellite1 / Sat1.
 ## Current status
 
 Satellite1 is a fully supported Tater Native target, not an experimental board
-port. The current public build is `native-satellite1-0.3.6-rev3`, with
+port. The current public build is `native-satellite1-0.3.7`, with
 checksum-verified factory and OTA artifacts published under the `satellite1`
 release family.
 Users can install it through Tater's Local USB or Browser USB flasher, complete

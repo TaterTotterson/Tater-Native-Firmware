@@ -91,6 +91,20 @@ void tater_playback_sync_slew_restore_step(
         : 1;
 }
 
+uint64_t tater_playback_sync_rendered_source_frames(
+    uint64_t source_frames,
+    uint64_t start_position_frames,
+    uint32_t output_latency_frames
+)
+{
+    uint64_t rendered_floor = start_position_frames;
+    uint64_t queued_through = rendered_floor + (uint64_t)output_latency_frames;
+    if (queued_through < rendered_floor || source_frames <= queued_through) {
+        return rendered_floor;
+    }
+    return source_frames - (uint64_t)output_latency_frames;
+}
+
 void tater_playback_sync_resample_stereo(
     const int16_t *input,
     size_t input_frames,

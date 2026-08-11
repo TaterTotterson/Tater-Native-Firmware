@@ -64,6 +64,20 @@ static void test_slew_step_can_be_restored_after_starvation(void)
     assert(slew.pending_frames == -1);
 }
 
+static void test_rendered_cursor_excludes_hardware_queue(void)
+{
+    assert(tater_playback_sync_rendered_source_frames(960, 0, 960) == 0);
+    assert(tater_playback_sync_rendered_source_frames(48960, 0, 960) == 48000);
+    assert(tater_playback_sync_rendered_source_frames(96960, 48000, 960) == 96000);
+    assert(
+        tater_playback_sync_rendered_source_frames(
+            UINT64_MAX,
+            UINT64_MAX - 100,
+            960
+        ) == UINT64_MAX - 100
+    );
+}
+
 int main(void)
 {
     test_identity_copy();
@@ -71,6 +85,7 @@ int main(void)
     test_fade_finishes();
     test_slew_is_distributed_over_settle_window();
     test_slew_step_can_be_restored_after_starvation();
+    test_rendered_cursor_excludes_hardware_queue();
     puts("playback_sync host tests passed");
     return 0;
 }

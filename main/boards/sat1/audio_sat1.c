@@ -111,6 +111,7 @@ static int64_t s_doa_last_log_us;
 static bool s_doa_have_frame_counter;
 static uint32_t s_doa_last_frame_counter;
 static int64_t s_doa_last_frame_change_us;
+static void speaker_prime_silence(void);
 static portMUX_TYPE s_xmos_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static tater_audio_xmos_status_t s_xmos_status = {
     .target_major = SAT1_XMOS_TARGET_MAJOR,
@@ -1738,6 +1739,7 @@ esp_err_t tater_audio_speaker_begin(void)
     }
     s_speaker_enabled = true;
     s_speaker_primed = false;
+    speaker_prime_silence();
     s_speaker_session_active = true;
     return ESP_OK;
 }

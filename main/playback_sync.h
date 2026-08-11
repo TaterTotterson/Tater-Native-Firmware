@@ -29,6 +29,17 @@ void tater_playback_sync_slew_restore_step(
 );
 
 /*
+ * Convert the decoder/source cursor into the source frame currently reaching
+ * the speaker. The playback task normally stays one hardware queue ahead of
+ * the DAC, so frames handed to I2S are not yet rendered frames.
+ */
+uint64_t tater_playback_sync_rendered_source_frames(
+    uint64_t source_frames,
+    uint64_t start_position_frames,
+    uint32_t output_latency_frames
+);
+
+/*
  * Resample a very small input-rate difference into a fixed-size hardware
  * output block. This lets the media clock advance or retard one source frame
  * at a time without an audible dropped or repeated frame.

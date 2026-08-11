@@ -2221,6 +2221,7 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "synchronized_media_sessions", true);
     cJSON_AddBoolToObject(caps, "stereo_channel_selection", true);
     cJSON_AddBoolToObject(caps, "media_playhead_telemetry", true);
+    cJSON_AddBoolToObject(caps, "media_render_clock", true);
     cJSON_AddBoolToObject(caps, "media_drift_correction", true);
     cJSON_AddBoolToObject(caps, "media_rate_slew", true);
     cJSON_AddBoolToObject(caps, "media_underrun_recovery", true);
@@ -2228,6 +2229,11 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "media_session_start_position", true);
     cJSON_AddBoolToObject(caps, "synchronized_tts_overlays", true);
     cJSON_AddNumberToObject(caps, "media_sample_rate_hz", TATER_SPK_SAMPLE_RATE);
+    cJSON_AddNumberToObject(
+        caps,
+        "media_output_latency_frames",
+        TATER_MEDIA_RENDER_LATENCY_FRAMES
+    );
     cJSON_AddNumberToObject(caps, "audio_scene_version", 1);
     cJSON_AddNumberToObject(caps, "audio_session_version", 4);
     cJSON_AddItemToObject(payload, "capabilities", caps);
@@ -3823,6 +3829,7 @@ void tater_protocol_send_media_session_playhead(
     const char *group_id,
     const char *channel,
     uint64_t source_frames,
+    uint64_t rendered_frames,
     uint64_t output_frames,
     uint32_t buffered_frames,
     int64_t satellite_time_us,
@@ -3841,6 +3848,7 @@ void tater_protocol_send_media_session_playhead(
     cJSON_AddStringToObject(payload, "channel", channel ? channel : "stereo");
     cJSON_AddNumberToObject(payload, "sample_rate_hz", TATER_SPK_SAMPLE_RATE);
     cJSON_AddNumberToObject(payload, "source_frames", (double)source_frames);
+    cJSON_AddNumberToObject(payload, "rendered_frames", (double)rendered_frames);
     cJSON_AddNumberToObject(payload, "output_frames", (double)output_frames);
     cJSON_AddNumberToObject(payload, "buffered_frames", buffered_frames);
     cJSON_AddNumberToObject(payload, "satellite_time_us", (double)satellite_time_us);
