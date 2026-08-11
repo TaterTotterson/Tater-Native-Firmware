@@ -1,5 +1,6 @@
-- Releases Satellite1 firmware `0.3.6-rev2`; Voice PE, ReSpeaker XVF3800, and S3 Box remain on `0.3.6`.
-- Adds the official firmware's two-second FUSB302B startup stabilization window before USB-PD negotiation, preventing the plug-dependent restart regression introduced in `rev1`.
+- Releases Satellite1 firmware `0.3.6-rev3`; Voice PE, ReSpeaker XVF3800, and S3 Box remain on `0.3.6`.
+- Reworks Satellite1 USB-PD around the official FPH controller lifecycle: configure the FUSB302B first, wait two seconds before CC/PD traffic, receive PD messages from GPIO1 interrupts, and use five-second recovery stages with one soft reset.
+- Keeps the USB-PD task alive after the first contract so later source messages and resets can be handled without restarting the board.
 - Adds native FUSB302B USB-C Power Delivery negotiation for Satellite1 and requests the highest fixed source profile up to 20 V.
 - Selects TAS2780 power mode 2 only after an explicit USB-PD contract of at least 9 V, restoring the onboard speaker power path used by early Beta.1/rev4.1 boards.
 - Keeps the TAS2780 on its existing 5 V profile when PD is unavailable, rejected, or limited to 5 V.

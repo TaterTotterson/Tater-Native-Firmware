@@ -3,6 +3,8 @@
 #include <string.h>
 
 #include "boards/sat1/board_sat1.h"
+#include "driver/gpio.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -72,8 +74,12 @@
 
 #define SAT1_PD_READY_BIT (1u << 0)
 #define SAT1_PD_STARTUP_DELAY_MS 2000
-#define SAT1_PD_NEGOTIATION_TIMEOUT_MS 6500
-#define SAT1_PD_GET_SOURCE_CAP_INTERVAL_MS 1800
+#define SAT1_PD_RECOVERY_INTERVAL_MS 5000
+#define SAT1_PD_TRANSITION_TIMEOUT_MS 2000
+#define SAT1_PD_TASK_PRIORITY 18
+#define SAT1_PD_TASK_CORE 1
+#define SAT1_PD_STATUS_BLOCK_LEN 7
+#define SAT1_PD_MAX_RX_DRAIN 16
 
 typedef struct {
     uint8_t type;
@@ -101,6 +107,11 @@ static uint8_t s_last_rx_message_id = 0xff;
 static uint16_t s_pending_voltage_mv;
 static uint16_t s_pending_current_ma;
 static bool s_request_accepted;
+static bool s_waiting_source_cap;
+static bool s_transition_pending;
+static uint8_t s_recovery_stage;
+static TickType_t s_recovery_deadline;
+static TickType_t s_transition_deadline;
 
 static esp_err_t fusb_read(uint8_t reg, uint8_t *data, size_t len)
 {
@@ -133,6 +144,12 @@ static void status_set_state(sat1_pd_state_t state, bool failed)
     portENTER_CRITICAL(&s_status_lock);
     s_status.state = state;
     s_status.negotiation_failed = failed;
+    if (state == SAT1_PD_STATE_FALLBACK_5V || state == SAT1_PD_STATE_UNAVAILABLE
+        || state == SAT1_PD_STATE_ERROR) {
+        s_status.explicit_contract = false;
+        s_status.contract_voltage_mv = 5000;
+        s_status.contract_current_ma = 500;
+    }
     portEXIT_CRITICAL(&s_status_lock);
     if (state == SAT1_PD_STATE_EXPLICIT_CONTRACT || state == SAT1_PD_STATE_FALLBACK_5V
         || state == SAT1_PD_STATE_UNAVAILABLE || state == SAT1_PD_STATE_ERROR) {
@@ -156,6 +173,7 @@ static void status_set_attached(uint8_t cc_pin)
     s_status.attached = true;
     s_status.cc_pin = cc_pin;
     s_status.state = SAT1_PD_STATE_NEGOTIATING;
+    s_status.negotiation_failed = false;
     portEXIT_CRITICAL(&s_status_lock);
 }
 
@@ -164,7 +182,25 @@ static void status_set_request(uint8_t pdo_count, uint16_t voltage_mv)
     portENTER_CRITICAL(&s_status_lock);
     s_status.source_pdo_count = pdo_count;
     s_status.requested_voltage_mv = voltage_mv;
+    s_status.state = SAT1_PD_STATE_NEGOTIATING;
+    s_status.negotiation_failed = false;
     portEXIT_CRITICAL(&s_status_lock);
+}
+
+static void status_reset_for_negotiation(void)
+{
+    portENTER_CRITICAL(&s_status_lock);
+    s_status.state = SAT1_PD_STATE_NEGOTIATING;
+    s_status.explicit_contract = false;
+    s_status.negotiation_failed = false;
+    s_status.source_pdo_count = 0;
+    s_status.requested_voltage_mv = 0;
+    s_status.contract_voltage_mv = 5000;
+    s_status.contract_current_ma = 500;
+    portEXIT_CRITICAL(&s_status_lock);
+    if (s_ready_event) {
+        xEventGroupClearBits(s_ready_event, SAT1_PD_READY_BIT);
+    }
 }
 
 static void status_set_contract(void)
@@ -263,6 +299,35 @@ static esp_err_t pd_read_message(pd_message_t *message)
     return fusb_read(FUSB_REG_FIFO, crc, sizeof(crc));
 }
 
+static bool pd_deadline_reached(TickType_t now, TickType_t deadline)
+{
+    return (int32_t)(now - deadline) >= 0;
+}
+
+static void pd_wait_for_source_capabilities(bool reset_status)
+{
+    if (reset_status) {
+        status_reset_for_negotiation();
+    }
+    s_waiting_source_cap = true;
+    s_transition_pending = false;
+    s_recovery_stage = 0;
+    s_recovery_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(SAT1_PD_RECOVERY_INTERVAL_MS);
+}
+
+static void pd_mark_request_pending(void)
+{
+    s_waiting_source_cap = false;
+    s_transition_pending = true;
+    s_transition_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(SAT1_PD_TRANSITION_TIMEOUT_MS);
+}
+
+static void pd_mark_ready_or_fallback(void)
+{
+    s_waiting_source_cap = false;
+    s_transition_pending = false;
+}
+
 static esp_err_t pd_send_request(const pd_message_t *source_capabilities)
 {
     uint8_t selected_position = 0;
@@ -307,7 +372,11 @@ static esp_err_t pd_send_request(const pd_message_t *source_capabilities)
         selected_current_ma,
         source_capabilities->object_count
     );
-    return pd_send(PD_DATA_REQUEST, &request, 1, -1);
+    esp_err_t err = pd_send(PD_DATA_REQUEST, &request, 1, -1);
+    if (err == ESP_OK) {
+        pd_mark_request_pending();
+    }
+    return err;
 }
 
 static void pd_handle_message(const pd_message_t *message)
@@ -326,7 +395,9 @@ static void pd_handle_message(const pd_message_t *message)
 
     if (message->object_count > 0) {
         if (message->type == PD_DATA_SOURCE_CAP) {
+            s_waiting_source_cap = false;
             if (pd_send_request(message) != ESP_OK) {
+                pd_mark_ready_or_fallback();
                 status_set_state(SAT1_PD_STATE_FALLBACK_5V, true);
             }
         }
@@ -340,6 +411,7 @@ static void pd_handle_message(const pd_message_t *message)
         break;
     case PD_CTRL_PS_RDY:
         if (s_request_accepted && s_pending_voltage_mv >= 5000) {
+            pd_mark_ready_or_fallback();
             status_set_contract();
             ESP_LOGI(
                 TAG,
@@ -353,6 +425,7 @@ static void pd_handle_message(const pd_message_t *message)
     case PD_CTRL_REJECT:
     case PD_CTRL_WAIT:
         ESP_LOGW(TAG, "source declined power request (response=%u); using safe 5V profile", message->type);
+        pd_mark_ready_or_fallback();
         status_set_state(SAT1_PD_STATE_FALLBACK_5V, true);
         break;
     case PD_CTRL_SOFT_RESET:
@@ -360,9 +433,11 @@ static void pd_handle_message(const pd_message_t *message)
         s_last_rx_message_id = 0xff;
         s_request_accepted = false;
         ESP_ERROR_CHECK_WITHOUT_ABORT(pd_send(PD_CTRL_ACCEPT, NULL, 0, 0));
+        pd_wait_for_source_capabilities(true);
         break;
     case PD_CTRL_GET_SINK_CAP: {
-        const uint32_t sink_pdo = 300u | (100u << 10) | (1u << 26);
+        // Match the official Satellite1 sink-capability response: 5V at up to 5A.
+        const uint32_t sink_pdo = 500u | (100u << 10) | (1u << 26);
         ESP_ERROR_CHECK_WITHOUT_ABORT(pd_send(PD_DATA_SINK_CAP, &sink_pdo, 1, -1));
         break;
     }
@@ -385,6 +460,24 @@ static esp_err_t fusb_flush_pd(void)
     return ESP_OK;
 }
 
+static esp_err_t fusb_read_stable_cc_level(uint8_t *level_out)
+{
+    if (!level_out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t status0 = 0;
+    ESP_RETURN_ON_ERROR(fusb_read_u8(FUSB_REG_STATUS0, &status0), TAG, "CC level read failed");
+    uint8_t level = status0 & FUSB_STATUS0_BC_LVL;
+    for (uint8_t sample = 0; sample < 5; sample++) {
+        ESP_RETURN_ON_ERROR(fusb_read_u8(FUSB_REG_STATUS0, &status0), TAG, "CC stability read failed");
+        if ((status0 & FUSB_STATUS0_BC_LVL) != level) {
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+    *level_out = level;
+    return ESP_OK;
+}
+
 static esp_err_t fusb_select_cc(uint8_t *selected_cc, uint8_t *cc1_out, uint8_t *cc2_out)
 {
     ESP_RETURN_ON_ERROR(
@@ -398,9 +491,8 @@ static esp_err_t fusb_select_cc(uint8_t *selected_cc, uint8_t *cc1_out, uint8_t 
     ESP_RETURN_ON_ERROR(fusb_write_u8(FUSB_REG_SWITCHES1, FUSB_SWITCHES1_PD_REV2), TAG, "PD revision failed");
     ESP_RETURN_ON_ERROR(fusb_write_u8(FUSB_REG_MEASURE, 49), TAG, "CC measure threshold failed");
     vTaskDelay(pdMS_TO_TICKS(5));
-    uint8_t status0 = 0;
-    ESP_RETURN_ON_ERROR(fusb_read_u8(FUSB_REG_STATUS0, &status0), TAG, "CC1 read failed");
-    uint8_t cc1 = status0 & FUSB_STATUS0_BC_LVL;
+    uint8_t cc1 = 0;
+    ESP_RETURN_ON_ERROR(fusb_read_stable_cc_level(&cc1), TAG, "CC1 was not stable");
 
     ESP_RETURN_ON_ERROR(
         fusb_write_u8(
@@ -411,8 +503,8 @@ static esp_err_t fusb_select_cc(uint8_t *selected_cc, uint8_t *cc1_out, uint8_t 
         "CC2 select failed"
     );
     vTaskDelay(pdMS_TO_TICKS(5));
-    ESP_RETURN_ON_ERROR(fusb_read_u8(FUSB_REG_STATUS0, &status0), TAG, "CC2 read failed");
-    uint8_t cc2 = status0 & FUSB_STATUS0_BC_LVL;
+    uint8_t cc2 = 0;
+    ESP_RETURN_ON_ERROR(fusb_read_stable_cc_level(&cc2), TAG, "CC2 was not stable");
     if (cc1_out) {
         *cc1_out = cc1;
     }
@@ -421,7 +513,7 @@ static esp_err_t fusb_select_cc(uint8_t *selected_cc, uint8_t *cc1_out, uint8_t 
     }
 
     uint8_t switches0 = 0;
-    uint8_t switches1 = FUSB_SWITCHES1_PD_REV2 | FUSB_SWITCHES1_AUTO_CRC;
+    uint8_t switches1 = FUSB_SWITCHES1_PD_REV2;
     if (cc1 > 0 && cc2 == 0) {
         *selected_cc = 1;
         switches0 = FUSB_SWITCHES0_PDWN1 | FUSB_SWITCHES0_PDWN2 | FUSB_SWITCHES0_MEAS_CC1;
@@ -437,7 +529,7 @@ static esp_err_t fusb_select_cc(uint8_t *selected_cc, uint8_t *cc1_out, uint8_t 
     return fusb_write_u8(FUSB_REG_SWITCHES1, switches1);
 }
 
-static esp_err_t fusb_initialize(uint8_t *device_id_out, uint8_t *cc_pin_out)
+static esp_err_t fusb_initialize_controller(uint8_t *device_id_out)
 {
     ESP_RETURN_ON_ERROR(fusb_write_u8(FUSB_REG_RESET, FUSB_RESET_SOFTWARE), TAG, "software reset failed");
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -467,6 +559,15 @@ static esp_err_t fusb_initialize(uint8_t *device_id_out, uint8_t *cc_pin_out)
     );
     ESP_RETURN_ON_ERROR(fusb_write_u8(FUSB_REG_POWER, 0x0f), TAG, "power blocks enable failed");
 
+    if (device_id_out) {
+        *device_id_out = device_id;
+    }
+    ESP_LOGI(TAG, "FUSB302B controller configured id=0x%02x; delaying PD attach", device_id);
+    return ESP_OK;
+}
+
+static esp_err_t fusb_attach(uint8_t device_id, uint8_t *cc_pin_out)
+{
     uint8_t selected_cc = 0;
     uint8_t cc1 = 0;
     uint8_t cc2 = 0;
@@ -481,27 +582,163 @@ static esp_err_t fusb_initialize(uint8_t *device_id_out, uint8_t *cc_pin_out)
         ESP_LOGW(TAG, "USB-C sink attachment not detected (CC1=%u CC2=%u)", cc1, cc2);
         return cc_err;
     }
-    ESP_RETURN_ON_ERROR(fusb_flush_pd(), TAG, "PD block reset failed");
-    if (device_id_out) {
-        *device_id_out = device_id;
-    }
+
     if (cc_pin_out) {
         *cc_pin_out = selected_cc;
     }
-    ESP_LOGI(TAG, "FUSB302B ready id=0x%02x CC%u (CC1=%u CC2=%u)", device_id, selected_cc, cc1, cc2);
+    ESP_LOGI(TAG, "FUSB302B attached id=0x%02x CC%u (CC1=%u CC2=%u)", device_id, selected_cc, cc1, cc2);
     return ESP_OK;
+}
+
+static esp_err_t fusb_enable_auto_crc(void)
+{
+    uint8_t switches1 = 0;
+    ESP_RETURN_ON_ERROR(fusb_read_u8(FUSB_REG_SWITCHES1, &switches1), TAG, "switches1 read failed");
+    return fusb_write_u8(FUSB_REG_SWITCHES1, switches1 | FUSB_SWITCHES1_AUTO_CRC);
+}
+
+static void IRAM_ATTR fusb_irq_handler(void *arg)
+{
+    (void)arg;
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    TaskHandle_t task = s_task;
+    if (task) {
+        vTaskNotifyGiveFromISR(task, &higher_priority_task_woken);
+    }
+    if (higher_priority_task_woken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+static esp_err_t fusb_configure_irq(void)
+{
+    const gpio_config_t irq_config = {
+        .pin_bit_mask = 1ULL << TATER_SAT1_FUSB302B_IRQ,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_NEGEDGE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&irq_config), TAG, "FUSB302B IRQ pin config failed");
+
+    esp_err_t err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_RETURN_ON_ERROR(err, TAG, "GPIO ISR service install failed");
+    }
+    ESP_RETURN_ON_ERROR(
+        gpio_isr_handler_add(TATER_SAT1_FUSB302B_IRQ, fusb_irq_handler, NULL),
+        TAG,
+        "FUSB302B IRQ handler install failed"
+    );
+    return ESP_OK;
+}
+
+static esp_err_t pd_service_interrupt(void)
+{
+    uint8_t status_block[SAT1_PD_STATUS_BLOCK_LEN] = {0};
+    ESP_RETURN_ON_ERROR(
+        fusb_read(FUSB_REG_STATUS0A, status_block, sizeof(status_block)),
+        TAG,
+        "FUSB302B interrupt status read failed"
+    );
+
+    uint8_t status1 = status_block[5];
+    uint8_t drained = 0;
+    while (!(status1 & FUSB_STATUS1_RX_EMPTY) && drained < SAT1_PD_MAX_RX_DRAIN) {
+        pd_message_t message;
+        esp_err_t err = pd_read_message(&message);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "PD RX failed: %s", esp_err_to_name(err));
+            ESP_ERROR_CHECK_WITHOUT_ABORT(fusb_write_u8(FUSB_REG_CONTROL1, FUSB_CONTROL1_RX_FLUSH));
+            return err;
+        }
+        pd_handle_message(&message);
+        drained++;
+        ESP_RETURN_ON_ERROR(fusb_read_u8(FUSB_REG_STATUS1, &status1), TAG, "PD RX status read failed");
+    }
+
+    if (!(status1 & FUSB_STATUS1_RX_EMPTY)) {
+        ESP_LOGW(TAG, "PD RX drain limit reached; flushing FIFO");
+        ESP_RETURN_ON_ERROR(fusb_write_u8(FUSB_REG_CONTROL1, FUSB_CONTROL1_RX_FLUSH), TAG, "PD RX flush failed");
+    }
+    return ESP_OK;
+}
+
+static TickType_t pd_next_wait_ticks(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    TickType_t deadline = 0;
+    bool have_deadline = false;
+    if (s_waiting_source_cap) {
+        deadline = s_recovery_deadline;
+        have_deadline = true;
+    }
+    if (s_transition_pending
+        && (!have_deadline || (int32_t)(s_transition_deadline - deadline) < 0)) {
+        deadline = s_transition_deadline;
+        have_deadline = true;
+    }
+    if (!have_deadline) {
+        return portMAX_DELAY;
+    }
+    if (pd_deadline_reached(now, deadline)) {
+        return 0;
+    }
+    return deadline - now;
+}
+
+static void pd_run_recovery(TickType_t now)
+{
+    if (!s_waiting_source_cap || !pd_deadline_reached(now, s_recovery_deadline)) {
+        return;
+    }
+
+    if (s_recovery_stage == 0) {
+        esp_err_t err = pd_send(PD_CTRL_GET_SOURCE_CAP, NULL, 0, -1);
+        if (err == ESP_OK) {
+            ESP_LOGD(TAG, "requested source capabilities after official-style 5s wait");
+        } else {
+            ESP_LOGW(TAG, "source capability request failed: %s", esp_err_to_name(err));
+        }
+        s_recovery_stage = 1;
+    } else if (s_recovery_stage == 1) {
+        status_reset_for_negotiation();
+        esp_err_t err = fusb_flush_pd();
+        if (err == ESP_OK) {
+            err = pd_send(PD_CTRL_SOFT_RESET, NULL, 0, -1);
+        }
+        if (err == ESP_OK) {
+            ESP_LOGD(TAG, "sent one USB-PD soft reset after source-capability timeout");
+        } else {
+            ESP_LOGW(TAG, "USB-PD soft reset failed: %s", esp_err_to_name(err));
+        }
+        s_recovery_stage = 2;
+    } else {
+        ESP_LOGW(TAG, "USB-PD negotiation timed out after recovery; keeping the safe 5V TAS2780 profile");
+        pd_mark_ready_or_fallback();
+        status_set_state(SAT1_PD_STATE_FALLBACK_5V, true);
+        return;
+    }
+    s_recovery_deadline = now + pdMS_TO_TICKS(SAT1_PD_RECOVERY_INTERVAL_MS);
+}
+
+static void pd_run_transition_timeout(TickType_t now)
+{
+    if (!s_transition_pending || !pd_deadline_reached(now, s_transition_deadline)) {
+        return;
+    }
+    ESP_LOGW(TAG, "USB-PD request did not reach PS_RDY; keeping the safe 5V TAS2780 profile");
+    pd_mark_ready_or_fallback();
+    status_set_state(SAT1_PD_STATE_FALLBACK_5V, true);
 }
 
 static void pd_task(void *arg)
 {
     (void)arg;
-    // Match the official Satellite1 firmware's stabilization window before
-    // resetting the FUSB302B or changing the USB-C power contract.
-    vTaskDelay(pdMS_TO_TICKS(SAT1_PD_STARTUP_DELAY_MS));
-
     uint8_t device_id = 0;
-    uint8_t cc_pin = 0;
-    esp_err_t err = fusb_initialize(&device_id, &cc_pin);
+    // The official firmware configures the controller during setup, then waits
+    // before it selects a CC line or starts USB-PD traffic.
+    esp_err_t err = fusb_initialize_controller(&device_id);
     if (err != ESP_OK) {
         sat1_pd_status_t snapshot = {0};
         sat1_pd_status_snapshot(&snapshot);
@@ -517,58 +754,40 @@ static void pd_task(void *arg)
         return;
     }
 
-    status_set_attached(cc_pin);
-    TickType_t started = xTaskGetTickCount();
-    TickType_t last_request = started - pdMS_TO_TICKS(SAT1_PD_GET_SOURCE_CAP_INTERVAL_MS);
-    uint8_t source_cap_requests = 0;
-    while (true) {
-        uint8_t status_block[7] = {0};
-        ESP_ERROR_CHECK_WITHOUT_ABORT(fusb_read(FUSB_REG_STATUS0A, status_block, sizeof(status_block)));
+    vTaskDelay(pdMS_TO_TICKS(SAT1_PD_STARTUP_DELAY_MS));
 
-        uint8_t status1 = 0;
-        if (fusb_read_u8(FUSB_REG_STATUS1, &status1) == ESP_OK) {
-            for (uint8_t drained = 0; !(status1 & FUSB_STATUS1_RX_EMPTY) && drained < 8; drained++) {
-                pd_message_t message;
-                err = pd_read_message(&message);
-                if (err != ESP_OK) {
-                    ESP_LOGW(TAG, "PD RX failed: %s", esp_err_to_name(err));
-                    ESP_ERROR_CHECK_WITHOUT_ABORT(fusb_write_u8(FUSB_REG_CONTROL1, FUSB_CONTROL1_RX_FLUSH));
-                    break;
-                }
-                pd_handle_message(&message);
-                if (fusb_read_u8(FUSB_REG_STATUS1, &status1) != ESP_OK) {
-                    break;
-                }
-            }
-        }
-
-        sat1_pd_status_t snapshot = {0};
-        sat1_pd_status_snapshot(&snapshot);
-        if (snapshot.state == SAT1_PD_STATE_EXPLICIT_CONTRACT
-            || snapshot.state == SAT1_PD_STATE_FALLBACK_5V) {
-            break;
-        }
-
-        TickType_t now = xTaskGetTickCount();
-        if (snapshot.requested_voltage_mv == 0 && source_cap_requests < 3
-            && (now - last_request) >= pdMS_TO_TICKS(SAT1_PD_GET_SOURCE_CAP_INTERVAL_MS)) {
-            err = pd_send(PD_CTRL_GET_SOURCE_CAP, NULL, 0, -1);
-            if (err == ESP_OK) {
-                source_cap_requests++;
-                last_request = now;
-                ESP_LOGD(TAG, "requested source capabilities attempt=%u", source_cap_requests);
-            }
-        }
-        if ((now - started) >= pdMS_TO_TICKS(SAT1_PD_NEGOTIATION_TIMEOUT_MS)) {
-            ESP_LOGW(TAG, "USB-PD negotiation timed out; keeping the safe 5V TAS2780 profile");
-            status_set_state(SAT1_PD_STATE_FALLBACK_5V, true);
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));
+    uint8_t cc_pin = 0;
+    err = fusb_attach(device_id, &cc_pin);
+    if (err == ESP_OK) {
+        err = fusb_configure_irq();
+    }
+    if (err == ESP_OK) {
+        err = fusb_enable_auto_crc();
+    }
+    if (err == ESP_OK) {
+        err = fusb_flush_pd();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "PD attach failed: %s; keeping the safe 5V TAS2780 profile", esp_err_to_name(err));
+        status_set_state(SAT1_PD_STATE_FALLBACK_5V, true);
+        s_task = NULL;
+        vTaskDelete(NULL);
+        return;
     }
 
-    s_task = NULL;
-    vTaskDelete(NULL);
+    status_set_attached(cc_pin);
+    pd_wait_for_source_capabilities(false);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(pd_service_interrupt());
+
+    while (true) {
+        TickType_t wait_ticks = pd_next_wait_ticks();
+        if (ulTaskNotifyTake(pdTRUE, wait_ticks) > 0) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(pd_service_interrupt());
+        }
+        TickType_t now = xTaskGetTickCount();
+        pd_run_recovery(now);
+        pd_run_transition_timeout(now);
+    }
 }
 
 esp_err_t sat1_pd_init(sat1_pd_i2c_read_fn read_fn, sat1_pd_i2c_write_fn write_fn)
@@ -590,10 +809,26 @@ esp_err_t sat1_pd_init(sat1_pd_i2c_read_fn read_fn, sat1_pd_i2c_write_fn write_f
     s_status.state = SAT1_PD_STATE_NEGOTIATING;
     s_status.contract_voltage_mv = 5000;
     s_status.contract_current_ma = 500;
+    s_tx_message_id = 0;
+    s_last_rx_message_id = 0xff;
+    s_pending_voltage_mv = 0;
+    s_pending_current_ma = 0;
+    s_request_accepted = false;
+    s_waiting_source_cap = false;
+    s_transition_pending = false;
+    s_recovery_stage = 0;
     s_initialized = true;
     portEXIT_CRITICAL(&s_status_lock);
 
-    BaseType_t created = xTaskCreatePinnedToCore(pd_task, "sat1_pd", 4096, NULL, 5, &s_task, 0);
+    BaseType_t created = xTaskCreatePinnedToCore(
+        pd_task,
+        "sat1_pd",
+        4096,
+        NULL,
+        SAT1_PD_TASK_PRIORITY,
+        &s_task,
+        SAT1_PD_TASK_CORE
+    );
     if (created != pdPASS) {
         portENTER_CRITICAL(&s_status_lock);
         s_status.state = SAT1_PD_STATE_ERROR;
