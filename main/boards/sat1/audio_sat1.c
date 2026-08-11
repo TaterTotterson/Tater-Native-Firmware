@@ -9,6 +9,7 @@
 
 #include "audio_aec.h"
 #include "board.h"
+#include "boards/sat1/sat1_power_delivery.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "driver/i2s_std.h"
@@ -98,6 +99,7 @@ static bool s_speaker_primed;
 static bool s_speaker_session_active;
 static SemaphoreHandle_t s_speaker_mutex;
 static uint8_t s_tas_power_mode = 0xff;
+static bool s_pd_fallback_warning_logged;
 static portMUX_TYPE s_speaker_level_lock = portMUX_INITIALIZER_UNLOCKED;
 static float s_speaker_audio_level;
 static int64_t s_speaker_level_update_us;
@@ -232,22 +234,26 @@ static esp_err_t i2c_init(void)
     return err;
 }
 
-static esp_err_t i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t value)
+static esp_err_t i2c_write_bytes(uint8_t addr, uint8_t reg, const uint8_t *data, size_t len)
 {
-    uint8_t data[2] = {reg, value};
+    if (!data || len == 0 || len > 48) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t packet[49] = {reg};
+    memcpy(&packet[1], data, len);
     if (s_i2c_mutex) {
         xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
     }
-    esp_err_t err = i2c_master_write_to_device(TATER_I2C_PORT, addr, data, sizeof(data), pdMS_TO_TICKS(100));
+    esp_err_t err = i2c_master_write_to_device(TATER_I2C_PORT, addr, packet, len + 1, pdMS_TO_TICKS(100));
     if (s_i2c_mutex) {
         xSemaphoreGive(s_i2c_mutex);
     }
     return err;
 }
 
-static esp_err_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *value)
+static esp_err_t i2c_read_bytes(uint8_t addr, uint8_t reg, uint8_t *data, size_t len)
 {
-    if (!value) {
+    if (!data || len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_i2c_mutex) {
@@ -258,14 +264,24 @@ static esp_err_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *value)
         addr,
         &reg,
         1,
-        value,
-        1,
+        data,
+        len,
         pdMS_TO_TICKS(100)
     );
     if (s_i2c_mutex) {
         xSemaphoreGive(s_i2c_mutex);
     }
     return err;
+}
+
+static esp_err_t i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t value)
+{
+    return i2c_write_bytes(addr, reg, &value, 1);
+}
+
+static esp_err_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *value)
+{
+    return i2c_read_bytes(addr, reg, value, 1);
 }
 
 static esp_err_t pcm5122_set_mute(bool muted)
@@ -434,6 +450,40 @@ static esp_err_t tas2780_activate(uint8_t power_mode)
     }
     ESP_RETURN_ON_ERROR(i2c_write_reg(TATER_SAT1_TAS2780_I2C_ADDR, 0x02, 0x80), TAG, "tas activate failed");
     return tas2780_set_mute(false);
+}
+
+static void tas2780_log_status(void)
+{
+    uint8_t mode_ctrl = 0;
+    uint8_t chnl_0 = 0;
+    uint8_t dc_blk0 = 0;
+    uint8_t clk_cfg = 0;
+    esp_err_t page_err = tas2780_write_page(0x00);
+    esp_err_t mode_err = i2c_read_reg(TATER_SAT1_TAS2780_I2C_ADDR, 0x02, &mode_ctrl);
+    esp_err_t chnl_err = i2c_read_reg(TATER_SAT1_TAS2780_I2C_ADDR, 0x03, &chnl_0);
+    esp_err_t dc_err = i2c_read_reg(TATER_SAT1_TAS2780_I2C_ADDR, 0x04, &dc_blk0);
+    esp_err_t clk_err = i2c_read_reg(TATER_SAT1_TAS2780_I2C_ADDR, 0x68, &clk_cfg);
+    if (page_err == ESP_OK && mode_err == ESP_OK && chnl_err == ESP_OK && dc_err == ESP_OK && clk_err == ESP_OK) {
+        ESP_LOGI(
+            TAG,
+            "tas2780 active power_mode=%u MODE_CTRL=0x%02x CHNL_0=0x%02x DC_BLK0=0x%02x CLK_CFG=0x%02x",
+            s_tas_power_mode,
+            mode_ctrl,
+            chnl_0,
+            dc_blk0,
+            clk_cfg
+        );
+    } else {
+        ESP_LOGW(
+            TAG,
+            "tas2780 status readback failed page=%s mode=%s chnl=%s dc=%s clk=%s",
+            esp_err_to_name(page_err),
+            esp_err_to_name(mode_err),
+            esp_err_to_name(chnl_err),
+            esp_err_to_name(dc_err),
+            esp_err_to_name(clk_err)
+        );
+    }
 }
 
 static esp_err_t tas2780_deactivate(void)
@@ -1320,6 +1370,7 @@ static esp_err_t i2s_init_duplex(void)
 esp_err_t tater_audio_i2s_init(void)
 {
     ESP_RETURN_ON_ERROR(i2c_init(), TAG, "i2c init failed");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_pd_init(i2c_read_bytes, i2c_write_bytes));
     ESP_ERROR_CHECK_WITHOUT_ABORT(pcm5122_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(tas2780_init(0));
     ESP_RETURN_ON_ERROR(spi_init(), TAG, "spi init failed");
@@ -1641,12 +1692,35 @@ esp_err_t tater_audio_speaker_begin(void)
     }
     reset_speaker_audio_level();
     ESP_ERROR_CHECK_WITHOUT_ABORT(pcm5122_set_mute(true));
-    esp_err_t err = tas2780_activate(0);
+    sat1_pd_status_t pd_status = {0};
+    if (sat1_pd_status_snapshot(&pd_status) && pd_status.state == SAT1_PD_STATE_NEGOTIATING) {
+        sat1_pd_wait_ready(1500);
+        sat1_pd_status_snapshot(&pd_status);
+    }
+    uint8_t tas_power_mode = sat1_pd_recommended_tas_mode();
+    ESP_LOGI(
+        TAG,
+        "speaker power selection pd_state=%s contract=%u mV explicit=%d tas_mode=%u",
+        sat1_pd_state_name(pd_status.state),
+        pd_status.contract_voltage_mv,
+        pd_status.explicit_contract,
+        tas_power_mode
+    );
+    if (!s_pd_fallback_warning_logged && tas_power_mode == 0
+        && (!pd_status.explicit_contract || pd_status.contract_voltage_mv < 9000)) {
+        ESP_LOGW(
+            TAG,
+            "using TAS2780 5V profile; early Satellite1 Beta.1/rev4.1 boards need a >=9V USB-PD contract or the documented VBAT hardware modification for speaker output"
+        );
+        s_pd_fallback_warning_logged = true;
+    }
+    esp_err_t err = tas2780_activate(tas_power_mode);
     if (err != ESP_OK) {
         xSemaphoreGive(s_speaker_mutex);
         ESP_LOGE(TAG, "tas activate failed: %s", esp_err_to_name(err));
         return err;
     }
+    tas2780_log_status();
     if (s_speaker_enabled) {
         err = i2s_channel_disable(s_tx_chan);
         if (err != ESP_OK) {
@@ -1806,6 +1880,31 @@ bool tater_audio_xmos_status_snapshot(tater_audio_xmos_status_t *out)
     portENTER_CRITICAL(&s_xmos_status_lock);
     *out = s_xmos_status;
     portEXIT_CRITICAL(&s_xmos_status_lock);
+    return true;
+}
+
+bool tater_audio_power_status_snapshot(tater_audio_power_status_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    sat1_pd_status_t status = {0};
+    if (!sat1_pd_status_snapshot(&status)) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    snprintf(out->state, sizeof(out->state), "%s", sat1_pd_state_name(status.state));
+    out->controller_present = status.controller_present;
+    out->attached = status.attached;
+    out->explicit_contract = status.explicit_contract;
+    out->negotiation_failed = status.negotiation_failed;
+    out->device_id = status.device_id;
+    out->cc_pin = status.cc_pin;
+    out->source_pdo_count = status.source_pdo_count;
+    out->tas_power_mode = s_tas_power_mode == 0xff ? 0 : s_tas_power_mode;
+    out->requested_voltage_mv = status.requested_voltage_mv;
+    out->contract_voltage_mv = status.contract_voltage_mv;
+    out->contract_current_ma = status.contract_current_ma;
     return true;
 }
 

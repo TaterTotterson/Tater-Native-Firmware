@@ -58,6 +58,21 @@ typedef struct {
     uint8_t dfu_status;
 } tater_audio_xmos_status_t;
 
+typedef struct {
+    char state[24];
+    bool controller_present;
+    bool attached;
+    bool explicit_contract;
+    bool negotiation_failed;
+    uint8_t device_id;
+    uint8_t cc_pin;
+    uint8_t source_pdo_count;
+    uint8_t tas_power_mode;
+    uint16_t requested_voltage_mv;
+    uint16_t contract_voltage_mv;
+    uint16_t contract_current_ma;
+} tater_audio_power_status_t;
+
 esp_err_t tater_audio_i2s_init(void);
 void tater_audio_i2s_start_task(void);
 esp_err_t tater_audio_speaker_begin(void);
@@ -67,6 +82,7 @@ bool tater_audio_speaker_ready(void);
 float tater_audio_speaker_level(void);
 bool tater_audio_doa_snapshot(tater_audio_doa_t *out);
 bool tater_audio_xmos_status_snapshot(tater_audio_xmos_status_t *out);
+bool tater_audio_power_status_snapshot(tater_audio_power_status_t *out);
 esp_err_t tater_audio_sat1_read_buttons(uint8_t *buttons);
 esp_err_t tater_audio_xvf3800_control_init(void);
 esp_err_t tater_audio_xvf3800_set_led_ring(const uint8_t *rgb, size_t led_count);

@@ -13,7 +13,8 @@ Current status:
 - 48 kHz mic capture downsampled to 16 kHz mono for wake/STT streaming
 - shared-duplex I2S speaker playback
 - PCM5122/TAS2780 speaker path setup
-- FUSB302B USB-C PD setup path
+- FUSB302B USB-C PD negotiation up to 20 V, with the TAS2780 configured for
+  high-voltage mode only after an explicit contract of at least 9 V
 - four-microphone XMOS DoA estimation with adaptive room-noise calibration,
   confidence filtering, and directional smoothing
 - four-microphone fractional-delay, delay-and-sum beamforming steered by the
@@ -41,6 +42,20 @@ The board-specific audio implementation lives in:
 ```text
 main/boards/sat1/audio_sat1.c
 ```
+
+USB-C power negotiation lives in:
+
+```text
+main/boards/sat1/sat1_power_delivery.c
+```
+
+The speaker always starts from the safe 5 V TAS2780 profile. A fixed USB-PD
+source profile up to 20 V is requested through the FUSB302B; after `PS_RDY`,
+contracts of 9 V or higher select TAS2780 power mode 2. Missing controllers,
+5 V-only adapters, rejected requests, and negotiation timeouts remain on power
+mode 0, so the same image is safe for newer board revisions. Early public
+Beta.1/rev4.1 boards require the higher-voltage contract (or their documented
+VBAT hardware modification) for the onboard speaker rail to operate.
 
 The bundled XMOS source and factory image live in:
 

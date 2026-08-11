@@ -4,6 +4,7 @@ idf_component_register(
         "audio_aec.c"
         "boards/voice_pe/audio_voice_pe.c"
         "boards/sat1/audio_sat1.c"
+        "boards/sat1/sat1_power_delivery.c"
         "boards/respeaker_xvf3800/audio_respeaker_xvf3800.c"
         "boards/respeaker_xvf3800/xvf3800_doa.c"
         "boards/s3_box/audio_s3_box.c"

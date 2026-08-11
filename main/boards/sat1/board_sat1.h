@@ -5,7 +5,7 @@
 #define TATER_BOARD_ID "satellite1"
 #define TATER_DEVICE_ID_PREFIX "sat1"
 #define TATER_DEFAULT_DEVICE_NAME "Tater Sat1"
-#define TATER_FIRMWARE_VERSION "native-satellite1-0.3.6"
+#define TATER_FIRMWARE_VERSION "native-satellite1-0.3.6-rev1"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6
@@ -46,6 +46,7 @@
 
 #define TATER_SAT1_PCM5122_I2C_ADDR 0x4D
 #define TATER_SAT1_TAS2780_I2C_ADDR 0x3F
+#define TATER_SAT1_FUSB302B_I2C_ADDR 0x22
 
 #define TATER_CAP_LINE_OUT true
 #define TATER_CAP_XMOS true
