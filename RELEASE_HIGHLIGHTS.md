@@ -1,5 +1,5 @@
-- Releases Satellite1, Voice PE, ReSpeaker XVF3800, and S3 Box firmware `0.3.7`.
-- Adds a rendered-audio clock to every native ESP satellite so mixed playback groups use the same speaker-facing timing model as Tater ThirdReality S420 firmware.
-- Reports the source frame actually reaching the speaker after accounting for each board's configured I2S DMA queue instead of treating queued decoder output as already rendered.
-- Moves Satellite1 and ReSpeaker silence priming before the synchronized start deadline, removing their built-in late first sample without adding an artificial playback delay.
-- Keeps normal gradual drift correction active after the synchronized start for stable long-running stereo and multi-room playback.
+- Releases Satellite1, Voice PE, ReSpeaker XVF3800, and S3 Box firmware `0.3.8`.
+- Measures playback from completed I2S DMA writes on every native ESP board so Tater sees audio that has actually reached the hardware output instead of decoder data that is still queued.
+- Reports each board's output pipeline latency and rendered source position to Tater for accurate server-owned audible scheduling across ESP, Linux, and AirPlay players.
+- Accepts an explicit audible-start deadline while retaining gradual drift correction, keeping mixed stereo and multi-room groups aligned without fixed device-pair delays.
+- Preserves the synchronized pre-roll path for Satellite1 and ReSpeaker so their first audible sample lands on the shared timeline.

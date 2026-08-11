@@ -2967,6 +2967,8 @@ static void media_session_task(void *arg)
     uint64_t output_frames_written = 0;
     uint64_t rejoin_frames_total = 0;
     uint64_t start_position_frames = 0;
+    uint32_t render_clock_media_start_frame = 0;
+    bool render_clock_available = false;
     int32_t correction_since_report = 0;
     uint32_t underrun_events = 0;
     uint32_t rejoin_count = 0;
@@ -3095,6 +3097,11 @@ static void media_session_task(void *arg)
         goto done;
     }
 
+    tater_audio_render_clock_t render_clock_start = {0};
+    render_clock_available = tater_audio_speaker_render_clock_snapshot(
+        &render_clock_start
+    );
+    render_clock_media_start_frame = render_clock_start.submitted_frames;
     int64_t actual_start_us = esp_timer_get_time();
     tater_playback_mix_init(&mix, 100);
     if (complete_visual_state) {
@@ -3370,6 +3377,35 @@ static void media_session_task(void *arg)
                 start_position_frames,
                 TATER_MEDIA_RENDER_LATENCY_FRAMES
             );
+            uint32_t output_latency_frames = TATER_MEDIA_RENDER_LATENCY_FRAMES;
+            tater_audio_render_clock_t render_clock = {0};
+            if (
+                render_clock_available
+                && output_frames_written > 0
+                && tater_audio_speaker_render_clock_snapshot(&render_clock)
+            ) {
+                uint64_t rendered_output_frames = 0;
+                if (render_clock.completed_frames > render_clock_media_start_frame) {
+                    rendered_output_frames = (uint32_t)(
+                        render_clock.completed_frames - render_clock_media_start_frame
+                    );
+                }
+                if (rendered_output_frames > output_frames_written) {
+                    rendered_output_frames = output_frames_written;
+                }
+                uint64_t source_relative_frames = source_frames_written > start_position_frames
+                    ? source_frames_written - start_position_frames
+                    : 0;
+                uint64_t rendered_source_relative_frames = (
+                    (rendered_output_frames * source_relative_frames)
+                    + (output_frames_written / 2ULL)
+                ) / output_frames_written;
+                rendered_frames = start_position_frames + rendered_source_relative_frames;
+                uint64_t pending_output_frames = output_frames_written - rendered_output_frames;
+                output_latency_frames = pending_output_frames > UINT32_MAX
+                    ? UINT32_MAX
+                    : (uint32_t)pending_output_frames;
+            }
             tater_protocol_send_media_session_playhead(
                 session_id,
                 group_id,
@@ -3377,6 +3413,7 @@ static void media_session_task(void *arg)
                 source_frames_written,
                 rendered_frames,
                 output_frames_written,
+                output_latency_frames,
                 (uint32_t)buffered_frames,
                 now_us,
                 scheduled_start_us,

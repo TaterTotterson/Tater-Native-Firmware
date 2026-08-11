@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "audio_aec.h"
+#include "audio_render_clock.h"
 #include "board.h"
 #include "doa_activity_gate.h"
 #include "driver/i2c.h"
@@ -94,6 +95,7 @@ static bool s_speaker_ready;
 static bool s_speaker_enabled;
 static bool s_speaker_primed;
 static bool s_speaker_session_active;
+static tater_audio_render_clock_state_t s_render_clock;
 static void speaker_prime_silence(void);
 static bool s_xvf_muted;
 static portMUX_TYPE s_speaker_level_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -657,6 +659,15 @@ static esp_err_t i2s_init_duplex(void)
     std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
     ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_tx_chan, &std_cfg), TAG, "i2s tx init failed");
     ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_rx_chan, &std_cfg), TAG, "i2s rx init failed");
+    ESP_RETURN_ON_ERROR(
+        tater_audio_render_clock_register(
+            &s_render_clock,
+            s_tx_chan,
+            TATER_SPK_CHANNELS * sizeof(int32_t)
+        ),
+        TAG,
+        "i2s tx render clock failed"
+    );
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx_chan), TAG, "i2s rx enable failed");
     s_speaker_ready = true;
     ESP_LOGI(
@@ -928,6 +939,7 @@ esp_err_t tater_audio_speaker_begin(void)
         }
         s_speaker_enabled = false;
     }
+    tater_audio_render_clock_reset(&s_render_clock);
     esp_err_t err = i2s_channel_enable(s_tx_chan);
     if (err != ESP_OK) {
         xSemaphoreGive(s_speaker_mutex);
@@ -950,7 +962,14 @@ static void speaker_prime_silence(void)
     size_t byte_count = sizeof(zeros);
     for (uint8_t i = 0; i < RESPEAKER_XVF_SPK_DMA_DESC_NUM; i++) {
         size_t bytes_written = 0;
-        esp_err_t err = i2s_channel_write(s_tx_chan, zeros, byte_count, &bytes_written, pdMS_TO_TICKS(2));
+        esp_err_t err = tater_audio_render_clock_write(
+            &s_render_clock,
+            s_tx_chan,
+            zeros,
+            byte_count,
+            &bytes_written,
+            pdMS_TO_TICKS(2)
+        );
         if (err != ESP_OK || bytes_written != byte_count) {
             ESP_LOGD(TAG, "speaker prime short err=%s bytes=%u/%u", esp_err_to_name(err), (unsigned)bytes_written, (unsigned)byte_count);
             break;
@@ -980,7 +999,14 @@ esp_err_t tater_audio_write_speaker_frames(const int16_t *stereo_frames, size_t 
         }
         size_t byte_count = frames * TATER_SPK_CHANNELS * sizeof(int32_t);
         size_t bytes_written = 0;
-        esp_err_t err = i2s_channel_write(s_tx_chan, tx, byte_count, &bytes_written, pdMS_TO_TICKS(35));
+        esp_err_t err = tater_audio_render_clock_write(
+            &s_render_clock,
+            s_tx_chan,
+            tx,
+            byte_count,
+            &bytes_written,
+            pdMS_TO_TICKS(35)
+        );
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "speaker i2s write failed err=%s bytes=%u/%u", esp_err_to_name(err), (unsigned)bytes_written, (unsigned)byte_count);
             return err;
@@ -1016,6 +1042,11 @@ esp_err_t tater_audio_speaker_end(void)
 bool tater_audio_speaker_ready(void)
 {
     return s_speaker_ready;
+}
+
+bool tater_audio_speaker_render_clock_snapshot(tater_audio_render_clock_t *out)
+{
+    return tater_audio_render_clock_snapshot(&s_render_clock, out);
 }
 
 float tater_audio_speaker_level(void)

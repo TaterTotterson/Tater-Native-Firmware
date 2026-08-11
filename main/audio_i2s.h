@@ -73,6 +73,11 @@ typedef struct {
     uint16_t contract_current_ma;
 } tater_audio_power_status_t;
 
+typedef struct {
+    uint32_t submitted_frames;
+    uint32_t completed_frames;
+} tater_audio_render_clock_t;
+
 esp_err_t tater_audio_i2s_init(void);
 void tater_audio_i2s_start_task(void);
 esp_err_t tater_audio_speaker_begin(void);
@@ -80,6 +85,7 @@ esp_err_t tater_audio_write_speaker_frames(const int16_t *stereo_frames, size_t 
 esp_err_t tater_audio_speaker_end(void);
 bool tater_audio_speaker_ready(void);
 float tater_audio_speaker_level(void);
+bool tater_audio_speaker_render_clock_snapshot(tater_audio_render_clock_t *out);
 bool tater_audio_doa_snapshot(tater_audio_doa_t *out);
 bool tater_audio_xmos_status_snapshot(tater_audio_xmos_status_t *out);
 bool tater_audio_power_status_snapshot(tater_audio_power_status_t *out);

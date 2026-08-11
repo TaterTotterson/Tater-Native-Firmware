@@ -88,6 +88,7 @@ void tater_protocol_send_media_session_playhead(
     uint64_t source_frames,
     uint64_t rendered_frames,
     uint64_t output_frames,
+    uint32_t output_latency_frames,
     uint32_t buffered_frames,
     int64_t satellite_time_us,
     int64_t scheduled_start_us,

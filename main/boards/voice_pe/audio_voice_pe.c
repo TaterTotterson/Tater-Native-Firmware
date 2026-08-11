@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "audio_aec.h"
+#include "audio_render_clock.h"
 #include "board.h"
 #include "doa_activity_gate.h"
 #include "driver/gpio.h"
@@ -31,6 +32,7 @@ static bool s_speaker_ready;
 static bool s_speaker_enabled;
 static bool s_speaker_preloaded;
 static bool s_speaker_session_active;
+static tater_audio_render_clock_state_t s_render_clock;
 static SemaphoreHandle_t s_speaker_mutex;
 static portMUX_TYPE s_speaker_level_lock = portMUX_INITIALIZER_UNLOCKED;
 static float s_speaker_audio_level;
@@ -923,6 +925,16 @@ static esp_err_t speaker_i2s_configure_channel(void)
         s_tx_chan = NULL;
         return err;
     }
+    err = tater_audio_render_clock_register(
+        &s_render_clock,
+        s_tx_chan,
+        TATER_SPK_CHANNELS * sizeof(int16_t)
+    );
+    if (err != ESP_OK) {
+        i2s_del_channel(s_tx_chan);
+        s_tx_chan = NULL;
+        return err;
+    }
     return ESP_OK;
 }
 
@@ -1177,6 +1189,7 @@ esp_err_t tater_audio_speaker_begin(void)
         ESP_LOGE(TAG, "speaker i2s start failed: %s", esp_err_to_name(err));
         return err;
     }
+    tater_audio_render_clock_reset(&s_render_clock);
     s_speaker_session_active = true;
     return ESP_OK;
 }
@@ -1198,7 +1211,13 @@ esp_err_t tater_audio_write_speaker_frames(const int16_t *stereo_frames, size_t 
             s_speaker_enabled = false;
         }
         ESP_RETURN_ON_ERROR(
-            i2s_channel_preload_data(s_tx_chan, data, byte_count, &bytes_written),
+            tater_audio_render_clock_preload(
+                &s_render_clock,
+                s_tx_chan,
+                data,
+                byte_count,
+                &bytes_written
+            ),
             TAG,
             "speaker i2s preload failed"
         );
@@ -1211,7 +1230,8 @@ esp_err_t tater_audio_write_speaker_frames(const int16_t *stereo_frames, size_t 
         data += bytes_written;
         byte_count -= bytes_written;
     }
-    return i2s_channel_write(
+    return tater_audio_render_clock_write(
+        &s_render_clock,
         s_tx_chan,
         data,
         byte_count,
@@ -1242,6 +1262,11 @@ esp_err_t tater_audio_speaker_end(void)
 bool tater_audio_speaker_ready(void)
 {
     return s_speaker_ready;
+}
+
+bool tater_audio_speaker_render_clock_snapshot(tater_audio_render_clock_t *out)
+{
+    return tater_audio_render_clock_snapshot(&s_render_clock, out);
 }
 
 float tater_audio_speaker_level(void)

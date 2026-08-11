@@ -3820,6 +3820,11 @@ void tater_protocol_send_media_session_ready(
     cJSON_AddStringToObject(payload, "group_id", group_id ? group_id : "");
     cJSON_AddNumberToObject(payload, "buffered_frames", buffered_frames);
     cJSON_AddNumberToObject(payload, "sample_rate_hz", TATER_SPK_SAMPLE_RATE);
+    cJSON_AddNumberToObject(
+        payload,
+        "output_latency_frames",
+        TATER_MEDIA_RENDER_LATENCY_FRAMES
+    );
     cJSON_AddNumberToObject(payload, "satellite_time_us", (double)esp_timer_get_time());
     send_json(root);
 }
@@ -3831,6 +3836,7 @@ void tater_protocol_send_media_session_playhead(
     uint64_t source_frames,
     uint64_t rendered_frames,
     uint64_t output_frames,
+    uint32_t output_latency_frames,
     uint32_t buffered_frames,
     int64_t satellite_time_us,
     int64_t scheduled_start_us,
@@ -3850,6 +3856,7 @@ void tater_protocol_send_media_session_playhead(
     cJSON_AddNumberToObject(payload, "source_frames", (double)source_frames);
     cJSON_AddNumberToObject(payload, "rendered_frames", (double)rendered_frames);
     cJSON_AddNumberToObject(payload, "output_frames", (double)output_frames);
+    cJSON_AddNumberToObject(payload, "output_latency_frames", output_latency_frames);
     cJSON_AddNumberToObject(payload, "buffered_frames", buffered_frames);
     cJSON_AddNumberToObject(payload, "satellite_time_us", (double)satellite_time_us);
     cJSON_AddNumberToObject(payload, "scheduled_start_us", (double)scheduled_start_us);
