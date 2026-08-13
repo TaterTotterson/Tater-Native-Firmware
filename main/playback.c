@@ -67,6 +67,7 @@ struct playback_pcm_sink {
     esp_err_t (*end)(void *ctx);
     uint8_t volume_percent;
     volatile uint8_t *live_volume_percent;
+    bool absolute_volume;
 };
 
 typedef struct {
@@ -203,6 +204,7 @@ typedef struct {
     bool loop;
     uint8_t volume_percent;
     volatile uint8_t *live_volume_percent;
+    bool absolute_volume;
     uint64_t skip_frames_remaining;
     uint64_t skipped_frames;
     volatile bool done;
@@ -861,7 +863,9 @@ static int codec_jitter_read(codec_jitter_buffer_t *buffer, uint8_t *out, size_t
 static int16_t scale_output_sample(int16_t sample, playback_pcm_sink_t *sink)
 {
     const tater_live_settings_t *settings = tater_live_settings_get();
-    uint32_t master_volume = settings ? settings->volume_percent : 100;
+    uint32_t master_volume = sink && sink->absolute_volume
+        ? 100
+        : (settings ? settings->volume_percent : 100);
     uint32_t source_volume = playback_sink_volume(sink);
     uint32_t volume = (master_volume * source_volume + 50) / 100;
     if (volume >= 100) {
@@ -2280,6 +2284,7 @@ static void scene_background_task(void *arg)
             .end = scene_background_sink_end,
             .volume_percent = request->volume_percent,
             .live_volume_percent = request->live_volume_percent,
+            .absolute_volume = request->absolute_volume,
         };
         do {
             err = stream_audio_url(request->url, &sink);
@@ -3017,6 +3022,10 @@ static void media_session_task(void *arg)
     session->media_decoder->loop = session->media_loop;
     session->media_decoder->volume_percent = session->media_volume_percent;
     session->media_decoder->live_volume_percent = &session->media_volume_percent;
+    // Music sessions own an absolute 0-100 scale. Voice/tone playback still
+    // follows the satellite master volume, while a media session at 100 can
+    // reach the hardware maximum just like its player UI indicates.
+    session->media_decoder->absolute_volume = true;
     session->media_decoder->skip_frames_remaining =
         ((uint64_t)start_position_ms * (uint64_t)TATER_SPK_SAMPLE_RATE) / 1000ULL;
     session->media_decoder->notify_task = xTaskGetCurrentTaskHandle();

@@ -1,5 +1,4 @@
-- Releases Satellite1, Voice PE, ReSpeaker XVF3800, and S3 Box firmware `0.3.8`.
-- Measures playback from completed I2S DMA writes on every native ESP board so Tater sees audio that has actually reached the hardware output instead of decoder data that is still queued.
-- Reports each board's output pipeline latency and rendered source position to Tater for accurate server-owned audible scheduling across ESP, Linux, and AirPlay players.
-- Accepts an explicit audible-start deadline while retaining gradual drift correction, keeping mixed stereo and multi-room groups aligned without fixed device-pair delays.
-- Preserves the synchronized pre-roll path for Satellite1 and ReSpeaker so their first audible sample lands on the shared timeline.
+- Releases Satellite1, Voice PE, ReSpeaker XVF3800, and S3 Box firmware `0.3.9`.
+- Gives persistent music sessions an absolute 0–100 volume scale so 100% reaches each satellite's hardware maximum.
+- Keeps voice prompts and tones governed by the satellite master volume.
+- Preserves synchronized playback timing across native stereo and multi-room groups.

@@ -5,7 +5,7 @@
 #define TATER_BOARD_ID "satellite1"
 #define TATER_DEVICE_ID_PREFIX "sat1"
 #define TATER_DEFAULT_DEVICE_NAME "Tater Sat1"
-#define TATER_FIRMWARE_VERSION "native-satellite1-0.3.8"
+#define TATER_FIRMWARE_VERSION "native-satellite1-0.3.9"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6
