@@ -1,4 +1,9 @@
-- Releases Satellite1, Voice PE, ReSpeaker XVF3800, and S3 Box firmware `0.3.9`.
+- Releases firmware `0.3.10` for Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box.
+- Standardizes production Satellite1 hardware on its original default 5 V USB-C power path with fixed TAS2780 power mode 0.
+- Supports Satellite1 Public Batch #2 (HAT rev6.1 with Core rev5.1) and later compatible revisions. Early Public Batch #1 / Beta.1 rev4.1 hardware uses a different speaker-power path that requires a 9 V USB-PD contract or the documented VBAT hardware modification, so it remains outside the production firmware support range.
+- Keeps wake-word detection active during playback on Voice PE, Satellite1, and ReSpeaker XVF3800 using their hardware-AEC microphone paths, regardless of the barge-in setting; barge-in only controls whether a confirmed wake stops playback.
+- Retains the playback-time barge-in gate on S3 Box until its firmware AEC path is production-ready.
+- Makes wake sensitivity affect the detector threshold and redesigns the `tv_nearby` profile as a permissive candidate stage followed by required, fail-open Tater verification.
 - Gives persistent music sessions an absolute 0–100 volume scale so 100% reaches each satellite's hardware maximum.
 - Keeps voice prompts and tones governed by the satellite master volume.
 - Preserves synchronized playback timing across native stereo and multi-room groups.

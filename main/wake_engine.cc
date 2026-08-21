@@ -26,6 +26,7 @@
 #include "tensorflow/lite/schema/schema_generated.h"
 
 extern "C" {
+#include "board.h"
 #include "cache_storage.h"
 #include "frontend.h"
 #include "frontend_util.h"
@@ -33,6 +34,7 @@ extern "C" {
 #include "ota_update.h"
 #include "playback.h"
 #include "tater_protocol.h"
+#include "wake_detection_policy.h"
 #include "wake_model_assets.h"
 #include "wake_sound_assets.h"
 }
@@ -80,13 +82,6 @@ constexpr char kWakeSoundCacheMetaPath[] = "/spiffs/wake_sound.json";
 constexpr char kWakeSoundCacheDataPath[] = "/spiffs/wake_sound.wav";
 
 using WakeOpResolver = tflite::MicroMutableOpResolver<14>;
-
-enum class WakeEnvironment : uint8_t {
-    FAR_FIELD = 0,
-    BALANCED,
-    STRICT,
-    TV_NEARBY,
-};
 
 struct DownloadedWakeModel {
     uint8_t *data;
@@ -184,10 +179,13 @@ size_t s_wake_arena_used = 0;
 float s_last_score = 0.0f;
 float s_last_average = 0.0f;
 float s_last_peak = 0.0f;
+float s_last_probability_threshold = 0.0f;
 float s_last_peak_threshold = 0.0f;
 float s_last_rise_score = 0.0f;
 uint8_t s_last_active_window_count = 0;
 uint8_t s_last_min_active_windows = 0;
+uint16_t s_last_cooldown_ms = 0;
+bool s_last_verification_required = false;
 int32_t s_last_raw_score = 0;
 char s_last_detection_profile[32] = "balanced";
 char s_last_reject_reason[32] = "";
@@ -341,10 +339,13 @@ void reset_buffers()
     s_last_score = 0.0f;
     s_last_average = 0.0f;
     s_last_peak = 0.0f;
+    s_last_probability_threshold = 0.0f;
     s_last_peak_threshold = 0.0f;
     s_last_rise_score = 0.0f;
     s_last_active_window_count = 0;
     s_last_min_active_windows = 0;
+    s_last_cooldown_ms = 0;
+    s_last_verification_required = false;
     s_last_raw_score = 0;
     s_last_reject_reason[0] = '\0';
     std::memset(s_feature_history, 0, sizeof(s_feature_history));
@@ -829,107 +830,6 @@ uint8_t score_to_raw(float score)
     return static_cast<uint8_t>((score * 255.0f) + 0.5f);
 }
 
-const char *wake_environment_name(WakeEnvironment environment)
-{
-    switch (environment) {
-        case WakeEnvironment::FAR_FIELD:
-            return "far_field";
-        case WakeEnvironment::STRICT:
-            return "strict";
-        case WakeEnvironment::TV_NEARBY:
-            return "tv_nearby";
-        case WakeEnvironment::BALANCED:
-        default:
-            return "balanced";
-    }
-}
-
-WakeEnvironment wake_environment_from_settings(const tater_live_settings_t *settings)
-{
-    const char *value = settings ? settings->wake_environment : "";
-    if (!value || !value[0]) {
-        return WakeEnvironment::BALANCED;
-    }
-    if (std::strcmp(value, "far_field") == 0 || std::strcmp(value, "quiet") == 0 ||
-        std::strcmp(value, "quiet_room") == 0 || std::strcmp(value, "very_sensitive") == 0) {
-        return WakeEnvironment::FAR_FIELD;
-    }
-    if (std::strcmp(value, "strict") == 0) {
-        return WakeEnvironment::STRICT;
-    }
-    if (std::strcmp(value, "tv_nearby") == 0 || std::strcmp(value, "tv") == 0 || std::strcmp(value, "near_tv") == 0) {
-        return WakeEnvironment::TV_NEARBY;
-    }
-    return WakeEnvironment::BALANCED;
-}
-
-float peak_threshold_for_environment(WakeEnvironment environment, float threshold)
-{
-    switch (environment) {
-        case WakeEnvironment::STRICT:
-            return std::max(threshold, 220.0f / 255.0f);
-        case WakeEnvironment::TV_NEARBY:
-            return std::max(threshold, 235.0f / 255.0f);
-        case WakeEnvironment::FAR_FIELD:
-        case WakeEnvironment::BALANCED:
-        default:
-            return threshold;
-    }
-}
-
-uint8_t minimum_active_windows_for_environment(WakeEnvironment environment, size_t window)
-{
-    if (window == 0) {
-        return 0;
-    }
-    size_t minimum = 1;
-    switch (environment) {
-        case WakeEnvironment::FAR_FIELD:
-            minimum = 1;
-            break;
-        case WakeEnvironment::STRICT:
-            minimum = std::max<size_t>(2, ((window * 2) + 2) / 3);
-            break;
-        case WakeEnvironment::TV_NEARBY:
-            minimum = std::max<size_t>(3, ((window * 3) + 3) / 4);
-            break;
-        case WakeEnvironment::BALANCED:
-        default:
-            minimum = std::max<size_t>(1, (window + 1) / 2);
-            break;
-    }
-    return static_cast<uint8_t>(std::min(minimum, window));
-}
-
-float minimum_rise_score_for_environment(WakeEnvironment environment)
-{
-    switch (environment) {
-        case WakeEnvironment::STRICT:
-            return -8.0f / 255.0f;
-        case WakeEnvironment::TV_NEARBY:
-            return 4.0f / 255.0f;
-        case WakeEnvironment::FAR_FIELD:
-        case WakeEnvironment::BALANCED:
-        default:
-            return -1.0f;
-    }
-}
-
-int64_t cooldown_us_for_environment(WakeEnvironment environment)
-{
-    switch (environment) {
-        case WakeEnvironment::FAR_FIELD:
-            return 800000;
-        case WakeEnvironment::STRICT:
-            return 1600000;
-        case WakeEnvironment::TV_NEARBY:
-            return 2400000;
-        case WakeEnvironment::BALANCED:
-        default:
-            return 1200000;
-    }
-}
-
 size_t normalized_score_window(const tater_live_settings_t *settings)
 {
     size_t window = settings ? settings->wake_sliding_window : 5;
@@ -1053,12 +953,19 @@ bool ensure_capture_ring()
 
 bool capture_settings_enabled(const tater_live_settings_t *settings)
 {
-    return settings
-        && (
-            settings->capture_wake_audio
-            || settings->capture_close_misses
-            || std::strcmp(settings->wake_verifier_mode, "off") != 0
-        );
+    if (!settings) {
+        return false;
+    }
+    tater_wake_detection_policy_t policy = tater_wake_detection_policy_make(
+        settings->wake_sensitivity,
+        settings->wake_environment,
+        settings->wake_threshold,
+        settings->wake_sliding_window
+    );
+    return settings->capture_wake_audio
+        || settings->capture_close_misses
+        || std::strcmp(settings->wake_verifier_mode, "off") != 0
+        || policy.require_verification;
 }
 
 void append_capture_audio(const int16_t *pcm, size_t sample_count)
@@ -2040,12 +1947,16 @@ void wake_verifier_timeout_task(void *arg)
     vTaskDelete(nullptr);
 }
 
-bool queue_wake_verification(const tater_live_settings_t *settings, const char *wake_word)
+bool queue_wake_verification(
+    const tater_live_settings_t *settings,
+    const char *wake_word,
+    bool force_enforce
+)
 {
-    if (!settings || std::strcmp(settings->wake_verifier_mode, "off") == 0) {
+    if (!settings || (!force_enforce && std::strcmp(settings->wake_verifier_mode, "off") == 0)) {
         return false;
     }
-    bool enforce = std::strcmp(settings->wake_verifier_mode, "enforce") == 0;
+    bool enforce = force_enforce || std::strcmp(settings->wake_verifier_mode, "enforce") == 0;
     size_t requested_samples = (
         (size_t)kAudioSampleRate * (size_t)settings->wake_verifier_window_ms
     ) / 1000U;
@@ -2101,7 +2012,7 @@ bool queue_wake_verification(const tater_live_settings_t *settings, const char *
         TAG,
         "wake verifier queued request=%lu mode=%s samples=%u timeout_ms=%u",
         (unsigned long)request_id,
-        settings->wake_verifier_mode,
+        force_enforce ? "tv_enforce" : settings->wake_verifier_mode,
         (unsigned)sample_count,
         (unsigned)settings->wake_verifier_timeout_ms
     );
@@ -2474,9 +2385,11 @@ bool runtime_enabled()
     if (tater_ota_is_running() || !tater_protocol_can_start_local_wake()) {
         return false;
     }
+#if !TATER_CAP_WAKE_DURING_PLAYBACK
     if (tater_playback_is_playing() && !settings->barge_in_enabled) {
         return false;
     }
+#endif
     return true;
 }
 
@@ -2659,10 +2572,13 @@ bool score_window_triggered(float score)
         }
         s_last_average = count > 0 ? sum / static_cast<float>(count) : 0.0f;
         s_last_peak = peak;
+        s_last_probability_threshold = stop_threshold;
         s_last_peak_threshold = stop_threshold;
         s_last_active_window_count = active_windows_at_or_above(stop_threshold, stop_window);
         s_last_min_active_windows = 1;
         s_last_rise_score = score_window_rise_score(count, stop_window);
+        s_last_cooldown_ms = 0;
+        s_last_verification_required = false;
         if (count < stop_window) {
             std::snprintf(s_last_reject_reason, sizeof(s_last_reject_reason), "%s", "warming_up");
             return false;
@@ -2679,9 +2595,14 @@ bool score_window_triggered(float score)
 
     const tater_live_settings_t *settings = tater_live_settings_get();
     size_t window = normalized_score_window(settings);
-    float threshold = settings ? settings->wake_threshold : 0.97f;
-    WakeEnvironment environment = wake_environment_from_settings(settings);
-    const char *profile = wake_environment_name(environment);
+    tater_wake_detection_policy_t policy = tater_wake_detection_policy_make(
+        settings ? settings->wake_sensitivity : "normal",
+        settings ? settings->wake_environment : "balanced",
+        settings ? settings->wake_threshold : 0.97f,
+        static_cast<uint8_t>(window)
+    );
+    float threshold = policy.probability_threshold;
+    const char *profile = tater_wake_environment_name(policy.environment);
     std::snprintf(s_last_detection_profile, sizeof(s_last_detection_profile), "%s", profile);
 
     s_score_window[s_score_window_index] = score;
@@ -2702,10 +2623,13 @@ bool score_window_triggered(float score)
     }
     s_last_average = count > 0 ? sum / static_cast<float>(count) : 0.0f;
     s_last_peak = peak;
-    s_last_peak_threshold = peak_threshold_for_environment(environment, threshold);
+    s_last_probability_threshold = threshold;
+    s_last_peak_threshold = policy.peak_threshold;
     s_last_active_window_count = active_windows_at_or_above(threshold, window);
-    s_last_min_active_windows = minimum_active_windows_for_environment(environment, window);
+    s_last_min_active_windows = policy.min_active_windows;
     s_last_rise_score = score_window_rise_score(count, window);
+    s_last_cooldown_ms = policy.cooldown_ms;
+    s_last_verification_required = policy.require_verification;
 
     if (count < window) {
         std::snprintf(s_last_reject_reason, sizeof(s_last_reject_reason), "%s", "warming_up");
@@ -2715,7 +2639,7 @@ bool score_window_triggered(float score)
     bool average_detected = s_last_average >= threshold;
     bool peak_detected = s_last_peak >= s_last_peak_threshold;
     bool active_windows_detected = s_last_active_window_count >= s_last_min_active_windows;
-    bool shape_detected = s_last_rise_score >= minimum_rise_score_for_environment(environment);
+    bool shape_detected = s_last_rise_score >= policy.minimum_rise_score;
     bool detected = average_detected && peak_detected && active_windows_detected && shape_detected;
     if (detected) {
         s_last_reject_reason[0] = '\0';
@@ -2762,7 +2686,9 @@ void handle_feature_frame(const int8_t *feature)
     }
     if (debug_logging_enabled(settings)) {
         int64_t now_us = esp_timer_get_time();
-        float threshold = settings ? settings->wake_threshold : 0.97f;
+        float threshold = s_last_probability_threshold > 0.0f
+            ? s_last_probability_threshold
+            : (settings ? settings->wake_threshold : 0.97f);
         if ((now_us - s_last_debug_log_us) >= 500000 || s_last_score >= (threshold * 0.5f)) {
             ESP_LOGI(
                 TAG,
@@ -2791,7 +2717,9 @@ void handle_feature_frame(const int8_t *feature)
     }
     if (!triggered) {
         const char *wake_word = active_detection_wake_word(settings);
-        float threshold = settings ? settings->wake_threshold : 0.97f;
+        float threshold = s_last_probability_threshold > 0.0f
+            ? s_last_probability_threshold
+            : (settings ? settings->wake_threshold : 0.97f);
         char probability_history[128];
         format_probability_history(probability_history, sizeof(probability_history));
         maybe_queue_close_miss(
@@ -2811,20 +2739,22 @@ void handle_feature_frame(const int8_t *feature)
     }
 
     const char *wake_word = active_detection_wake_word(settings);
-    float threshold = settings ? settings->wake_threshold : 0.97f;
+    float threshold = s_last_probability_threshold > 0.0f
+        ? s_last_probability_threshold
+        : (settings ? settings->wake_threshold : 0.97f);
     char probability_history[128];
     format_probability_history(probability_history, sizeof(probability_history));
     clear_pending_close_miss();
     s_detection_count++;
     int64_t trigger_time_us = esp_timer_get_time();
-    s_cooldown_until_us = trigger_time_us + cooldown_us_for_environment(wake_environment_from_settings(settings));
+    s_cooldown_until_us = trigger_time_us + ((int64_t)s_last_cooldown_ms * 1000);
     ESP_LOGI(
         TAG,
         "wake detected score=%.3f avg=%.3f peak=%.3f threshold=%.3f profile=%s active=%u/%u rise=%.3f",
         (double)s_last_score,
         (double)s_last_average,
         (double)s_last_peak,
-        (double)(settings ? settings->wake_threshold : 0.97f),
+        (double)threshold,
         s_last_detection_profile,
         (unsigned)s_last_active_window_count,
         (unsigned)s_last_min_active_windows,
@@ -2844,10 +2774,17 @@ void handle_feature_frame(const int8_t *feature)
         s_last_rise_score,
         probability_history
     );
-    bool verifier_queued = queue_wake_verification(settings, wake_word);
+    bool verifier_queued = queue_wake_verification(
+        settings,
+        wake_word,
+        s_last_verification_required
+    );
     bool verifier_enforced = verifier_queued
         && settings
-        && std::strcmp(settings->wake_verifier_mode, "enforce") == 0;
+        && (
+            s_last_verification_required
+            || std::strcmp(settings->wake_verifier_mode, "enforce") == 0
+        );
     if (!verifier_enforced) {
         start_wake_session(wake_word);
     }
@@ -3098,11 +3035,13 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     cJSON_AddNumberToObject(wake, "last_score", s_last_score);
     cJSON_AddNumberToObject(wake, "last_average", s_last_average);
     cJSON_AddNumberToObject(wake, "last_peak", s_last_peak);
+    cJSON_AddNumberToObject(wake, "last_probability_threshold", s_last_probability_threshold);
     cJSON_AddNumberToObject(wake, "last_peak_threshold", s_last_peak_threshold);
     cJSON_AddStringToObject(wake, "last_detection_profile", s_last_detection_profile);
     cJSON_AddNumberToObject(wake, "last_active_windows", s_last_active_window_count);
     cJSON_AddNumberToObject(wake, "last_min_active_windows", s_last_min_active_windows);
     cJSON_AddNumberToObject(wake, "last_rise_score", s_last_rise_score);
+    cJSON_AddBoolToObject(wake, "last_verification_required", s_last_verification_required);
     cJSON_AddStringToObject(wake, "last_reject_reason", s_last_reject_reason);
     cJSON_AddStringToObject(wake, "last_error", s_last_error);
     cJSON_AddBoolToObject(wake, "runtime_enabled", s_runtime_was_enabled);

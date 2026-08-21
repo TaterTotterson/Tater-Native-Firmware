@@ -86,12 +86,19 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 - Local embedded `hey_tater` microWakeWord model
 - Embedded alarm-only `stop` model that is active only while a timer rings
 - Custom microWakeWord `.json` and `.tflite` URL support with persistent cache
-- Wake sensitivity, environment profile, threshold, and sliding-window settings
+- Wake sensitivity that adjusts the effective detection threshold, plus
+  environment profile, threshold, and sliding-window settings
 - Optional low-latency Tater STT wake verification in observe or enforce mode,
   with fail-open handling if verification is unavailable or times out
+- A `tv_nearby` profile that uses a more permissive first-stage candidate and
+  automatically verifies it before opening a voice session
 - Optional good-wake and close-miss raw PCM upload hooks for the trainer
 - Continued-chat mic reopen
-- Optional wake-word barge-in during playback
+- On Voice PE, Satellite1, and ReSpeaker XVF3800, wake-word listening remains
+  active during playback through their hardware-AEC microphone paths; barge-in
+  only controls whether a confirmed wake stops the playing audio
+- On S3 Box, playback-time wake remains opt-in through barge-in until its
+  firmware AEC path is ready for production use
 - Firmware-side adaptive AEC with live strength and delay settings
 - Server-driven playback from Tater
 - WAV streaming playback
@@ -300,8 +307,8 @@ Satellite1 / Sat1:
 - 24 LED ring
 - 48 kHz microphone capture downsampled into the 16 kHz wake/STT path
 - Shared-duplex I2S speaker playback
-- PCM5122/TAS2780 speaker path setup
-- FUSB302B USB-C PD setup path
+- PCM5122/TAS2780 speaker path setup using the default 5 V USB-C supply and
+  fixed TAS2780 power mode 0
 - Four-microphone XMOS DoA estimation with noise calibration, confidence
   filtering, continuous talker tracking, playback omni fallback,
   fractional-delay beamforming,

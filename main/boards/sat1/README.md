@@ -5,7 +5,7 @@ Native board implementation for Satellite1 / Sat1.
 ## Current status
 
 Satellite1 is a fully supported Tater Native target, not an experimental board
-port. The current public build is `native-satellite1-0.3.7`, with
+port. The firmware version in this tree is `native-satellite1-0.3.10`, with
 checksum-verified factory and OTA artifacts published under the `satellite1`
 release family.
 Users can install it through Tater's Local USB or Browser USB flasher, complete
@@ -26,15 +26,27 @@ The released firmware includes:
 
 ### Satellite1 hardware support
 
+Tater Native supports Public Batch #2 hardware (HAT rev6.1 with Core rev5.1)
+and later compatible revisions. Early Public Batch #1 / Beta.1 HAT and Core
+rev4.1 hardware uses a different speaker-power path that requires a 9 V USB-PD
+contract or the documented VBAT hardware modification, so it remains outside the
+production firmware support range.
+
 - 48 kHz microphone capture downsampled to 16 kHz mono for wake/STT streaming
 - shared-duplex I2S speaker playback through the PCM5122/TAS2780 path
-- FUSB302B USB-C PD negotiation up to 20 V, with the TAS2780 configured for
-  high-voltage mode only after an explicit contract of at least 9 V
+- fixed TAS2780 power mode 0 using the default 5 V USB-C supply
 - four-microphone XMOS DoA estimation with adaptive room-noise calibration,
   confidence filtering, and directional smoothing
 - four-microphone fractional-delay, delay-and-sum beamforming with continuous
   talker tracking, per-microphone gain calibration, unhealthy-microphone
   fallback, and automatic omni steering during playback
+- wake-word detection that remains active during speaker playback using the
+  XMOS hardware-referenced AEC channel, independent of the barge-in setting;
+  barge-in only decides whether a confirmed wake stops the playing audio
+- sensitivity settings that adjust the effective detector threshold, plus a
+  `tv_nearby` profile that admits stronger candidates and requires Tater wake
+  verification before opening a voice session (with fail-open handling when
+  verification is unavailable)
 - directional LEDs that reject weak/noise-only updates, briefly hold the last
   speech direction, and then return to a neutral listening state
 - bundled production XMOS firmware `1.1.1`, automatically installed at boot
@@ -61,20 +73,9 @@ The board-specific audio implementation lives in:
 main/boards/sat1/audio_sat1.c
 ```
 
-USB-C power negotiation lives in:
-
-```text
-main/boards/sat1/sat1_power_delivery.c
-```
-
-The speaker always starts from the safe 5 V TAS2780 profile. After the official
-firmware's two-second startup stabilization window, a fixed USB-PD source
-profile up to 20 V is requested through the FUSB302B; after `PS_RDY`,
-contracts of 9 V or higher select TAS2780 power mode 2. Missing controllers,
-5 V-only adapters, rejected requests, and negotiation timeouts remain on power
-mode 0, preserving the existing amplifier profile on newer revisions. Early public
-Beta.1/rev4.1 boards require the higher-voltage contract (or their documented
-VBAT hardware modification) for the onboard speaker rail to operate.
+Production firmware leaves the FUSB302B unconfigured and does not request a
+non-default USB-C voltage. This uses the standard 5 V power path of supported
+production Satellite1 hardware without changing supply contracts during boot.
 
 The bundled XMOS source and factory image live in:
 
