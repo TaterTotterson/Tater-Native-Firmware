@@ -5,7 +5,7 @@ Native board implementation for Satellite1 / Sat1.
 ## Current status
 
 Satellite1 is a fully supported Tater Native target, not an experimental board
-port. The firmware version in this tree is `native-satellite1-0.3.10`, with
+port. The firmware version in this tree is `native-satellite1-0.3.11`, with
 checksum-verified factory and OTA artifacts published under the `satellite1`
 release family.
 Users can install it through Tater's Local USB or Browser USB flasher, complete

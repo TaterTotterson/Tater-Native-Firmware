@@ -3558,7 +3558,6 @@ static void playback_memory_task(void *arg)
 
     s_playing = true;
     ESP_LOGI(TAG, "local wav playback label=%s bytes=%u", request ? request->label : "", (unsigned)(request ? request->len : 0));
-    tater_protocol_send_log("info", "local wake sound started");
 
     if (!request || !request->data || request->len == 0) {
         err = ESP_ERR_INVALID_ARG;
@@ -3571,16 +3570,17 @@ static void playback_memory_task(void *arg)
         err = play_wav(&wav);
     }
 
-    if (!s_abort && err == ESP_OK) {
-        tater_protocol_send_log("info", "local wake sound finished");
-    } else {
-        tater_protocol_send_log("warn", "local wake sound stopped or failed");
-    }
+    bool playback_ok = !s_abort && err == ESP_OK;
     if (request && request->free_data && request->data) {
         free((void *)request->data);
     }
     free(request);
     playback_mark_finished();
+    if (playback_ok) {
+        tater_protocol_send_log("info", "local wake sound finished");
+    } else {
+        tater_protocol_send_log("warn", "local wake sound stopped or failed");
+    }
     playback_delete_current_task(task_with_caps);
 }
 

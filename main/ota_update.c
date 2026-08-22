@@ -23,6 +23,12 @@ static volatile bool s_running;
 #define OTA_READ_BUFFER_SIZE 1024
 #define OTA_TASK_STACK_SIZE 6144
 
+typedef struct {
+    tater_ota_failure_callback_t failure_callback;
+    bool task_with_caps;
+    char url[];
+} ota_task_context_t;
+
 static void ota_send_logf(const char *level, const char *fmt, ...)
 {
     char msg[192];
@@ -45,9 +51,67 @@ static void ota_log_heap(const char *stage)
     );
 }
 
+static esp_err_t ota_start_failed(const char *stage, esp_err_t err)
+{
+    char message[192];
+    snprintf(
+        message,
+        sizeof(message),
+        "OTA could not start during %s: %s internal=%u largest_internal=%u psram=%u",
+        stage ? stage : "startup",
+        esp_err_to_name(err),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM)
+    );
+    ESP_LOGE(TAG, "%s", message);
+    tater_protocol_send_log("error", message);
+    tater_protocol_send_ota_status("error", 0, message);
+    return err;
+}
+
+static ota_task_context_t *ota_task_context_create(
+    const char *url,
+    tater_ota_failure_callback_t failure_callback
+)
+{
+    size_t url_size = strlen(url) + 1;
+    size_t allocation_size = sizeof(ota_task_context_t) + url_size;
+    ota_task_context_t *context = heap_caps_malloc(
+        allocation_size,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (!context) {
+        context = heap_caps_malloc(allocation_size, MALLOC_CAP_8BIT);
+    }
+    if (!context) {
+        return NULL;
+    }
+    context->failure_callback = failure_callback;
+    context->task_with_caps = false;
+    memcpy(context->url, url, url_size);
+    return context;
+}
+
+static void ota_delete_current_task(bool task_with_caps)
+{
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    if (task_with_caps) {
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+#else
+    (void)task_with_caps;
+#endif
+    vTaskDelete(NULL);
+}
+
 static void ota_task(void *arg)
 {
-    char *url = (char *)arg;
+    ota_task_context_t *context = (ota_task_context_t *)arg;
+    char *url = context->url;
+    tater_ota_failure_callback_t failure_callback = context->failure_callback;
+    bool task_with_caps = context->task_with_caps;
     esp_ota_handle_t ota = 0;
     const esp_partition_t *partition = NULL;
     uint8_t *buf = NULL;
@@ -198,30 +262,69 @@ done:
         snprintf(status_msg, sizeof(status_msg), "OTA failed during %s: %s", stage, esp_err_to_name(err));
         tater_protocol_send_ota_status("error", last_progress > 0 ? last_progress : 0, status_msg);
     }
-    free(url);
+    free(context);
     s_running = false;
-    vTaskDelete(NULL);
+    if (err != ESP_OK && failure_callback) {
+        failure_callback(err);
+    }
+    ota_delete_current_task(task_with_caps);
 }
 
-esp_err_t tater_ota_start_url(const char *url)
+esp_err_t tater_ota_start_url(const char *url, tater_ota_failure_callback_t failure_callback)
 {
     if (s_running) {
-        return ESP_ERR_INVALID_STATE;
+        return ota_start_failed("state check", ESP_ERR_INVALID_STATE);
     }
     if (!url || strlen(url) == 0) {
-        return ESP_ERR_INVALID_ARG;
+        return ota_start_failed("URL validation", ESP_ERR_INVALID_ARG);
     }
     s_running = true;
-    char *copy = strdup(url);
-    if (!copy) {
+    ota_task_context_t *context = ota_task_context_create(url, failure_callback);
+    if (!context) {
         s_running = false;
-        return ESP_ERR_NO_MEM;
+        return ota_start_failed("request allocation", ESP_ERR_NO_MEM);
     }
-    BaseType_t ok = xTaskCreatePinnedToCore(ota_task, "tater_ota", OTA_TASK_STACK_SIZE, copy, 7, NULL, 1);
+
+    BaseType_t ok = pdFAIL;
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    context->task_with_caps = true;
+    ok = xTaskCreatePinnedToCoreWithCaps(
+        ota_task,
+        "tater_ota",
+        OTA_TASK_STACK_SIZE,
+        context,
+        7,
+        NULL,
+        1,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
     if (ok != pdPASS) {
-        free(copy);
+        context->task_with_caps = false;
+        ESP_LOGW(
+            TAG,
+            "OTA PSRAM task create failed stack=%u psram=%u internal=%u largest_internal=%u; retrying internal",
+            (unsigned)OTA_TASK_STACK_SIZE,
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+        );
+    }
+#endif
+    if (ok != pdPASS) {
+        ok = xTaskCreatePinnedToCore(
+            ota_task,
+            "tater_ota",
+            OTA_TASK_STACK_SIZE,
+            context,
+            7,
+            NULL,
+            1
+        );
+    }
+    if (ok != pdPASS) {
+        free(context);
         s_running = false;
-        return ESP_ERR_NO_MEM;
+        return ota_start_failed("OTA task allocation", ESP_ERR_NO_MEM);
     }
     return ESP_OK;
 }

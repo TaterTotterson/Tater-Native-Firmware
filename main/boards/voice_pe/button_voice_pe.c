@@ -95,6 +95,7 @@ static void voicepe_apply_volume_delta(int delta_percent)
     uint8_t volume = tater_live_settings_adjust_volume(delta_percent);
     const tater_live_settings_t *settings = tater_live_settings_get();
     tater_leds_show_volume(volume);
+    tater_protocol_send_volume_changed(volume);
     char message[80] = {0};
     snprintf(message, sizeof(message), "Voice PE volume %u%%", volume);
     ESP_LOGI(
@@ -245,6 +246,7 @@ static void sat1_apply_volume_delta(int delta_percent)
     uint8_t volume = tater_live_settings_adjust_volume(delta_percent);
     const tater_live_settings_t *settings = tater_live_settings_get();
     tater_leds_show_volume(volume);
+    tater_protocol_send_volume_changed(volume);
     char message[80] = {0};
     snprintf(message, sizeof(message), "Sat1 volume %u%%", volume);
     ESP_LOGI(

@@ -56,6 +56,7 @@ uint32_t tater_protocol_send_wake_verification(
     bool enforce
 );
 void tater_protocol_send_log(const char *level, const char *message);
+void tater_protocol_send_volume_changed(uint8_t volume_percent);
 void tater_protocol_send_playback_finished(void);
 void tater_protocol_send_playback_finished_status(bool ok, bool allow_reopen);
 void tater_protocol_send_audio_scene_finished(const char *scene_id, bool ok);

@@ -3567,6 +3567,21 @@ void tater_protocol_send_log(const char *level, const char *message)
     send_json(root);
 }
 
+void tater_protocol_send_volume_changed(uint8_t volume_percent)
+{
+    cJSON *root = new_envelope("settings.changed");
+    cJSON *payload = cJSON_GetObjectItem(root, "payload");
+    cJSON *settings = cJSON_CreateObject();
+    cJSON_AddNumberToObject(
+        settings,
+        "volume_percent",
+        volume_percent > 100 ? 100 : volume_percent
+    );
+    cJSON_AddItemToObject(payload, "settings", settings);
+    cJSON_AddStringToObject(payload, "source", "device");
+    send_json(root);
+}
+
 static void continued_reopen_watchdog_task(void *arg)
 {
     tater_voice_watchdog_args_t *request = (tater_voice_watchdog_args_t *)arg;

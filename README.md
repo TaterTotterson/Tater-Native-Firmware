@@ -113,6 +113,21 @@ flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout.
 - Custom wake-sound WAV URL support with persistent cache
 - Server-driven `play.tone` support for diagnostics
 - Per-device volume setting
+- Two-way hardware volume synchronization for Satellite1 buttons and the Voice
+  PE encoder
+
+When a physical volume control changes the shared device volume, the satellite
+emits a compact event so the server can persist and display the new value:
+
+```json
+{
+  "type": "settings.changed",
+  "payload": {
+    "settings": {"volume_percent": 65},
+    "source": "device"
+  }
+}
+```
 
 `audio.scene.start` is backward-compatible with the existing `play.url` path
 and is advertised as audio scene capability version 1. The foreground is

@@ -79,15 +79,32 @@ static void on_tater_play_tone(uint32_t frequency_hz, uint32_t duration_ms, uint
     }
 }
 
+static void restore_leds_after_ota_failure(esp_err_t error)
+{
+    (void)error;
+    tater_state_t state = TATER_STATE_IDLE;
+    if (!tater_protocol_is_connected()) {
+        state = TATER_STATE_DISCONNECTED;
+    } else if (tater_protocol_timer_is_active()) {
+        state = TATER_STATE_TIMER;
+    } else if (tater_protocol_voice_active()) {
+        state = TATER_STATE_LISTENING;
+    }
+    tater_leds_set_state(state);
+}
+
 static void on_tater_ota_url(const char *url)
 {
     ESP_LOGW(TAG, "ota.url received: %s", url ? url : "");
     tater_playback_stop();
     tater_leds_set_state(TATER_STATE_OTA);
-    esp_err_t err = tater_ota_start_url(url);
+    esp_err_t err = tater_ota_start_url(url, restore_leds_after_ota_failure);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA start failed: %s", esp_err_to_name(err));
-        tater_protocol_send_ota_status("error", 0, esp_err_to_name(err));
+        if (!tater_ota_is_running()) {
+            restore_leds_after_ota_failure(err);
+        }
+        return;
     }
 }
 
