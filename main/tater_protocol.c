@@ -3383,6 +3383,25 @@ void tater_protocol_send_status(const char *state)
         cJSON_AddNumberToObject(xmos_fw, "dfu_status", xmos_status.dfu_status);
         cJSON_AddItemToObject(payload, "xmos_firmware", xmos_fw);
     }
+#if TATER_BOARD_SAT1_BETA_REV41
+    tater_audio_power_status_t power_status = {0};
+    if (tater_audio_power_status_snapshot(&power_status)) {
+        cJSON *power = cJSON_CreateObject();
+        cJSON_AddStringToObject(power, "state", power_status.state);
+        cJSON_AddBoolToObject(power, "controller_present", power_status.controller_present);
+        cJSON_AddBoolToObject(power, "attached", power_status.attached);
+        cJSON_AddBoolToObject(power, "explicit_contract", power_status.explicit_contract);
+        cJSON_AddBoolToObject(power, "negotiation_failed", power_status.negotiation_failed);
+        cJSON_AddNumberToObject(power, "controller_device_id", power_status.device_id);
+        cJSON_AddNumberToObject(power, "cc_pin", power_status.cc_pin);
+        cJSON_AddNumberToObject(power, "source_pdo_count", power_status.source_pdo_count);
+        cJSON_AddNumberToObject(power, "requested_voltage_mv", power_status.requested_voltage_mv);
+        cJSON_AddNumberToObject(power, "contract_voltage_mv", power_status.contract_voltage_mv);
+        cJSON_AddNumberToObject(power, "contract_current_ma", power_status.contract_current_ma);
+        cJSON_AddNumberToObject(power, "tas2780_power_mode", power_status.tas_power_mode);
+        cJSON_AddItemToObject(payload, "power_delivery", power);
+    }
+#endif
     wifi_ap_record_t ap = {0};
     if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
         cJSON_AddNumberToObject(payload, "wifi_rssi", ap.rssi);

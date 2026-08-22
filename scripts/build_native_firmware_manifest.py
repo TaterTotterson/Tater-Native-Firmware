@@ -31,6 +31,21 @@ BOARDS: dict[str, dict[str, Any]] = {
             "repo_path": "main/boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin",
         },
     },
+    "satellite1_beta_rev41": {
+        "env": "sat1_beta_rev41",
+        "build_dir": "sat1_beta_rev41",
+        "prebuilt_dir": "satellite1_beta_rev41",
+        "key": "satellite1_beta_rev41",
+        "label": "Satellite1 Beta.1 / rev4.1",
+        "board": "satellite1-beta-rev41",
+        "header": FIRMWARE_ROOT / "main" / "boards" / "sat1" / "board_sat1_beta_rev41.h",
+        "flash_size": "16MB",
+        "xmos_firmware": {
+            "version": "1.1.1",
+            "source": FIRMWARE_ROOT / "main" / "boards" / "sat1" / "xmos" / "sat1_xmos_1_1_1_factory.bin",
+            "repo_path": "main/boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin",
+        },
+    },
     "voicepe": {
         "env": "voicepe",
         "build_dir": "voicepe",

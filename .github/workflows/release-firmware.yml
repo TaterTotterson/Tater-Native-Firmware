@@ -37,7 +37,7 @@ jobs:
         run: python -m pip install --upgrade pip platformio
 
       - name: Build firmware
-        run: platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
+        run: platformio run -e voicepe -e sat1 -e sat1_beta_rev41 -e respeaker_xvf3800 -e s3_box
 
       - name: Package release assets
         id: package
@@ -54,8 +54,8 @@ jobs:
 
           VERSION="$(python -c 'import json; print(json.load(open("'"${RELEASE_DIR}"'/latest.json", encoding="utf-8"))["version"])')"
           DISPLAY_VERSION="$(python -c 'import json; data=json.load(open("'"${RELEASE_DIR}"'/latest.json", encoding="utf-8")); print(data.get("display_version") or data["version"])')"
-          if [ "$TAG" != "$VERSION" ]; then
-            echo "Tag ${TAG} does not match firmware version ${VERSION}." >&2
+          if [ "$TAG" != "$VERSION" ] && [[ "$TAG" != "${VERSION}-"* ]]; then
+            echo "Tag ${TAG} does not match firmware version ${VERSION} or a suffixed follow-up release." >&2
             exit 1
           fi
 

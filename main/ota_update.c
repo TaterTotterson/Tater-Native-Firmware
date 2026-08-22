@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "board.h"
 #include "esp_check.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -14,6 +15,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "ota_family.h"
 #include "tater_protocol.h"
 
 static const char *TAG = "tater_ota";
@@ -22,6 +24,9 @@ static volatile bool s_running;
 #define OTA_HTTP_BUFFER_SIZE 1024
 #define OTA_READ_BUFFER_SIZE 1024
 #define OTA_TASK_STACK_SIZE 6144
+
+static const char s_ota_family_marker[] =
+    TATER_OTA_FAMILY_MARKER_PREFIX TATER_OTA_FAMILY TATER_OTA_FAMILY_MARKER_SUFFIX;
 
 typedef struct {
     tater_ota_failure_callback_t failure_callback;
@@ -118,6 +123,8 @@ static void ota_task(void *arg)
     int last_progress = -1;
     const char *stage = "starting";
     esp_err_t err = ESP_OK;
+    tater_ota_family_scan_t family_scan;
+    tater_ota_family_scan_init(&family_scan);
 
     s_running = true;
     tater_protocol_send_ota_status("starting", 0, "OTA starting");
@@ -205,6 +212,7 @@ static void ota_task(void *arg)
         if (got == 0) {
             break;
         }
+        tater_ota_family_scan_feed(&family_scan, s_ota_family_marker, buf, (size_t)got);
         stage = "ota write";
         err = esp_ota_write(ota, buf, got);
         if (err != ESP_OK) {
@@ -218,6 +226,13 @@ static void ota_task(void *arg)
                 tater_protocol_send_ota_status("writing", progress, "OTA writing");
             }
         }
+    }
+
+    if (!tater_ota_family_scan_found(&family_scan)) {
+        stage = "OTA family validation";
+        ota_send_logf("error", "OTA image is not for %s", TATER_OTA_FAMILY);
+        err = ESP_ERR_INVALID_RESPONSE;
+        goto done;
     }
 
     stage = "ota end";

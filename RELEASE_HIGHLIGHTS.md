@@ -1,4 +1,4 @@
-- Releases firmware `0.3.11` for Voice PE, Satellite1, ReSpeaker XVF3800, and S3 Box.
-- Synchronizes physical volume changes from the Satellite1 buttons and Voice PE encoder back to Tater and Home Assistant.
-- Makes OTA startup more reliable under memory pressure by preferring PSRAM for the update task, retaining an internal-memory fallback, and restoring the normal LED state when an update fails.
-- Removes network diagnostics from the wake-chime start path so the local sound is no longer delayed by busy WebSocket traffic.
+- Adds a dedicated `0.3.11` firmware target for Satellite1 Public Batch #1 / Beta.1 HAT and Core rev4.1 hardware.
+- Keeps legacy USB-PD handling out of production Satellite1 firmware; the legacy target accepts only an exact 9 V contract and otherwise stays on its safe 5 V audio profile.
+- Gives production and legacy Satellite1 firmware separate OTA families and rejects an update image for the wrong hardware family before activation.
+- Shows the correct board and default device name in hotspot setup instead of displaying Voice PE for every satellite.

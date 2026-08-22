@@ -4,6 +4,8 @@ idf_component_register(
         "audio_aec.c"
         "boards/voice_pe/audio_voice_pe.c"
         "boards/sat1/audio_sat1.c"
+        "boards/sat1/sat1_pd_policy.c"
+        "boards/sat1/sat1_power_delivery.c"
         "boards/respeaker_xvf3800/audio_respeaker_xvf3800.c"
         "boards/respeaker_xvf3800/xvf3800_doa.c"
         "boards/s3_box/audio_s3_box.c"
@@ -15,6 +17,7 @@ idf_component_register(
         "doa_direction_memory.c"
         "native_settings.c"
         "network_recovery.c"
+        "ota_family.c"
         "ota_update.c"
         "playback.c"
         "playback_mix.c"
@@ -54,7 +57,7 @@ target_add_binary_data(${COMPONENT_LIB} "models/hey_tater.tflite" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "models/stop.tflite" BINARY)
 if(TATER_NATIVE_BUILD_ENV STREQUAL "voicepe")
     target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin" BINARY)
-elseif(TATER_NATIVE_BUILD_ENV STREQUAL "sat1")
+elseif(TATER_NATIVE_BUILD_ENV STREQUAL "sat1" OR TATER_NATIVE_BUILD_ENV STREQUAL "sat1_beta_rev41")
     target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "respeaker_xvf3800")
     target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin" BINARY)

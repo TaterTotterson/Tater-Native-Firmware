@@ -29,6 +29,10 @@
 
 #if TATER_BOARD_SAT1
 
+#if TATER_BOARD_SAT1_BETA_REV41
+#include "boards/sat1/sat1_power_delivery.h"
+#endif
+
 static const char *TAG = "tater_audio_sat1";
 
 extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_start[] asm("_binary_sat1_xmos_1_1_1_factory_bin_start");
@@ -100,6 +104,9 @@ static bool s_speaker_session_active;
 static tater_audio_render_clock_state_t s_render_clock;
 static SemaphoreHandle_t s_speaker_mutex;
 static uint8_t s_tas_power_mode = 0xff;
+#if TATER_BOARD_SAT1_BETA_REV41
+static bool s_pd_fallback_warning_logged;
+#endif
 static portMUX_TYPE s_speaker_level_lock = portMUX_INITIALIZER_UNLOCKED;
 static float s_speaker_audio_level;
 static int64_t s_speaker_level_update_us;
@@ -247,6 +254,54 @@ static esp_err_t i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t value)
     }
     return err;
 }
+
+#if TATER_BOARD_SAT1_BETA_REV41
+static esp_err_t i2c_write_bytes(uint8_t addr, uint8_t reg, const uint8_t *data, size_t len)
+{
+    if (!data || len == 0 || len > 48) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t packet[49] = {reg};
+    memcpy(&packet[1], data, len);
+    if (s_i2c_mutex) {
+        xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
+    }
+    esp_err_t err = i2c_master_write_to_device(
+        TATER_I2C_PORT,
+        addr,
+        packet,
+        len + 1,
+        pdMS_TO_TICKS(100)
+    );
+    if (s_i2c_mutex) {
+        xSemaphoreGive(s_i2c_mutex);
+    }
+    return err;
+}
+
+static esp_err_t i2c_read_bytes(uint8_t addr, uint8_t reg, uint8_t *data, size_t len)
+{
+    if (!data || len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_i2c_mutex) {
+        xSemaphoreTake(s_i2c_mutex, portMAX_DELAY);
+    }
+    esp_err_t err = i2c_master_write_read_device(
+        TATER_I2C_PORT,
+        addr,
+        &reg,
+        1,
+        data,
+        len,
+        pdMS_TO_TICKS(100)
+    );
+    if (s_i2c_mutex) {
+        xSemaphoreGive(s_i2c_mutex);
+    }
+    return err;
+}
+#endif
 
 static esp_err_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *value)
 {
@@ -1332,6 +1387,9 @@ static esp_err_t i2s_init_duplex(void)
 esp_err_t tater_audio_i2s_init(void)
 {
     ESP_RETURN_ON_ERROR(i2c_init(), TAG, "i2c init failed");
+#if TATER_BOARD_SAT1_BETA_REV41
+    ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_pd_init(i2c_read_bytes, i2c_write_bytes));
+#endif
     ESP_ERROR_CHECK_WITHOUT_ABORT(pcm5122_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(tas2780_init(0));
     ESP_RETURN_ON_ERROR(spi_init(), TAG, "spi init failed");
@@ -1653,7 +1711,31 @@ esp_err_t tater_audio_speaker_begin(void)
     }
     reset_speaker_audio_level();
     ESP_ERROR_CHECK_WITHOUT_ABORT(pcm5122_set_mute(true));
-    esp_err_t err = tas2780_activate(0);
+    uint8_t tas_power_mode = 0;
+#if TATER_BOARD_SAT1_BETA_REV41
+    sat1_pd_status_t pd_status = {0};
+    if (sat1_pd_status_snapshot(&pd_status) && pd_status.state == SAT1_PD_STATE_NEGOTIATING) {
+        sat1_pd_wait_ready(1500);
+        sat1_pd_status_snapshot(&pd_status);
+    }
+    tas_power_mode = sat1_pd_recommended_tas_mode();
+    ESP_LOGI(
+        TAG,
+        "legacy speaker power selection pd_state=%s contract=%u mV explicit=%d tas_mode=%u",
+        sat1_pd_state_name(pd_status.state),
+        pd_status.contract_voltage_mv,
+        pd_status.explicit_contract,
+        tas_power_mode
+    );
+    if (!s_pd_fallback_warning_logged && tas_power_mode == 0) {
+        ESP_LOGW(
+            TAG,
+            "exact 9V USB-PD contract unavailable; keeping the legacy board on the safe 5V TAS2780 profile"
+        );
+        s_pd_fallback_warning_logged = true;
+    }
+#endif
+    esp_err_t err = tas2780_activate(tas_power_mode);
     if (err != ESP_OK) {
         xSemaphoreGive(s_speaker_mutex);
         ESP_LOGE(TAG, "tas activate failed: %s", esp_err_to_name(err));
@@ -1841,5 +1923,32 @@ bool tater_audio_xmos_status_snapshot(tater_audio_xmos_status_t *out)
     portEXIT_CRITICAL(&s_xmos_status_lock);
     return true;
 }
+
+#if TATER_BOARD_SAT1_BETA_REV41
+bool tater_audio_power_status_snapshot(tater_audio_power_status_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    sat1_pd_status_t status = {0};
+    if (!sat1_pd_status_snapshot(&status)) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    snprintf(out->state, sizeof(out->state), "%s", sat1_pd_state_name(status.state));
+    out->controller_present = status.controller_present;
+    out->attached = status.attached;
+    out->explicit_contract = status.explicit_contract;
+    out->negotiation_failed = status.negotiation_failed;
+    out->device_id = status.device_id;
+    out->cc_pin = status.cc_pin;
+    out->source_pdo_count = status.source_pdo_count;
+    out->tas_power_mode = s_tas_power_mode == 0xff ? 0 : s_tas_power_mode;
+    out->requested_voltage_mv = status.requested_voltage_mv;
+    out->contract_voltage_mv = status.contract_voltage_mv;
+    out->contract_current_ma = status.contract_current_ma;
+    return true;
+}
+#endif
 
 #endif

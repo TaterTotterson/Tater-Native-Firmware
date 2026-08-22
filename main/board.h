@@ -1,6 +1,6 @@
 #pragma once
 
-#if !defined(TATER_BOARD_VOICE_PE) && !defined(TATER_BOARD_SAT1) && !defined(TATER_BOARD_RESPEAKER_XVF3800) && !defined(TATER_BOARD_S3_BOX)
+#if !defined(TATER_BOARD_VOICE_PE) && !defined(TATER_BOARD_SAT1) && !defined(TATER_BOARD_SAT1_BETA_REV41) && !defined(TATER_BOARD_RESPEAKER_XVF3800) && !defined(TATER_BOARD_S3_BOX)
 #define TATER_BOARD_VOICE_PE 1
 #endif
 
@@ -10,6 +10,10 @@
 
 #if !defined(TATER_BOARD_SAT1)
 #define TATER_BOARD_SAT1 0
+#endif
+
+#if !defined(TATER_BOARD_SAT1_BETA_REV41)
+#define TATER_BOARD_SAT1_BETA_REV41 0
 #endif
 
 #if !defined(TATER_BOARD_RESPEAKER_XVF3800)
@@ -22,6 +26,8 @@
 
 #if TATER_BOARD_VOICE_PE
 #include "boards/voice_pe/board_voice_pe.h"
+#elif TATER_BOARD_SAT1_BETA_REV41
+#include "boards/sat1/board_sat1_beta_rev41.h"
 #elif TATER_BOARD_SAT1
 #include "boards/sat1/board_sat1.h"
 #elif TATER_BOARD_RESPEAKER_XVF3800
@@ -38,4 +44,12 @@
 
 #if !defined(TATER_CAP_WAKE_DURING_PLAYBACK)
 #define TATER_CAP_WAKE_DURING_PLAYBACK 0
+#endif
+
+#if !defined(TATER_BOARD_DISPLAY_NAME)
+#define TATER_BOARD_DISPLAY_NAME TATER_DEFAULT_DEVICE_NAME
+#endif
+
+#if !defined(TATER_OTA_FAMILY)
+#define TATER_OTA_FAMILY TATER_BOARD_ID
 #endif

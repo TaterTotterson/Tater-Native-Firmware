@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "board.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
@@ -206,25 +207,28 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         12000,
         "%s"
         "<div class=top><div class=brand><div class=mark>T</div><div><div class=kicker>Tater Native</div><h1>Satellite Setup</h1></div></div>"
-        "<p>Connect this Voice PE satellite to Wi-Fi and link it to your Tater server.</p></div>"
+        "<p>Connect this %s to Wi-Fi and link it to your Tater server.</p></div>"
         "<div class=body>"
-        "<div class=status><div class=chip><b>Setup Network</b><span>%s</span></div><div class=chip><b>Setup Address</b><span>192.168.4.1</span></div><div class=chip><b>Board</b><span>Voice PE</span></div></div>"
+        "<div class=status><div class=chip><b>Setup Network</b><span>%s</span></div><div class=chip><b>Setup Address</b><span>192.168.4.1</span></div><div class=chip><b>Board</b><span>%s</span></div></div>"
         "<form method=post action=/save>"
         "<div class=field><label for=ssid>Wi-Fi SSID</label><input id=ssid name=ssid value=\"%s\" autocomplete=off autocapitalize=none required><div class=hint>Your normal home Wi-Fi network.</div></div>"
         "<div class=field><label for=password>Wi-Fi Password</label><input id=password name=password type=password autocomplete=current-password><div class=hint>Leave blank only for open networks.</div></div>"
         "<div class=field><label for=server>Tater Server</label><input id=server name=server value=\"%s\" placeholder=\"http://10.4.20.210:8501\" autocapitalize=none required><div class=hint>Paste the Tater address. HTTP(S), WS(S), and the full native WebSocket URL are accepted.</div></div>"
         "<div class=grid><div class=field><label for=token>Pairing Code / Token</label><input id=token name=token value=\"\" autocapitalize=none autocomplete=one-time-code placeholder=\"123 456\" required><div class=hint>Open Tater Satellites, tap Add Satellite, then enter the code shown there.</div></div>"
         "<div class=field><label for=room>Room</label><input id=room name=room value=\"%s\" placeholder=\"Kitchen\"><div class=hint>Shown in Tater for routing and intercom.</div></div></div>"
-        "<div class=field><label for=name>Device Name</label><input id=name name=name value=\"%s\" placeholder=\"Tater Voice PE\"><div class=hint>Friendly name shown in Tater.</div></div>"
+        "<div class=field><label for=name>Device Name</label><input id=name name=name value=\"%s\" placeholder=\"%s\"><div class=hint>Friendly name shown in Tater.</div></div>"
         "<button type=submit>Save And Reboot</button>"
         "<div class=foot>After saving, this setup network will disappear. Reconnect your phone or computer to your normal Wi-Fi, then open Tater to confirm the satellite is connected.</div>"
         "</form></div></section></main></body></html>",
         HTML_HEAD,
+        TATER_BOARD_DISPLAY_NAME,
         s_ap_ssid,
+        TATER_BOARD_DISPLAY_NAME,
         ssid,
         server,
         room,
-        name
+        name,
+        TATER_DEFAULT_DEVICE_NAME
     );
     httpd_resp_set_type(req, "text/html");
     esp_err_t err = httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
@@ -357,10 +361,11 @@ static esp_err_t save_post_handler(httpd_req_t *req)
         page,
         sizeof(page),
         "%s<div class=top><div class=brand><div class=mark>T</div><div><div class=kicker>Tater Native</div><h1>Saved</h1></div></div>"
-        "<p>Voice PE is rebooting and will connect to Tater.</p></div>"
+        "<p>%s is rebooting and will connect to Tater.</p></div>"
         "<div class=body><div class=foot>Reconnect your phone or computer to your normal Wi-Fi, then open Tater to confirm this satellite is connected.</div></div>"
         "</section></main></body></html>",
-        HTML_HEAD
+        HTML_HEAD,
+        TATER_BOARD_DISPLAY_NAME
     );
     httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
     xTaskCreate(restart_task, "tater_restart", 2048, NULL, 5, NULL);

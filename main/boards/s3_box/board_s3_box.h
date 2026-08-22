@@ -4,6 +4,7 @@
 #include "driver/spi_master.h"
 
 #define TATER_BOARD_ID "s3-box"
+#define TATER_BOARD_DISPLAY_NAME "ESP32-S3-BOX-3"
 #define TATER_DEVICE_ID_PREFIX "s3box"
 #define TATER_DEFAULT_DEVICE_NAME "Tater S3 Box"
 #define TATER_FIRMWARE_VERSION "native-s3-box-0.3.11"

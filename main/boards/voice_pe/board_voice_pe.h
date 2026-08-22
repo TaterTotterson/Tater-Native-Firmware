@@ -3,6 +3,7 @@
 #include "driver/gpio.h"
 
 #define TATER_BOARD_ID "voice-pe"
+#define TATER_BOARD_DISPLAY_NAME "Voice PE"
 #define TATER_DEVICE_ID_PREFIX "voicepe"
 #define TATER_DEFAULT_DEVICE_NAME "Tater Voice PE"
 #define TATER_FIRMWARE_VERSION "native-voicepe-0.3.11"
