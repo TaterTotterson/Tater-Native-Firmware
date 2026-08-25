@@ -24,6 +24,7 @@
 #include "freertos/task.h"
 #include "native_settings.h"
 #include "playback_mix.h"
+#include "playback_recovery.h"
 #include "playback_sync.h"
 #include "tater_protocol.h"
 
@@ -50,6 +51,9 @@ static const uint32_t PLAYBACK_SCENE_PREBUFFER_TIMEOUT_MS = 5000;
 static const uint32_t PLAYBACK_MEDIA_PREPARE_TIMEOUT_MS = 30000;
 static const uint32_t PLAYBACK_MEDIA_PLAYHEAD_INTERVAL_MS = 1000;
 static const uint32_t PLAYBACK_MEDIA_REBUFFER_MS = 250;
+static const uint32_t PLAYBACK_RECOVERY_POLL_MS = 500;
+static const uint32_t PLAYBACK_RECOVERY_STALL_MS = 5000;
+static const uint32_t PLAYBACK_RECOVERY_TASK_STACK = 4096;
 static const uint32_t PLAYBACK_MEDIA_REJOIN_TOLERANCE_FRAMES = 24;
 static const uint32_t PLAYBACK_MEDIA_REJOIN_FADE_MS = 20;
 static const int32_t PLAYBACK_MEDIA_MAX_PENDING_CORRECTION_FRAMES = 480;
@@ -286,13 +290,148 @@ static volatile bool s_playing;
 static TaskHandle_t s_task;
 static SemaphoreHandle_t s_lifecycle_lock;
 static media_session_state_t s_media_session;
+static TaskHandle_t s_recovery_task;
+static portMUX_TYPE s_recovery_lock = portMUX_INITIALIZER_UNLOCKED;
+static tater_playback_recovery_state_t s_recovery_state;
+
+static uint32_t playback_now_ms(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+static void playback_recovery_begin_session(void)
+{
+    portENTER_CRITICAL(&s_recovery_lock);
+    tater_playback_recovery_reset(&s_recovery_state);
+    portEXIT_CRITICAL(&s_recovery_lock);
+}
+
+static void playback_recovery_note_output(void)
+{
+    tater_audio_render_clock_t render_clock = {0};
+    (void)tater_audio_speaker_render_clock_snapshot(&render_clock);
+    uint32_t now_ms = playback_now_ms();
+    portENTER_CRITICAL(&s_recovery_lock);
+    tater_playback_recovery_note_output(
+        &s_recovery_state,
+        render_clock.completed_frames,
+        now_ms
+    );
+    portEXIT_CRITICAL(&s_recovery_lock);
+}
+
+static void playback_recovery_stop_output(void)
+{
+    portENTER_CRITICAL(&s_recovery_lock);
+    tater_playback_recovery_stop_output(&s_recovery_state);
+    portEXIT_CRITICAL(&s_recovery_lock);
+}
+
+static bool playback_recovery_watch_rebuffer(
+    bool rebuffering,
+    bool recovery_allowed,
+    const char *session_id
+)
+{
+    uint32_t now_ms = playback_now_ms();
+    portENTER_CRITICAL(&s_recovery_lock);
+    tater_playback_recovery_action_t action =
+        tater_playback_recovery_observe_rebuffer(
+            &s_recovery_state,
+            rebuffering,
+            recovery_allowed,
+            now_ms,
+            PLAYBACK_RECOVERY_STALL_MS
+        );
+    portEXIT_CRITICAL(&s_recovery_lock);
+    if (action != TATER_PLAYBACK_RECOVERY_REBUFFER_STALLED) {
+        return false;
+    }
+
+    ESP_LOGW(
+        TAG,
+        "playback watchdog stopping stalled media rebuffer id=%s timeout_ms=%u",
+        session_id && session_id[0] ? session_id : "-",
+        (unsigned)PLAYBACK_RECOVERY_STALL_MS
+    );
+    tater_protocol_send_log(
+        "warn",
+        "Playback watchdog stopped a media session that could not recover from buffering."
+    );
+    s_abort = true;
+    return true;
+}
+
+static esp_err_t playback_speaker_begin(void)
+{
+    return tater_audio_speaker_begin();
+}
+
+static esp_err_t playback_speaker_write(
+    const int16_t *stereo_frames,
+    size_t frame_count
+)
+{
+    esp_err_t err = tater_audio_write_speaker_frames(stereo_frames, frame_count);
+    if (err == ESP_OK) {
+        playback_recovery_note_output();
+    }
+    return err;
+}
+
+static esp_err_t playback_speaker_end(void)
+{
+    playback_recovery_stop_output();
+    return tater_audio_speaker_end();
+}
+
+static void playback_recovery_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(PLAYBACK_RECOVERY_POLL_MS));
+        if (!s_playing || s_abort) {
+            continue;
+        }
+
+        tater_audio_render_clock_t render_clock = {0};
+        if (!tater_audio_speaker_render_clock_snapshot(&render_clock)) {
+            continue;
+        }
+        uint32_t now_ms = playback_now_ms();
+        portENTER_CRITICAL(&s_recovery_lock);
+        tater_playback_recovery_action_t action =
+            tater_playback_recovery_observe_output(
+                &s_recovery_state,
+                render_clock.completed_frames,
+                now_ms,
+                PLAYBACK_RECOVERY_STALL_MS
+            );
+        portEXIT_CRITICAL(&s_recovery_lock);
+        if (action != TATER_PLAYBACK_RECOVERY_OUTPUT_STALLED) {
+            continue;
+        }
+
+        ESP_LOGW(
+            TAG,
+            "playback watchdog stopping stalled speaker output completed_frames=%u timeout_ms=%u",
+            (unsigned)render_clock.completed_frames,
+            (unsigned)PLAYBACK_RECOVERY_STALL_MS
+        );
+        tater_protocol_send_log(
+            "warn",
+            "Playback watchdog stopped a stalled speaker session and reset its audio path."
+        );
+        s_abort = true;
+    }
+}
 
 static esp_err_t playback_sink_begin(playback_pcm_sink_t *sink)
 {
     if (sink && sink->begin) {
         return sink->begin(sink->ctx);
     }
-    return tater_audio_speaker_begin();
+    return playback_speaker_begin();
 }
 
 static esp_err_t playback_sink_write(
@@ -304,7 +443,7 @@ static esp_err_t playback_sink_write(
     if (sink && sink->write) {
         return sink->write(sink->ctx, stereo_frames, frame_count);
     }
-    return tater_audio_write_speaker_frames(stereo_frames, frame_count);
+    return playback_speaker_write(stereo_frames, frame_count);
 }
 
 static esp_err_t playback_sink_end(playback_pcm_sink_t *sink)
@@ -312,7 +451,7 @@ static esp_err_t playback_sink_end(playback_pcm_sink_t *sink)
     if (sink && sink->end) {
         return sink->end(sink->ctx);
     }
-    return tater_audio_speaker_end();
+    return playback_speaker_end();
 }
 
 static uint8_t playback_sink_volume(playback_pcm_sink_t *sink)
@@ -441,6 +580,7 @@ static bool playback_begin_start(void)
         return false;
     }
 
+    playback_recovery_begin_session();
     s_abort = false;
     s_playing = true;
     return true;
@@ -455,6 +595,7 @@ static void playback_end_start(void)
 
 static esp_err_t playback_start_failed(esp_err_t err)
 {
+    playback_recovery_stop_output();
     s_task = NULL;
     s_playing = false;
     s_abort = false;
@@ -464,6 +605,7 @@ static esp_err_t playback_start_failed(esp_err_t err)
 
 static void playback_mark_finished(void)
 {
+    playback_recovery_stop_output();
     TaskHandle_t current = xTaskGetCurrentTaskHandle();
     if (!s_task || s_task == current) {
         s_task = NULL;
@@ -2315,7 +2457,7 @@ static esp_err_t scene_mixer_sink_begin(void *ctx)
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t err = tater_audio_speaker_begin();
+    esp_err_t err = playback_speaker_begin();
     if (err != ESP_OK) {
         return err;
     }
@@ -2363,7 +2505,7 @@ static esp_err_t scene_mixer_sink_write(
             mixed,
             frames
         );
-        esp_err_t err = tater_audio_write_speaker_frames(mixed, frames);
+        esp_err_t err = playback_speaker_write(mixed, frames);
         if (err != ESP_OK) {
             return err;
         }
@@ -2408,7 +2550,7 @@ static esp_err_t scene_mixer_sink_end(void *ctx)
                 mixed,
                 got
             );
-            esp_err_t err = tater_audio_write_speaker_frames(mixed, got);
+            esp_err_t err = playback_speaker_write(mixed, got);
             if (err != ESP_OK) {
                 break;
             }
@@ -2417,7 +2559,7 @@ static esp_err_t scene_mixer_sink_end(void *ctx)
     }
 
     mixer->speaker_started = false;
-    return tater_audio_speaker_end();
+    return playback_speaker_end();
 }
 
 static int16_t wav_sample_s16(const wav_info_t *wav, size_t frame, uint16_t channel)
@@ -2443,7 +2585,7 @@ static esp_err_t play_wav(const wav_info_t *wav)
         ESP_LOGW(TAG, "speaker path is not ready");
     }
 
-    ESP_RETURN_ON_ERROR(tater_audio_speaker_begin(), TAG, "speaker begin failed");
+    ESP_RETURN_ON_ERROR(playback_speaker_begin(), TAG, "speaker begin failed");
     int16_t out[256 * TATER_SPK_CHANNELS];
     uint32_t played_frames = 0;
     esp_err_t result = ESP_OK;
@@ -2470,7 +2612,7 @@ static esp_err_t play_wav(const wav_info_t *wav)
         if (frames == 0) {
             break;
         }
-        esp_err_t err = tater_audio_write_speaker_frames(out, frames);
+        esp_err_t err = playback_speaker_write(out, frames);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "speaker write failed err=%s", esp_err_to_name(err));
             result = err;
@@ -2479,7 +2621,7 @@ static esp_err_t play_wav(const wav_info_t *wav)
         played_frames += frames;
     }
     ESP_LOGI(TAG, "wav playback wrote frames=%u", (unsigned)played_frames);
-    esp_err_t end_err = tater_audio_speaker_end();
+    esp_err_t end_err = playback_speaker_end();
     if (end_err != ESP_OK) {
         ESP_LOGW(TAG, "speaker end failed err=%s", esp_err_to_name(end_err));
     }
@@ -2527,7 +2669,7 @@ static esp_err_t play_tone(uint32_t frequency_hz, uint32_t duration_ms, uint8_t 
         volume_percent = 100;
     }
 
-    ESP_RETURN_ON_ERROR(tater_audio_speaker_begin(), TAG, "speaker begin failed");
+    ESP_RETURN_ON_ERROR(playback_speaker_begin(), TAG, "speaker begin failed");
 
     const uint32_t total_frames = (TATER_SPK_SAMPLE_RATE * duration_ms) / 1000;
     const uint32_t period_frames = TATER_SPK_SAMPLE_RATE / frequency_hz;
@@ -2546,7 +2688,7 @@ static esp_err_t play_tone(uint32_t frequency_hz, uint32_t duration_ms, uint8_t 
             out[i * 2] = sample;
             out[(i * 2) + 1] = sample;
         }
-        esp_err_t err = tater_audio_write_speaker_frames(out, frames);
+        esp_err_t err = playback_speaker_write(out, frames);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "tone speaker write failed err=%s", esp_err_to_name(err));
             result = err;
@@ -2563,7 +2705,7 @@ static esp_err_t play_tone(uint32_t frequency_hz, uint32_t duration_ms, uint8_t 
         duration_ms,
         volume_percent
     );
-    esp_err_t end_err = tater_audio_speaker_end();
+    esp_err_t end_err = playback_speaker_end();
     if (end_err != ESP_OK) {
         ESP_LOGW(TAG, "speaker end failed err=%s", esp_err_to_name(end_err));
     }
@@ -3068,7 +3210,7 @@ static void media_session_task(void *arg)
         goto done;
     }
 
-    err = tater_audio_speaker_begin();
+    err = playback_speaker_begin();
     if (err != ESP_OK) {
         goto done;
     }
@@ -3158,6 +3300,15 @@ static void media_session_task(void *arg)
             &overlay_active,
             &overlay_releasing
         );
+
+        if (playback_recovery_watch_rebuffer(
+                rebuffering,
+                !has_overlay,
+                session_id
+            )) {
+            err = ESP_ERR_TIMEOUT;
+            break;
+        }
 
         if (overlay_pending) {
             size_t overlay_fill = 0;
@@ -3357,7 +3508,7 @@ static void media_session_task(void *arg)
                 mixed_frames,
                 output_frames
             );
-            err = tater_audio_write_speaker_frames(mixed_frames, output_frames);
+            err = playback_speaker_write(mixed_frames, output_frames);
             if (err != ESP_OK) {
                 break;
             }
@@ -3505,7 +3656,7 @@ done:
         }
     }
     if (speaker_started) {
-        esp_err_t end_err = tater_audio_speaker_end();
+        esp_err_t end_err = playback_speaker_end();
         if (err == ESP_OK && end_err != ESP_OK) {
             err = end_err;
         }
@@ -3629,6 +3780,24 @@ esp_err_t tater_playback_init(void)
     if (!s_media_session.lock) {
         s_media_session.lock = xSemaphoreCreateMutex();
         ESP_RETURN_ON_FALSE(s_media_session.lock, ESP_ERR_NO_MEM, TAG, "media session mutex failed");
+    }
+    playback_recovery_begin_session();
+    if (!s_recovery_task) {
+        BaseType_t recovery_created = xTaskCreatePinnedToCore(
+            playback_recovery_task,
+            "playback_guard",
+            PLAYBACK_RECOVERY_TASK_STACK,
+            NULL,
+            4,
+            &s_recovery_task,
+            0
+        );
+        ESP_RETURN_ON_FALSE(
+            recovery_created == pdPASS,
+            ESP_ERR_NO_MEM,
+            TAG,
+            "playback watchdog task failed"
+        );
     }
     esp_err_t codec_err = audio_codec_register_once();
     if (codec_err != ESP_OK) {

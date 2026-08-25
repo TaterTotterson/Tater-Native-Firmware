@@ -1,4 +1,4 @@
-- Updates only the ESP32-S3-BOX-3 display firmware to `0.3.12`; all other native satellite targets remain on their existing firmware versions.
-- Adds native Tater Display event polling and shows the stored Awareness snapshot for both image- and video-described events.
-- Shows a compact themed Awareness alert with its message and Face ID result when available, while voice, timer, and firmware-update screens retain priority.
-- Returns to the normal S3Box dashboard automatically when the notification expires.
+- Releases firmware `0.3.13` for Voice PE, Satellite1, Satellite1 Beta.1/rev4.1, ReSpeaker XVF3800, and S3 Box.
+- Adds a shared playback watchdog that stops and cleans up speaker sessions when rendered audio stops progressing for five seconds.
+- Stops media sessions that remain stuck rebuffering for five seconds, while allowing active TTS overlays to finish normally.
+- Reports automatic playback recovery to Tater and leaves each satellite ready for the next announcement or music session without rebooting the device.

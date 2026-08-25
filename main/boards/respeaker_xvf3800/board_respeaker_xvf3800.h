@@ -6,7 +6,7 @@
 #define TATER_BOARD_DISPLAY_NAME "ReSpeaker XVF3800"
 #define TATER_DEVICE_ID_PREFIX "respeaker-xvf3800"
 #define TATER_DEFAULT_DEVICE_NAME "Tater ReSpeaker XVF3800"
-#define TATER_FIRMWARE_VERSION "native-respeaker-xvf3800-0.3.11"
+#define TATER_FIRMWARE_VERSION "native-respeaker-xvf3800-0.3.13"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6

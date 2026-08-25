@@ -5,9 +5,9 @@ Native board implementation for Satellite1 / Sat1.
 ## Current status
 
 Satellite1 has two deliberately separate Tater Native targets. Public Batch #2
-and later hardware uses `native-satellite1-0.3.11`, with factory and OTA
+and later hardware uses `native-satellite1-0.3.13`, with factory and OTA
 artifacts published under the `satellite1` release family. Public Batch #1 /
-Beta.1 HAT and Core rev4.1 uses `native-satellite1-beta-rev41-0.3.11`, published
+Beta.1 HAT and Core rev4.1 uses `native-satellite1-beta-rev41-0.3.13`, published
 under `satellite1_beta_rev41` with board and OTA family
 `satellite1-beta-rev41`.
 Users can install it through Tater's Local USB or Browser USB flasher, complete

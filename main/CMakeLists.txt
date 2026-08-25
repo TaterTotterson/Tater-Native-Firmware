@@ -21,6 +21,7 @@ idf_component_register(
         "ota_update.c"
         "playback.c"
         "playback_mix.c"
+        "playback_recovery.c"
         "playback_sync.c"
         "provisioning.c"
         "server_url.c"
