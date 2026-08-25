@@ -30,12 +30,22 @@
 
 #if TATER_BOARD_S3_BOX
 
+#include "esp32s3/rom/tjpgd.h"
+
 static const char *TAG = "tater_display_s3_box";
 
 #define LCD_CHUNK_ROWS 20
 #define LCD_SPI_CLOCK_HZ (40 * 1000 * 1000)
 #define DISPLAY_FEED_POLL_MS 60000
 #define DISPLAY_FEED_RESPONSE_MAX 4096
+#define DISPLAY_EVENT_POLL_MS 4000
+#define DISPLAY_EVENT_RESPONSE_MAX 16384
+#define DISPLAY_EVENT_IMAGE_WIDTH 296
+#define DISPLAY_EVENT_IMAGE_HEIGHT 122
+#define DISPLAY_EVENT_JPEG_MAX_BYTES (1024 * 1024)
+#define DISPLAY_EVENT_JPEG_WORK_BYTES 4096
+#define DISPLAY_EVENT_DECODE_MAX_WIDTH 640
+#define DISPLAY_EVENT_DECODE_MAX_HEIGHT 480
 #define LCD_BACKLIGHT_PWM_FREQUENCY_HZ 5000
 #define LCD_BACKLIGHT_PWM_MAX_DUTY ((1U << LEDC_TIMER_10_BIT) - 1U)
 
@@ -62,6 +72,27 @@ typedef struct {
     char rain_rate[20];
     char lightning_strikes[20];
 } display_feed_t;
+
+typedef struct {
+    uint32_t seq;
+    uint32_t ttl_seconds;
+    int64_t expires_us;
+    bool has_image;
+    char kind[24];
+    char priority[16];
+    char title[96];
+    char message[320];
+    char face_id[96];
+} display_notification_t;
+
+typedef struct {
+    const uint8_t *data;
+    size_t length;
+    size_t offset;
+    uint16_t *pixels;
+    uint16_t width;
+    uint16_t height;
+} display_jpeg_session_t;
 
 static const rgb_t TATER_ORANGE = {227, 36, 0};
 static const rgb_t TATER_ORANGE_DIM = {58, 12, 0};
@@ -95,6 +126,10 @@ static volatile uint8_t s_feedback_total;
 static volatile int64_t s_feedback_until_us;
 static SemaphoreHandle_t s_feed_lock;
 static display_feed_t s_feed;
+static SemaphoreHandle_t s_notification_lock;
+static display_notification_t s_notification;
+static uint16_t *s_notification_image;
+static uint32_t s_last_display_event_seq;
 
 static bool screen_night_schedule_active(const tater_live_settings_t *settings)
 {
@@ -522,6 +557,101 @@ static void compact_sensor_text(char *out, size_t out_len, const char *value)
     }
 }
 
+static void compact_notification_text(char *out, size_t out_len, const char *value)
+{
+    if (!out || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (!value) {
+        return;
+    }
+    size_t pos = 0;
+    bool last_space = true;
+    for (const unsigned char *p = (const unsigned char *)value; *p && pos + 1 < out_len; p++) {
+        unsigned char c = *p;
+        if (c < 32 || c >= 127) {
+            if (!last_space && pos + 1 < out_len) {
+                out[pos++] = ' ';
+                last_space = true;
+            }
+            continue;
+        }
+        if (c == '\n' || c == '\r' || c == '\t' || c == ' ') {
+            if (!last_space && pos + 1 < out_len) {
+                out[pos++] = ' ';
+                last_space = true;
+            }
+            continue;
+        }
+        out[pos++] = (char)c;
+        last_space = false;
+    }
+    while (pos > 0 && out[pos - 1] == ' ') {
+        pos--;
+    }
+    out[pos] = '\0';
+}
+
+static void notification_extract_face_id(display_notification_t *notification)
+{
+    if (!notification) {
+        return;
+    }
+    notification->face_id[0] = '\0';
+    const char *face = strcasestr(notification->message, "Face ID:");
+    if (face) {
+        compact_notification_text(notification->face_id, sizeof(notification->face_id), face);
+    }
+}
+
+static int draw_wrapped_text(int x, int y, const char *text, int scale, int max_width, int max_lines, rgb_t color)
+{
+    if (!text || !text[0] || scale < 1 || max_width <= 0 || max_lines <= 0) {
+        return 0;
+    }
+    size_t max_chars = (size_t)(max_width / (6 * scale));
+    if (max_chars == 0) {
+        return 0;
+    }
+    const char *cursor = text;
+    int lines = 0;
+    while (*cursor && lines < max_lines) {
+        while (*cursor == ' ') {
+            cursor++;
+        }
+        if (!*cursor) {
+            break;
+        }
+        size_t remaining = strlen(cursor);
+        size_t take = remaining < max_chars ? remaining : max_chars;
+        if (remaining > max_chars) {
+            size_t break_at = take;
+            while (break_at > 0 && cursor[break_at] != ' ') {
+                break_at--;
+            }
+            if (break_at > 0) {
+                take = break_at;
+            }
+        }
+        char line[64] = {0};
+        if (take >= sizeof(line)) {
+            take = sizeof(line) - 1;
+        }
+        memcpy(line, cursor, take);
+        while (take > 0 && line[take - 1] == ' ') {
+            line[--take] = '\0';
+        }
+        draw_text(x, y + (lines * 8 * scale), line, scale, color);
+        lines++;
+        cursor += take;
+        while (*cursor == ' ') {
+            cursor++;
+        }
+    }
+    return lines;
+}
+
 static void draw_hline(int x, int y, int w, rgb_t color)
 {
     fill_rect(x, y, w, 1, color);
@@ -886,6 +1016,79 @@ static bool build_display_feed_url(char *out, size_t out_len, const char *target
     return written >= 0 && (size_t)written < out_len - pos;
 }
 
+static void display_event_target_label(char *out, size_t out_len)
+{
+    char label[96] = {0};
+    display_target_label(label, sizeof(label));
+    if (!out || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    bool separator = false;
+    size_t pos = 0;
+    for (const unsigned char *p = (const unsigned char *)label; *p && pos + 1 < out_len; p++) {
+        unsigned char c = *p;
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ':' || c == '.' || c == '@' || c == '-') {
+            out[pos++] = (char)((c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c);
+            separator = false;
+        } else if (pos > 0 && !separator) {
+            out[pos++] = '_';
+            separator = true;
+        }
+    }
+    while (pos > 0 && out[pos - 1] == '_') {
+        pos--;
+    }
+    out[pos] = '\0';
+}
+
+static bool build_display_events_url(char *out, size_t out_len)
+{
+    char base[180] = {0};
+    char target[96] = {0};
+    display_http_base(base, sizeof(base));
+    display_event_target_label(target, sizeof(target));
+    if (!out || out_len == 0 || !base[0]) {
+        return false;
+    }
+    int written = snprintf(out, out_len, "%s/tater-ha/v1/display/events?after_seq=%lu&limit=4", base, (unsigned long)s_last_display_event_seq);
+    if (written < 0 || (size_t)written >= out_len) {
+        return false;
+    }
+    size_t pos = (size_t)written;
+    if (target[0]) {
+        written = snprintf(out + pos, out_len - pos, "&target=");
+        if (written < 0 || (size_t)written >= out_len - pos) {
+            return false;
+        }
+        pos += (size_t)written;
+        if (!append_url_encoded(out, out_len, &pos, target)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool build_display_snapshot_url(char *out, size_t out_len, const char *snapshot_id)
+{
+    char base[180] = {0};
+    if (!out || out_len == 0 || !snapshot_id || !snapshot_id[0]) {
+        return false;
+    }
+    for (const unsigned char *p = (const unsigned char *)snapshot_id; *p; p++) {
+        unsigned char c = *p;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) {
+            return false;
+        }
+    }
+    display_http_base(base, sizeof(base));
+    if (!base[0]) {
+        return false;
+    }
+    int written = snprintf(out, out_len, "%s/tater-ha/v1/display/snapshots/%s", base, snapshot_id);
+    return written >= 0 && (size_t)written < out_len;
+}
+
 static void display_feed_copy_text(cJSON *text, const char *key, char *out, size_t out_len)
 {
     if (!out || out_len == 0) {
@@ -1020,6 +1223,399 @@ static bool fetch_display_feed(void)
         return feed.has_stats;
     }
     return false;
+}
+
+static void *display_alloc(size_t size)
+{
+    void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ptr) {
+        ptr = heap_caps_malloc(size, MALLOC_CAP_8BIT);
+    }
+    return ptr;
+}
+
+static esp_err_t fetch_http_bytes(const char *url, size_t max_bytes, uint8_t **out_data, size_t *out_len)
+{
+    if (!url || !url[0] || !out_data || !out_len || max_bytes == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_data = NULL;
+    *out_len = 0;
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .timeout_ms = 5000,
+        .buffer_size = 2048,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    if (!client) {
+        return ESP_FAIL;
+    }
+    const char *token = tater_protocol_token();
+    if (token && token[0]) {
+        esp_http_client_set_header(client, "X-Tater-Token", token);
+    }
+    esp_err_t err = esp_http_client_open(client, 0);
+    uint8_t *data = NULL;
+    size_t total = 0;
+    size_t capacity = 0;
+    int64_t expected_length = -1;
+    if (err == ESP_OK) {
+        (void)esp_http_client_fetch_headers(client);
+        int status = esp_http_client_get_status_code(client);
+        int64_t content_length = esp_http_client_get_content_length(client);
+        if (status != 200 || content_length > (int64_t)max_bytes) {
+            ESP_LOGW(TAG, "display image status=%d content_length=%lld", status, (long long)content_length);
+            err = ESP_FAIL;
+        } else {
+            expected_length = content_length;
+            capacity = content_length > 0 ? (size_t)content_length : 64 * 1024;
+            if (capacity > max_bytes) {
+                capacity = max_bytes;
+            }
+            if (capacity == 0) {
+                capacity = 1;
+            }
+            data = display_alloc(capacity);
+            if (!data) {
+                err = ESP_ERR_NO_MEM;
+            }
+        }
+    }
+    while (err == ESP_OK) {
+        if (expected_length >= 0 && total >= (size_t)expected_length) {
+            break;
+        }
+        if (total == capacity) {
+            if (capacity >= max_bytes) {
+                err = ESP_ERR_INVALID_SIZE;
+                break;
+            }
+            size_t next_capacity = capacity * 2;
+            if (next_capacity > max_bytes) {
+                next_capacity = max_bytes;
+            }
+            uint8_t *grown = heap_caps_realloc(data, next_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (!grown) {
+                grown = heap_caps_realloc(data, next_capacity, MALLOC_CAP_8BIT);
+            }
+            if (!grown) {
+                err = ESP_ERR_NO_MEM;
+                break;
+            }
+            data = grown;
+            capacity = next_capacity;
+        }
+        int got = esp_http_client_read(client, (char *)data + total, capacity - total);
+        if (got < 0) {
+            err = ESP_FAIL;
+            break;
+        }
+        if (got == 0) {
+            break;
+        }
+        total += (size_t)got;
+    }
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    if (err != ESP_OK || total == 0) {
+        free(data);
+        return err == ESP_OK ? ESP_FAIL : err;
+    }
+    *out_data = data;
+    *out_len = total;
+    return ESP_OK;
+}
+
+static UINT display_jpeg_input(JDEC *decoder, BYTE *buffer, UINT requested)
+{
+    display_jpeg_session_t *session = decoder ? (display_jpeg_session_t *)decoder->device : NULL;
+    if (!session || session->offset >= session->length) {
+        return 0;
+    }
+    size_t available = session->length - session->offset;
+    size_t take = requested < available ? requested : available;
+    if (buffer && take > 0) {
+        memcpy(buffer, session->data + session->offset, take);
+    }
+    session->offset += take;
+    return (UINT)take;
+}
+
+static UINT display_jpeg_output(JDEC *decoder, void *bitmap, JRECT *rect)
+{
+    display_jpeg_session_t *session = decoder ? (display_jpeg_session_t *)decoder->device : NULL;
+    const uint8_t *rgb = (const uint8_t *)bitmap;
+    if (!session || !session->pixels || !rgb || !rect) {
+        return 0;
+    }
+    uint16_t block_width = (uint16_t)(rect->right - rect->left + 1);
+    uint16_t block_height = (uint16_t)(rect->bottom - rect->top + 1);
+    for (uint16_t row = 0; row < block_height; row++) {
+        uint16_t y = (uint16_t)(rect->top + row);
+        if (y >= session->height) {
+            rgb += (size_t)block_width * 3;
+            continue;
+        }
+        for (uint16_t col = 0; col < block_width; col++) {
+            uint16_t x = (uint16_t)(rect->left + col);
+            if (x < session->width) {
+                rgb_t color = {rgb[0], rgb[1], rgb[2]};
+                session->pixels[(size_t)y * session->width + x] = lcd_color(color);
+            }
+            rgb += 3;
+        }
+    }
+    return 1;
+}
+
+static void resize_event_image_cover(
+    const uint16_t *source,
+    uint16_t source_width,
+    uint16_t source_height,
+    uint16_t *destination
+)
+{
+    if (!source || !destination || source_width == 0 || source_height == 0) {
+        return;
+    }
+    uint32_t crop_x = 0;
+    uint32_t crop_y = 0;
+    uint32_t crop_width = source_width;
+    uint32_t crop_height = source_height;
+    if ((uint32_t)source_width * DISPLAY_EVENT_IMAGE_HEIGHT > (uint32_t)source_height * DISPLAY_EVENT_IMAGE_WIDTH) {
+        crop_width = ((uint32_t)source_height * DISPLAY_EVENT_IMAGE_WIDTH) / DISPLAY_EVENT_IMAGE_HEIGHT;
+        crop_x = ((uint32_t)source_width - crop_width) / 2;
+    } else {
+        crop_height = ((uint32_t)source_width * DISPLAY_EVENT_IMAGE_HEIGHT) / DISPLAY_EVENT_IMAGE_WIDTH;
+        crop_y = ((uint32_t)source_height - crop_height) / 2;
+    }
+    for (uint32_t y = 0; y < DISPLAY_EVENT_IMAGE_HEIGHT; y++) {
+        uint32_t source_y = crop_y + ((y * crop_height) / DISPLAY_EVENT_IMAGE_HEIGHT);
+        for (uint32_t x = 0; x < DISPLAY_EVENT_IMAGE_WIDTH; x++) {
+            uint32_t source_x = crop_x + ((x * crop_width) / DISPLAY_EVENT_IMAGE_WIDTH);
+            destination[y * DISPLAY_EVENT_IMAGE_WIDTH + x] = source[source_y * source_width + source_x];
+        }
+    }
+}
+
+static esp_err_t decode_event_jpeg(const uint8_t *jpeg, size_t jpeg_len, uint16_t *destination)
+{
+    if (!jpeg || jpeg_len == 0 || !destination) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    void *work = heap_caps_malloc(DISPLAY_EVENT_JPEG_WORK_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!work) {
+        return ESP_ERR_NO_MEM;
+    }
+    display_jpeg_session_t session = {
+        .data = jpeg,
+        .length = jpeg_len,
+    };
+    JDEC decoder = {0};
+    JRESULT prepared = jd_prepare(&decoder, display_jpeg_input, work, DISPLAY_EVENT_JPEG_WORK_BYTES, &session);
+    if (prepared != JDR_OK) {
+        ESP_LOGW(TAG, "display snapshot JPEG prepare failed: %d", (int)prepared);
+        free(work);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    uint8_t scale = 0;
+    while (scale < 3 && (((decoder.width + ((1U << scale) - 1U)) >> scale) > DISPLAY_EVENT_DECODE_MAX_WIDTH ||
+                         ((decoder.height + ((1U << scale) - 1U)) >> scale) > DISPLAY_EVENT_DECODE_MAX_HEIGHT)) {
+        scale++;
+    }
+    uint32_t decoded_width = (decoder.width + ((1U << scale) - 1U)) >> scale;
+    uint32_t decoded_height = (decoder.height + ((1U << scale) - 1U)) >> scale;
+    if (decoded_width == 0 || decoded_height == 0 || decoded_width > DISPLAY_EVENT_DECODE_MAX_WIDTH || decoded_height > DISPLAY_EVENT_DECODE_MAX_HEIGHT) {
+        free(work);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    session.width = (uint16_t)decoded_width;
+    session.height = (uint16_t)decoded_height;
+    session.pixels = display_alloc((size_t)decoded_width * decoded_height * sizeof(uint16_t));
+    if (!session.pixels) {
+        free(work);
+        return ESP_ERR_NO_MEM;
+    }
+    memset(session.pixels, 0, (size_t)decoded_width * decoded_height * sizeof(uint16_t));
+    JRESULT decoded = jd_decomp(&decoder, display_jpeg_output, scale);
+    esp_err_t err = ESP_OK;
+    if (decoded != JDR_OK) {
+        ESP_LOGW(TAG, "display snapshot JPEG decode failed: %d", (int)decoded);
+        err = ESP_ERR_NOT_SUPPORTED;
+    } else {
+        resize_event_image_cover(session.pixels, session.width, session.height, destination);
+    }
+    free(session.pixels);
+    free(work);
+    return err;
+}
+
+static const char *display_json_text(cJSON *object, const char *key)
+{
+    cJSON *item = object ? cJSON_GetObjectItem(object, key) : NULL;
+    return cJSON_IsString(item) && item->valuestring ? item->valuestring : "";
+}
+
+static void display_event_snapshot_id(cJSON *event, char *out, size_t out_len)
+{
+    if (!out || out_len == 0) {
+        return;
+    }
+    out[0] = '\0';
+    const char *snapshot_id = display_json_text(event, "snapshot_id");
+    cJSON *meta = event ? cJSON_GetObjectItem(event, "meta") : NULL;
+    cJSON *data = event ? cJSON_GetObjectItem(event, "data") : NULL;
+    if (!snapshot_id[0] && cJSON_IsObject(meta)) {
+        snapshot_id = display_json_text(meta, "snapshot_id");
+    }
+    if (!snapshot_id[0] && cJSON_IsObject(data)) {
+        snapshot_id = display_json_text(data, "snapshot_id");
+    }
+    strlcpy(out, snapshot_id, out_len);
+}
+
+static esp_err_t parse_display_events(
+    const char *json,
+    size_t json_len,
+    display_notification_t *notification,
+    char *snapshot_id,
+    size_t snapshot_id_len,
+    bool *has_event,
+    uint32_t *last_seq
+)
+{
+    if (!json || !notification || !snapshot_id || !has_event || !last_seq) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *has_event = false;
+    *last_seq = s_last_display_event_seq;
+    snapshot_id[0] = '\0';
+    memset(notification, 0, sizeof(*notification));
+    cJSON *root = cJSON_ParseWithLength(json, json_len);
+    if (!root) {
+        return ESP_FAIL;
+    }
+    cJSON *response_last_seq = cJSON_GetObjectItem(root, "last_seq");
+    if (cJSON_IsNumber(response_last_seq) && response_last_seq->valuedouble > 0) {
+        *last_seq = (uint32_t)response_last_seq->valuedouble;
+    }
+    cJSON *events = cJSON_GetObjectItem(root, "events");
+    int count = cJSON_IsArray(events) ? cJSON_GetArraySize(events) : 0;
+    if (count <= 0) {
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
+    cJSON *event = cJSON_GetArrayItem(events, count - 1);
+    if (!cJSON_IsObject(event)) {
+        cJSON_Delete(root);
+        return ESP_FAIL;
+    }
+    cJSON *seq = cJSON_GetObjectItem(event, "seq");
+    if (cJSON_IsNumber(seq) && seq->valuedouble > 0) {
+        notification->seq = (uint32_t)seq->valuedouble;
+        if (notification->seq > *last_seq) {
+            *last_seq = notification->seq;
+        }
+    }
+    cJSON *ttl = cJSON_GetObjectItem(event, "ttl_seconds");
+    int ttl_seconds = cJSON_IsNumber(ttl) ? ttl->valueint : 18;
+    if (ttl_seconds < 6) {
+        ttl_seconds = 6;
+    } else if (ttl_seconds > 90) {
+        ttl_seconds = 90;
+    }
+    notification->ttl_seconds = (uint32_t)ttl_seconds;
+    compact_notification_text(notification->kind, sizeof(notification->kind), display_json_text(event, "kind"));
+    compact_notification_text(notification->priority, sizeof(notification->priority), display_json_text(event, "priority"));
+    compact_notification_text(notification->title, sizeof(notification->title), display_json_text(event, "title"));
+    const char *message = display_json_text(event, "message");
+    if (!message[0]) {
+        message = display_json_text(event, "description");
+    }
+    compact_notification_text(notification->message, sizeof(notification->message), message);
+    if (!notification->kind[0]) {
+        strlcpy(notification->kind, "notification", sizeof(notification->kind));
+    }
+    if (!notification->priority[0]) {
+        strlcpy(notification->priority, "normal", sizeof(notification->priority));
+    }
+    if (!notification->title[0]) {
+        strlcpy(notification->title, strcasecmp(notification->kind, "camera") == 0 ? "Camera Event" : "Notification", sizeof(notification->title));
+    }
+    notification_extract_face_id(notification);
+    display_event_snapshot_id(event, snapshot_id, snapshot_id_len);
+    *has_event = true;
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+static void display_notification_publish(const display_notification_t *notification, const uint16_t *image)
+{
+    if (!notification || !s_notification_lock) {
+        return;
+    }
+    if (xSemaphoreTake(s_notification_lock, pdMS_TO_TICKS(500)) != pdTRUE) {
+        return;
+    }
+    s_notification = *notification;
+    s_notification.has_image = image && s_notification_image;
+    s_notification.expires_us = esp_timer_get_time() + ((int64_t)s_notification.ttl_seconds * 1000000LL);
+    if (s_notification.has_image) {
+        memcpy(s_notification_image, image, DISPLAY_EVENT_IMAGE_WIDTH * DISPLAY_EVENT_IMAGE_HEIGHT * sizeof(uint16_t));
+    }
+    xSemaphoreGive(s_notification_lock);
+}
+
+static bool fetch_display_events(void)
+{
+    char url[320] = {0};
+    if (!build_display_events_url(url, sizeof(url))) {
+        return false;
+    }
+    uint8_t *response = NULL;
+    size_t response_len = 0;
+    esp_err_t err = fetch_http_bytes(url, DISPLAY_EVENT_RESPONSE_MAX, &response, &response_len);
+    if (err != ESP_OK) {
+        return false;
+    }
+    display_notification_t notification;
+    char snapshot_id[96] = {0};
+    bool has_event = false;
+    uint32_t last_seq = s_last_display_event_seq;
+    err = parse_display_events((const char *)response, response_len, &notification, snapshot_id, sizeof(snapshot_id), &has_event, &last_seq);
+    free(response);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "display event response parse failed");
+        return false;
+    }
+    if (last_seq > s_last_display_event_seq) {
+        s_last_display_event_seq = last_seq;
+    }
+    if (!has_event) {
+        return true;
+    }
+
+    uint16_t *image = NULL;
+    if (snapshot_id[0]) {
+        char snapshot_url[320] = {0};
+        if (build_display_snapshot_url(snapshot_url, sizeof(snapshot_url), snapshot_id)) {
+            uint8_t *jpeg = NULL;
+            size_t jpeg_len = 0;
+            if (fetch_http_bytes(snapshot_url, DISPLAY_EVENT_JPEG_MAX_BYTES, &jpeg, &jpeg_len) == ESP_OK) {
+                image = display_alloc(DISPLAY_EVENT_IMAGE_WIDTH * DISPLAY_EVENT_IMAGE_HEIGHT * sizeof(uint16_t));
+                if (!image || decode_event_jpeg(jpeg, jpeg_len, image) != ESP_OK) {
+                    free(image);
+                    image = NULL;
+                }
+                free(jpeg);
+            }
+        }
+    }
+    display_notification_publish(&notification, image);
+    bool image_shown = image != NULL;
+    free(image);
+    ESP_LOGI(TAG, "display event seq=%lu kind=%s snapshot=%s", (unsigned long)notification.seq, notification.kind, image_shown ? "shown" : "none");
+    return true;
 }
 
 static void render_info_card(int x, int y, const char *title, const char *value)
@@ -1254,9 +1850,58 @@ static void render_voice_screen(const tater_live_settings_t *settings)
     draw_status_footer(settings);
 }
 
+static bool render_notification_screen(void)
+{
+    if (!s_notification_lock || xSemaphoreTake(s_notification_lock, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return false;
+    }
+    int64_t now_us = esp_timer_get_time();
+    if (s_notification.expires_us <= now_us) {
+        memset(&s_notification, 0, sizeof(s_notification));
+        xSemaphoreGive(s_notification_lock);
+        return false;
+    }
+
+    display_notification_t notification = s_notification;
+    rgb_t accent = (strcasecmp(notification.priority, "high") == 0 || strcasecmp(notification.priority, "critical") == 0)
+        ? TATER_RED
+        : TATER_DISPLAY_ORANGE;
+    fill_rect(0, 0, TATER_LCD_WIDTH, TATER_LCD_HEIGHT, (rgb_t){0, 0, 0});
+    draw_tater_header("AWARENESS");
+
+    if (notification.has_image && s_notification_image) {
+        draw_panel(11, 41, DISPLAY_EVENT_IMAGE_WIDTH + 2, DISPLAY_EVENT_IMAGE_HEIGHT + 2);
+        for (int y = 0; y < DISPLAY_EVENT_IMAGE_HEIGHT; y++) {
+            memcpy(
+                &s_fb[(size_t)(42 + y) * TATER_LCD_WIDTH + 12],
+                &s_notification_image[(size_t)y * DISPLAY_EVENT_IMAGE_WIDTH],
+                DISPLAY_EVENT_IMAGE_WIDTH * sizeof(uint16_t)
+            );
+        }
+        draw_fit_text(12, 170, notification.title, 2, 296, accent);
+        draw_wrapped_text(12, 190, notification.message, 2, 296, notification.face_id[0] ? 2 : 3, TATER_WHITE);
+        if (notification.face_id[0]) {
+            draw_fit_text(12, 226, notification.face_id, 1, 296, accent);
+        }
+    } else {
+        draw_panel(12, 48, 296, 180);
+        draw_fit_text(24, 62, notification.title, 3, 272, accent);
+        fill_rect(24, 92, 272, 3, TATER_ORANGE_DIM);
+        draw_wrapped_text(24, 108, notification.message, 2, 272, notification.face_id[0] ? 6 : 7, TATER_WHITE);
+        if (notification.face_id[0]) {
+            draw_fit_text(24, 214, notification.face_id, 1, 272, accent);
+        }
+    }
+    xSemaphoreGive(s_notification_lock);
+    return true;
+}
+
 static void render_state_screen(void)
 {
     const tater_live_settings_t *settings = tater_live_settings_get();
+    if ((s_state == TATER_STATE_IDLE || s_state == TATER_STATE_DISCONNECTED) && render_notification_screen()) {
+        return;
+    }
     if (s_state == TATER_STATE_IDLE || s_state == TATER_STATE_DISCONNECTED || s_state == TATER_STATE_PROVISIONING) {
         render_home_dashboard(settings);
     } else {
@@ -1513,11 +2158,30 @@ static void display_feed_task(void *arg)
     }
 }
 
+static void display_event_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    while (true) {
+        if (s_display_ready && tater_protocol_is_connected() && !tater_ota_is_running()) {
+            if (!fetch_display_events()) {
+                ESP_LOGD(TAG, "display event refresh failed");
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(DISPLAY_EVENT_POLL_MS));
+    }
+}
+
 esp_err_t tater_leds_init(void)
 {
     s_feed_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_feed_lock, ESP_ERR_NO_MEM, TAG, "display feed lock alloc failed");
+    s_notification_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_notification_lock, ESP_ERR_NO_MEM, TAG, "display notification lock alloc failed");
     display_feed_defaults(&s_feed);
+    memset(&s_notification, 0, sizeof(s_notification));
+    s_notification_image = display_alloc(DISPLAY_EVENT_IMAGE_WIDTH * DISPLAY_EVENT_IMAGE_HEIGHT * sizeof(uint16_t));
+    ESP_RETURN_ON_FALSE(s_notification_image, ESP_ERR_NO_MEM, TAG, "display notification image alloc failed");
     s_fb = heap_caps_malloc(TATER_LCD_WIDTH * TATER_LCD_HEIGHT * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!s_fb) {
         s_fb = heap_caps_malloc(TATER_LCD_WIDTH * TATER_LCD_HEIGHT * sizeof(uint16_t), MALLOC_CAP_8BIT);
@@ -1531,6 +2195,7 @@ esp_err_t tater_leds_init(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_flush());
     xTaskCreatePinnedToCore(display_task, "tater_display", 8192, NULL, 4, NULL, 0);
     xTaskCreatePinnedToCore(display_feed_task, "tater_display_feed", 6144, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(display_event_task, "tater_display_event", 8192, NULL, 3, NULL, 0);
     return ESP_OK;
 }
 

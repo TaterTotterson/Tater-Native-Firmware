@@ -62,11 +62,22 @@ def main() -> int:
     else:
         lines.extend(["- Maintenance firmware update.", ""])
 
+    devices = manifest.get("devices") if isinstance(manifest.get("devices"), list) else []
+    firmware_versions = {
+        text(device.get("firmware_version"))
+        for device in devices
+        if isinstance(device, dict) and text(device.get("firmware_version"))
+    }
+    version_summary = (
+        "- Ships one shared native firmware version across all supported satellite targets."
+        if len(firmware_versions) <= 1
+        else "- Packages each supported satellite target with its own embedded board version so board-only updates do not bump unaffected devices."
+    )
     lines.extend(
         [
             "## Highlights",
             "",
-            "- Ships one shared native firmware version across all supported satellite targets.",
+            version_summary,
             "- Includes OTA images for Tater-managed updates and factory images for USB recovery/first flash.",
             "- Includes bundled XMOS update payloads for boards that use XMOS audio firmware.",
             "",
@@ -75,7 +86,6 @@ def main() -> int:
         ]
     )
 
-    devices = manifest.get("devices") if isinstance(manifest.get("devices"), list) else []
     for device in devices:
         if not isinstance(device, dict):
             continue
