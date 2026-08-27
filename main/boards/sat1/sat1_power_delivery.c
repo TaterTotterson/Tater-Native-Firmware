@@ -333,12 +333,17 @@ static void pd_mark_ready_or_fallback(void)
 static esp_err_t pd_send_request(const pd_message_t *source_capabilities)
 {
     sat1_pd_fixed_selection_t selection = {0};
-    if (!sat1_pd_select_beta_9v_pdo(
+    if (!sat1_pd_select_beta_fixed_pdo(
             source_capabilities->objects,
             source_capabilities->object_count,
             &selection
         )) {
-        ESP_LOGW(TAG, "source advertised no fixed 9V PDO; legacy speaker remains on the safe 5V profile");
+        ESP_LOGW(
+            TAG,
+            "source advertised no supported fixed PDO from %u-%u mV; legacy speaker remains on the safe 5V profile",
+            SAT1_BETA_MIN_PD_MV,
+            SAT1_BETA_MAX_PD_MV
+        );
         return ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -401,7 +406,8 @@ static void pd_handle_message(const pd_message_t *message)
         ESP_LOGI(TAG, "power request accepted; waiting for PS_RDY");
         break;
     case PD_CTRL_PS_RDY:
-        if (s_request_accepted && s_pending_voltage_mv == SAT1_BETA_REQUIRED_PD_MV) {
+        if (s_request_accepted && s_pending_voltage_mv >= SAT1_BETA_MIN_PD_MV
+            && s_pending_voltage_mv <= SAT1_BETA_MAX_PD_MV) {
             pd_mark_ready_or_fallback();
             status_set_contract();
             ESP_LOGI(
@@ -864,7 +870,8 @@ uint8_t sat1_pd_recommended_tas_mode(void)
         return 0;
     }
     return snapshot.explicit_contract
-            && snapshot.contract_voltage_mv == SAT1_BETA_REQUIRED_PD_MV
+            && snapshot.contract_voltage_mv >= SAT1_BETA_HIGH_POWER_MIN_PD_MV
+            && snapshot.contract_voltage_mv <= SAT1_BETA_MAX_PD_MV
         ? 2
         : 0;
 }

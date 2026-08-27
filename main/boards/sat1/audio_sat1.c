@@ -1730,7 +1730,7 @@ esp_err_t tater_audio_speaker_begin(void)
     if (!s_pd_fallback_warning_logged && tas_power_mode == 0) {
         ESP_LOGW(
             TAG,
-            "exact 9V USB-PD contract unavailable; keeping the legacy board on the safe 5V TAS2780 profile"
+            "USB-PD contract is below 9V or unavailable; keeping the legacy board on the safe TAS2780 mode-0 profile"
         );
         s_pd_fallback_warning_logged = true;
     }

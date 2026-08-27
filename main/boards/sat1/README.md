@@ -33,11 +33,13 @@ rev5.1) and later compatible revisions. It leaves the FUSB302B unconfigured and
 uses the board's standard 5 V power path with TAS2780 mode 0.
 
 The legacy target is only for Public Batch #1 / Beta.1 HAT and Core rev4.1. It
-starts in the safe 5 V/mode-0 state, requests an exact fixed 9 V USB-PD PDO, and
-uses TAS2780 mode 2 only after the source accepts that request and sends
-`PS_RDY`. If the controller, cable, or power source cannot establish that exact
-contract, it stays at 5 V/mode 0. Its startup negotiation has bounded recovery
-and does not continually renegotiate while the satellite is running.
+starts in the safe 5 V/mode-0 state and requests the highest fixed USB-PD PDO
+offered from 5 V through 20 V. It uses TAS2780 mode 2 only after the source
+accepts a contract of at least 9 V and sends `PS_RDY`; a confirmed 5 V contract
+continues to use mode 0. If the controller, cable, or power source cannot
+establish a supported contract, it stays at 5 V/mode 0. Its startup negotiation
+has bounded recovery and does not continually renegotiate while the satellite
+is running.
 
 The hardware revision is not reliably detectable in firmware. The first USB
 install therefore requires an explicit choice between `satellite1` and
@@ -91,7 +93,8 @@ main/boards/sat1/audio_sat1.c
 
 Production firmware leaves the FUSB302B unconfigured and does not request a
 non-default USB-C voltage. The separate legacy image owns all FUSB302B and
-9 V negotiation code; none of that path is initialized by the production image.
+USB-PD negotiation code; none of that path is initialized by the production
+image.
 
 The bundled XMOS source and factory image live in:
 

@@ -2,3 +2,4 @@
 - Keeps the OTA task stack in internal RAM so flash writes cannot panic when ESP-IDF temporarily disables access to PSRAM.
 - Fixes native satellite updates that previously reached about 95 percent, rebooted, and remained on firmware 0.3.11 through 0.3.13.
 - Preserves PSRAM use for the OTA request context and playback watchdog, leaving enough contiguous internal memory for the cache-sensitive OTA task.
+- Updates the legacy Satellite1 Beta.1/rev4.1 USB-PD policy to select the best supported fixed 5-20 V contract while keeping the amplifier on its safe mode-0 profile below 9 V.
