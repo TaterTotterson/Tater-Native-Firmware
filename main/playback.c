@@ -3783,14 +3783,21 @@ esp_err_t tater_playback_init(void)
     }
     playback_recovery_begin_session();
     if (!s_recovery_task) {
-        BaseType_t recovery_created = xTaskCreatePinnedToCore(
+        /*
+         * The playback watchdog never programs flash, so its persistent stack
+         * may live in PSRAM. Keeping it out of internal RAM leaves a contiguous
+         * block available for the cache-sensitive OTA task when an update is
+         * requested after the rest of the audio runtime has initialized.
+         */
+        BaseType_t recovery_created = playback_create_task(
             playback_recovery_task,
             "playback_guard",
             PLAYBACK_RECOVERY_TASK_STACK,
             NULL,
             4,
             &s_recovery_task,
-            0
+            0,
+            NULL
         );
         ESP_RETURN_ON_FALSE(
             recovery_created == pdPASS,
