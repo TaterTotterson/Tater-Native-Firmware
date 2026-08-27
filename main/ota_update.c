@@ -30,7 +30,6 @@ static const char s_ota_family_marker[] =
 
 typedef struct {
     tater_ota_failure_callback_t failure_callback;
-    bool task_with_caps;
     char url[];
 } ota_task_context_t;
 
@@ -93,22 +92,8 @@ static ota_task_context_t *ota_task_context_create(
         return NULL;
     }
     context->failure_callback = failure_callback;
-    context->task_with_caps = false;
     memcpy(context->url, url, url_size);
     return context;
-}
-
-static void ota_delete_current_task(bool task_with_caps)
-{
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-    if (task_with_caps) {
-        vTaskDeleteWithCaps(NULL);
-        return;
-    }
-#else
-    (void)task_with_caps;
-#endif
-    vTaskDelete(NULL);
 }
 
 static void ota_task(void *arg)
@@ -116,7 +101,6 @@ static void ota_task(void *arg)
     ota_task_context_t *context = (ota_task_context_t *)arg;
     char *url = context->url;
     tater_ota_failure_callback_t failure_callback = context->failure_callback;
-    bool task_with_caps = context->task_with_caps;
     esp_ota_handle_t ota = 0;
     const esp_partition_t *partition = NULL;
     uint8_t *buf = NULL;
@@ -282,7 +266,7 @@ done:
     if (err != ESP_OK && failure_callback) {
         failure_callback(err);
     }
-    ota_delete_current_task(task_with_caps);
+    vTaskDelete(NULL);
 }
 
 esp_err_t tater_ota_start_url(const char *url, tater_ota_failure_callback_t failure_callback)
@@ -300,42 +284,21 @@ esp_err_t tater_ota_start_url(const char *url, tater_ota_failure_callback_t fail
         return ota_start_failed("request allocation", ESP_ERR_NO_MEM);
     }
 
-    BaseType_t ok = pdFAIL;
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-    context->task_with_caps = true;
-    ok = xTaskCreatePinnedToCoreWithCaps(
+    /*
+     * The OTA task stack must remain in internal RAM. esp_ota_write() and
+     * esp_ota_end() temporarily disable the external-memory cache while
+     * programming flash, so a PSRAM-backed stack can panic inside the cache
+     * freeze path. The request context may use PSRAM, but never the task stack.
+     */
+    BaseType_t ok = xTaskCreatePinnedToCore(
         ota_task,
         "tater_ota",
         OTA_TASK_STACK_SIZE,
         context,
         7,
         NULL,
-        1,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        1
     );
-    if (ok != pdPASS) {
-        context->task_with_caps = false;
-        ESP_LOGW(
-            TAG,
-            "OTA PSRAM task create failed stack=%u psram=%u internal=%u largest_internal=%u; retrying internal",
-            (unsigned)OTA_TASK_STACK_SIZE,
-            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
-        );
-    }
-#endif
-    if (ok != pdPASS) {
-        ok = xTaskCreatePinnedToCore(
-            ota_task,
-            "tater_ota",
-            OTA_TASK_STACK_SIZE,
-            context,
-            7,
-            NULL,
-            1
-        );
-    }
     if (ok != pdPASS) {
         free(context);
         s_running = false;

@@ -1,4 +1,4 @@
-- Releases firmware `0.3.13` for Voice PE, Satellite1, Satellite1 Beta.1/rev4.1, ReSpeaker XVF3800, and S3 Box.
-- Adds a shared playback watchdog that stops and cleans up speaker sessions when rendered audio stops progressing for five seconds.
-- Stops media sessions that remain stuck rebuffering for five seconds, while allowing active TTS overlays to finish normally.
-- Reports automatic playback recovery to Tater and leaves each satellite ready for the next announcement or music session without rebooting the device.
+- Releases firmware `0.3.14` for Voice PE, Satellite1, Satellite1 Beta.1/rev4.1, ReSpeaker XVF3800, and S3 Box.
+- Keeps the OTA task stack in internal RAM so flash writes cannot panic when ESP-IDF temporarily disables access to PSRAM.
+- Fixes native satellite updates that previously reached about 95 percent, rebooted, and remained on firmware 0.3.11 through 0.3.13.
+- Preserves PSRAM use for the small OTA request context while keeping cache-sensitive execution state in internal memory.
