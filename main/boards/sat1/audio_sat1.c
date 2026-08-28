@@ -29,9 +29,7 @@
 
 #if TATER_BOARD_SAT1
 
-#if TATER_BOARD_SAT1_BETA_REV41
 #include "boards/sat1/sat1_power_delivery.h"
-#endif
 
 static const char *TAG = "tater_audio_sat1";
 
@@ -104,9 +102,7 @@ static bool s_speaker_session_active;
 static tater_audio_render_clock_state_t s_render_clock;
 static SemaphoreHandle_t s_speaker_mutex;
 static uint8_t s_tas_power_mode = 0xff;
-#if TATER_BOARD_SAT1_BETA_REV41
 static bool s_pd_fallback_warning_logged;
-#endif
 static portMUX_TYPE s_speaker_level_lock = portMUX_INITIALIZER_UNLOCKED;
 static float s_speaker_audio_level;
 static int64_t s_speaker_level_update_us;
@@ -255,7 +251,6 @@ static esp_err_t i2c_write_reg(uint8_t addr, uint8_t reg, uint8_t value)
     return err;
 }
 
-#if TATER_BOARD_SAT1_BETA_REV41
 static esp_err_t i2c_write_bytes(uint8_t addr, uint8_t reg, const uint8_t *data, size_t len)
 {
     if (!data || len == 0 || len > 48) {
@@ -301,7 +296,6 @@ static esp_err_t i2c_read_bytes(uint8_t addr, uint8_t reg, uint8_t *data, size_t
     }
     return err;
 }
-#endif
 
 static esp_err_t i2c_read_reg(uint8_t addr, uint8_t reg, uint8_t *value)
 {
@@ -1387,9 +1381,7 @@ static esp_err_t i2s_init_duplex(void)
 esp_err_t tater_audio_i2s_init(void)
 {
     ESP_RETURN_ON_ERROR(i2c_init(), TAG, "i2c init failed");
-#if TATER_BOARD_SAT1_BETA_REV41
     ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_pd_init(i2c_read_bytes, i2c_write_bytes));
-#endif
     ESP_ERROR_CHECK_WITHOUT_ABORT(pcm5122_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(tas2780_init(0));
     ESP_RETURN_ON_ERROR(spi_init(), TAG, "spi init failed");
@@ -1712,7 +1704,6 @@ esp_err_t tater_audio_speaker_begin(void)
     reset_speaker_audio_level();
     ESP_ERROR_CHECK_WITHOUT_ABORT(pcm5122_set_mute(true));
     uint8_t tas_power_mode = 0;
-#if TATER_BOARD_SAT1_BETA_REV41
     sat1_pd_status_t pd_status = {0};
     if (sat1_pd_status_snapshot(&pd_status) && pd_status.state == SAT1_PD_STATE_NEGOTIATING) {
         sat1_pd_wait_ready(1500);
@@ -1721,7 +1712,7 @@ esp_err_t tater_audio_speaker_begin(void)
     tas_power_mode = sat1_pd_recommended_tas_mode();
     ESP_LOGI(
         TAG,
-        "legacy speaker power selection pd_state=%s contract=%u mV explicit=%d tas_mode=%u",
+        "speaker power selection pd_state=%s contract=%u mV explicit=%d tas_mode=%u",
         sat1_pd_state_name(pd_status.state),
         pd_status.contract_voltage_mv,
         pd_status.explicit_contract,
@@ -1730,11 +1721,10 @@ esp_err_t tater_audio_speaker_begin(void)
     if (!s_pd_fallback_warning_logged && tas_power_mode == 0) {
         ESP_LOGW(
             TAG,
-            "USB-PD contract is below 9V or unavailable; keeping the legacy board on the safe TAS2780 mode-0 profile"
+            "USB-PD contract is below 9V or unavailable; keeping Sat1 on the safe TAS2780 mode-0 profile"
         );
         s_pd_fallback_warning_logged = true;
     }
-#endif
     esp_err_t err = tas2780_activate(tas_power_mode);
     if (err != ESP_OK) {
         xSemaphoreGive(s_speaker_mutex);
@@ -1924,7 +1914,6 @@ bool tater_audio_xmos_status_snapshot(tater_audio_xmos_status_t *out)
     return true;
 }
 
-#if TATER_BOARD_SAT1_BETA_REV41
 bool tater_audio_power_status_snapshot(tater_audio_power_status_t *out)
 {
     if (!out) {
@@ -1949,6 +1938,5 @@ bool tater_audio_power_status_snapshot(tater_audio_power_status_t *out)
     out->contract_current_ma = status.contract_current_ma;
     return true;
 }
-#endif
 
 #endif

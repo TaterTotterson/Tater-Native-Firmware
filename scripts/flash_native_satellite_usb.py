@@ -100,11 +100,6 @@ def normalize_board_key(board: str) -> str:
         "sat1": "satellite1",
         "sat-1": "satellite1",
         "satellite-1": "satellite1",
-        "sat1-beta": "satellite1-beta-rev41",
-        "sat1-beta-rev41": "satellite1-beta-rev41",
-        "sat1-rev41": "satellite1-beta-rev41",
-        "satellite1-beta": "satellite1-beta-rev41",
-        "satellite1-rev41": "satellite1-beta-rev41",
         "voice-pe": "voicepe",
         "voice-pe-s3": "voicepe",
         "respeaker": "respeaker_xvf3800",
@@ -216,7 +211,7 @@ def infer_local_flash_size(path: Path, explicit_flash_size: str = "") -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Flash Tater Native satellite firmware over USB without a browser.")
     parser.add_argument("port", nargs="?", help="Serial port, for example /dev/cu.usbmodem4101.")
-    parser.add_argument("--board", help="Native board key, for example satellite1, satellite1_beta_rev41, or voicepe. Required unless --image is used.")
+    parser.add_argument("--board", help="Native board key, for example satellite1 or voicepe. Required unless --image is used.")
     parser.add_argument("--image", help="Use a local factory image instead of the manifest artifact.")
     parser.add_argument("--app-image", help="Use a local app/OTA image and write app partitions only, preserving setup data.")
     parser.add_argument("--app-offsets", default="all", help="Comma-separated app offsets for --app-image. Default: all app slots.")
@@ -268,7 +263,7 @@ def main() -> int:
     else:
         board = text(args.board)
         if not board:
-            raise SystemExit("Pass the board to flash, for example: --board satellite1, --board satellite1_beta_rev41, or --board voicepe.")
+            raise SystemExit("Pass the board to flash, for example: --board satellite1 or --board voicepe.")
         manifest, manifest_source = load_manifest(text(args.latest_url) or DEFAULT_LATEST_URL, latest_file=text(args.latest_file))
         artifact = find_factory_artifact(manifest, board)
         image = download_or_copy_artifact(artifact, manifest_source)

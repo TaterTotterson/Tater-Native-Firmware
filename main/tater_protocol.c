@@ -3383,7 +3383,7 @@ void tater_protocol_send_status(const char *state)
         cJSON_AddNumberToObject(xmos_fw, "dfu_status", xmos_status.dfu_status);
         cJSON_AddItemToObject(payload, "xmos_firmware", xmos_fw);
     }
-#if TATER_BOARD_SAT1_BETA_REV41
+#if TATER_BOARD_SAT1
     tater_audio_power_status_t power_status = {0};
     if (tater_audio_power_status_snapshot(&power_status)) {
         cJSON *power = cJSON_CreateObject();

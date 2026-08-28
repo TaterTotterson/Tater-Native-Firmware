@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-bool sat1_pd_select_beta_fixed_pdo(
+bool sat1_pd_select_fixed_pdo(
     const uint32_t *objects,
     size_t object_count,
     sat1_pd_fixed_selection_t *selection
@@ -20,7 +20,7 @@ bool sat1_pd_select_beta_fixed_pdo(
         }
         uint16_t voltage_mv = (uint16_t)(((pdo >> 10) & 0x03ffU) * 50U);
         uint16_t current_ma = (uint16_t)((pdo & 0x03ffU) * 10U);
-        if (voltage_mv < SAT1_BETA_MIN_PD_MV || voltage_mv > SAT1_BETA_MAX_PD_MV
+        if (voltage_mv < SAT1_MIN_PD_MV || voltage_mv > SAT1_MAX_PD_MV
             || current_ma == 0) {
             continue;
         }

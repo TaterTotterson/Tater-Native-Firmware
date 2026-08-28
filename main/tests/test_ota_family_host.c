@@ -13,7 +13,7 @@ static void feed_text(tater_ota_family_scan_t *scan, const char *marker, const c
 int main(void)
 {
     const char *production = "TATER-OTA-FAMILY:satellite1;";
-    const char *legacy = "TATER-OTA-FAMILY:satellite1-beta-rev41;";
+    const char *voicepe = "TATER-OTA-FAMILY:voice-pe;";
 
     tater_ota_family_scan_t scan;
     tater_ota_family_scan_init(&scan);
@@ -21,17 +21,17 @@ int main(void)
     assert(tater_ota_family_scan_found(&scan));
 
     tater_ota_family_scan_init(&scan);
-    feed_text(&scan, legacy, "binary-prefix-TATER-OTA-");
-    feed_text(&scan, legacy, "FAMILY:satellite1-beta-");
-    feed_text(&scan, legacy, "rev41;binary-suffix");
+    feed_text(&scan, voicepe, "binary-prefix-TATER-OTA-");
+    feed_text(&scan, voicepe, "FAMILY:voice-");
+    feed_text(&scan, voicepe, "pe;binary-suffix");
     assert(tater_ota_family_scan_found(&scan));
 
     tater_ota_family_scan_init(&scan);
-    feed_text(&scan, legacy, "TATER-OTA-FAMILY:satellite1;");
+    feed_text(&scan, voicepe, "TATER-OTA-FAMILY:satellite1;");
     assert(!tater_ota_family_scan_found(&scan));
 
     tater_ota_family_scan_init(&scan);
-    feed_text(&scan, production, "TATER-OTA-FAMILY:satellite1-beta-rev41;");
+    feed_text(&scan, production, "TATER-OTA-FAMILY:voice-pe;");
     assert(!tater_ota_family_scan_found(&scan));
 
     tater_ota_family_scan_init(&scan);

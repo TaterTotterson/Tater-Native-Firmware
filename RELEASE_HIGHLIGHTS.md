@@ -1,5 +1,4 @@
-- Releases firmware `0.3.14` for Voice PE, Satellite1, Satellite1 Beta.1/rev4.1, ReSpeaker XVF3800, and S3 Box.
-- Keeps the OTA task stack in internal RAM so flash writes cannot panic when ESP-IDF temporarily disables access to PSRAM.
-- Fixes native satellite updates that previously reached about 95 percent, rebooted, and remained on firmware 0.3.11 through 0.3.13.
-- Preserves PSRAM use for the OTA request context and playback watchdog, leaving enough contiguous internal memory for the cache-sensitive OTA task.
-- Updates the legacy Satellite1 Beta.1/rev4.1 USB-PD policy to select the best supported fixed 5-20 V contract while keeping the amplifier on its safe mode-0 profile below 9 V.
+- Releases Satellite1 firmware `0.3.15`; Voice PE, ReSpeaker XVF3800, and S3 Box remain on `0.3.14`.
+- Consolidates all public Satellite1 revisions onto the main `satellite1` firmware and retires the separate Beta.1 target.
+- Updates Satellite1 USB-PD handling to select the best supported fixed 5-20 V contract while keeping the amplifier on its safe mode-0 profile below 9 V.
+- Devices already using the retired beta OTA family require one manual USB installation of `satellite1`; normal OTA updates resume afterward.

@@ -47,22 +47,16 @@ For the complete Tater Assistant experience, connect the satellites to
 ### Supported Hardware
 
 - Voice PE: `voicepe`
-- Satellite1 / Sat1: `sat1` build environment, `satellite1` release key
-- Satellite1 Public Batch #1 / Beta.1 rev4.1: `sat1_beta_rev41` build
-  environment, `satellite1_beta_rev41` release key
+- Satellite1 / Sat1, including Public Batch #1 Beta.1/rev4.1 and later:
+  `sat1` build environment, `satellite1` release key
 - ReSpeaker XVF3800: `respeaker_xvf3800`
 - ESP32-S3-BOX-3 Display: `s3_box`
 
 All targets are ESP32-S3 native firmware images that connect directly to Tater
 over the native satellite WebSocket protocol. ReSpeaker XVF3800 uses an 8MB
-flash layout; Voice PE, both Sat1 targets, and S3 Box use the 16MB layout.
-
-The two Sat1 targets are intentionally separate. Select `satellite1` for Public
-Batch #2 and later hardware, or `satellite1_beta_rev41` for Public Batch #1 /
-Beta.1 HAT and Core rev4.1. The hardware revision is not reliably detectable in
-software, so the initial USB flash must use the correct target. After that,
-their distinct board IDs and OTA-family markers keep updates on the matching
-firmware channel.
+flash layout; Voice PE, Sat1, and S3 Box use the 16MB layout. Sat1 uses one
+firmware target across all public hardware revisions, with guarded USB-PD
+negotiation and a safe 5V amplifier fallback.
 
 ### Provisioning And Pairing
 
@@ -568,7 +562,7 @@ platformio run
 Build all supported targets:
 
 ```sh
-platformio run -e voicepe -e sat1 -e sat1_beta_rev41 -e respeaker_xvf3800 -e s3_box
+platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
 ```
 
 Build outputs:
@@ -578,8 +572,6 @@ Build outputs:
 .pio/build/voicepe/firmware.factory.bin
 .pio/build/sat1/firmware.bin
 .pio/build/sat1/firmware.factory.bin
-.pio/build/sat1_beta_rev41/firmware.bin
-.pio/build/sat1_beta_rev41/firmware.factory.bin
 .pio/build/respeaker_xvf3800/firmware.bin
 .pio/build/respeaker_xvf3800/firmware.factory.bin
 .pio/build/s3_box/firmware.bin
@@ -593,8 +585,8 @@ platformio run -e voicepe -t upload --upload-port /dev/cu.usbmodem4101
 platformio device monitor --port /dev/cu.usbmodem4101 --baud 115200
 ```
 
-For production Sat1, legacy Sat1 Beta.1/rev4.1, ReSpeaker XVF3800, or S3 Box,
-use `-e sat1`, `-e sat1_beta_rev41`, `-e respeaker_xvf3800`, or `-e s3_box`.
+For Sat1, ReSpeaker XVF3800, or S3 Box, use `-e sat1`,
+`-e respeaker_xvf3800`, or `-e s3_box`.
 
 ### Package Local Release Assets
 
@@ -604,9 +596,8 @@ After a successful build:
 ./scripts/build_native_firmware_manifest.py --board all --skip-build
 ```
 
-Use `--board voicepe`, `--board satellite1`, `--board
-satellite1_beta_rev41`, `--board respeaker_xvf3800`, or `--board s3_box` to
-package a single board.
+Use `--board voicepe`, `--board satellite1`, `--board respeaker_xvf3800`, or
+`--board s3_box` to package a single board.
 
 This writes local release-style assets under `release_assets/<version>/`:
 
@@ -630,8 +621,8 @@ three-part version and the board revision.
 
 When publishing a follow-up package without changing any embedded board
 versions, append a descriptive suffix to the existing release version, such as
-`native-0.3.11-sat1beta`. This creates a new immutable release tag while every
-board and the combined manifest continue to report firmware version `0.3.11`.
+`native-0.3.14-hotfix`. This creates a new immutable release tag while every
+board and the combined manifest continue to report firmware version `0.3.14`.
 
 Example:
 
@@ -650,12 +641,12 @@ git push origin native-0.3.3-rev1
 For a same-version follow-up package:
 
 ```sh
-git tag native-0.3.11-sat1beta
-git push origin native-0.3.11-sat1beta
+git tag native-0.3.14-hotfix
+git push origin native-0.3.14-hotfix
 ```
 
-The release workflow builds `voicepe`, `sat1`, `sat1_beta_rev41`,
-`respeaker_xvf3800`, and `s3_box`, packages release assets, writes URL-backed
+The release workflow builds `voicepe`, `sat1`, `respeaker_xvf3800`, and
+`s3_box`, packages release assets, writes URL-backed
 manifests, and creates or updates the GitHub Release with:
 
 - `latest.json`
@@ -664,8 +655,6 @@ manifests, and creates or updates the GitHub Release with:
 - `native-voicepe-x.y.z-voicepe-factory.bin`
 - `native-satellite1-x.y.z-satellite1-ota.bin`
 - `native-satellite1-x.y.z-satellite1-factory.bin`
-- `native-satellite1-beta-rev41-x.y.z-satellite1_beta_rev41-ota.bin`
-- `native-satellite1-beta-rev41-x.y.z-satellite1_beta_rev41-factory.bin`
 - `native-respeaker-xvf3800-x.y.z-respeaker_xvf3800-ota.bin`
 - `native-respeaker-xvf3800-x.y.z-respeaker_xvf3800-factory.bin`
 - `native-s3-box-x.y.z-s3_box-ota.bin`
