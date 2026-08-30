@@ -11,6 +11,11 @@
     <img alt="Join the Tater Assistant Discord" src="https://img.shields.io/badge/Discord-Join%20the%20Community-5865F2?style=for-the-badge&logo=discord&logoColor=white" />
   </a>
 </p>
+<p align="center">
+  <a href="https://taterassistant.com/usb-flasher/index.html">
+    <img alt="Open the Tater USB Firmware Flasher" height="42" src="https://img.shields.io/badge/USB%20Firmware%20Flasher-Flash%20Your%20Satellite-F28C28?style=for-the-badge&logo=espressif&logoColor=white" />
+  </a>
+</p>
 
 # Tater Native Satellite Firmware
 
