@@ -1,4 +1,4 @@
-- Releases native firmware `0.3.16` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Moves synchronized playback telemetry onto a dedicated non-blocking queue so network status reports cannot pause audio or make stereo and multi-room speakers drift apart.
-- Reports the first real audio submission as the playback start and preserves ordered start, playhead, and completion events without blocking the speaker task.
-- Honors Tater's requested jump, slew, and settling duration for smoother startup realignment and ongoing Music Core synchronization.
+- Releases native firmware `0.3.17` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Fixes stereo and multi-room drift, popping, and oscillation by treating each phase adjustment from Tater as the latest measured error instead of accumulating unfinished corrections.
+- Protects synchronized playback on the slave-clocked Voice PE, Satellite1, and ReSpeaker targets from local wake-word work so their audio buffers remain fed; a hardware-tested Voice PE pair stayed synchronized with zero underruns.
+- Reserves the OTA worker and read buffer in internal memory at boot on every native ESP32-S3 target, keeping updates available after audio, wake-word, and display workloads fragment the remaining heap.

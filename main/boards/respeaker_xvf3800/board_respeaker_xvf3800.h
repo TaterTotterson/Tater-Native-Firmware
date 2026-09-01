@@ -6,7 +6,7 @@
 #define TATER_BOARD_DISPLAY_NAME "ReSpeaker XVF3800"
 #define TATER_DEVICE_ID_PREFIX "respeaker-xvf3800"
 #define TATER_DEFAULT_DEVICE_NAME "Tater ReSpeaker XVF3800"
-#define TATER_FIRMWARE_VERSION "native-respeaker-xvf3800-0.3.16"
+#define TATER_FIRMWARE_VERSION "native-respeaker-xvf3800-0.3.17"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6
@@ -30,6 +30,8 @@
 #define TATER_SPK_CHANNELS 2
 #define TATER_SPK_BITS 32
 #define TATER_MEDIA_RENDER_LATENCY_FRAMES 960
+/* Keep synchronized slave-clocked I2S playback ahead of wake inference. */
+#define TATER_MEDIA_PLAYBACK_TASK_PRIORITY 7
 
 #define TATER_LED_COUNT 12
 #define TATER_HAS_CENTER_BUTTON 0

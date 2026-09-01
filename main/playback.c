@@ -61,6 +61,9 @@ static const size_t PLAYBACK_SCENE_BACKGROUND_RING_FRAMES = 2 * TATER_SPK_SAMPLE
 static const size_t PLAYBACK_MEDIA_RING_FRAMES = 2 * TATER_SPK_SAMPLE_RATE;
 static const size_t PLAYBACK_OVERLAY_RING_FRAMES = TATER_SPK_SAMPLE_RATE;
 #define PLAYBACK_MIX_CHUNK_FRAMES 256
+#ifndef TATER_MEDIA_PLAYBACK_TASK_PRIORITY
+#define TATER_MEDIA_PLAYBACK_TASK_PRIORITY 5
+#endif
 
 typedef struct playback_pcm_sink playback_pcm_sink_t;
 
@@ -4057,7 +4060,7 @@ esp_err_t tater_playback_start_media_session(const tater_playback_media_session_
         "tater_media",
         PLAYBACK_URL_TASK_STACK,
         &s_media_session,
-        5,
+        TATER_MEDIA_PLAYBACK_TASK_PRIORITY,
         &s_task,
         1,
         &s_media_session.task_with_caps
@@ -4137,7 +4140,7 @@ esp_err_t tater_playback_adjust_media_session(
         uint32_t settle_frames = settle_frames_64 > UINT32_MAX
             ? UINT32_MAX
             : (uint32_t)settle_frames_64;
-        tater_playback_sync_slew_queue(
+        tater_playback_sync_slew_replace(
             &s_media_session.correction_slew,
             correction_frames,
             settle_frames,

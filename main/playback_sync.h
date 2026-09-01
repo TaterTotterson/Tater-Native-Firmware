@@ -18,6 +18,18 @@ void tater_playback_sync_slew_queue(
     int32_t max_pending_frames
 );
 
+/*
+ * Replace the unfinished correction with a newly measured absolute phase
+ * error. Stereo playhead controllers report the current error on every
+ * sample; accumulating those reports would apply the same error repeatedly.
+ */
+void tater_playback_sync_slew_replace(
+    tater_playback_sync_slew_t *state,
+    int32_t correction_frames,
+    uint32_t settle_output_frames,
+    int32_t max_pending_frames
+);
+
 int32_t tater_playback_sync_slew_next_step(
     tater_playback_sync_slew_t *state,
     uint32_t output_frames

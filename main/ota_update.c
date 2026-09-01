@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "board.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
@@ -32,6 +33,19 @@ typedef struct {
     tater_ota_failure_callback_t failure_callback;
     char url[];
 } ota_task_context_t;
+
+/*
+ * Audio, wake-word, and display workloads can leave plenty of PSRAM available
+ * while fragmenting nearly all remaining internal RAM. OTA flash writes
+ * require an internal-RAM task stack, so reserve the small amount OTA needs
+ * at link time for every native ESP32-S3 target rather than trying to allocate
+ * it from a fragmented heap when an update begins.
+ */
+static DRAM_ATTR StackType_t s_ota_task_stack[OTA_TASK_STACK_SIZE];
+static DRAM_ATTR StaticTask_t s_ota_task_buffer;
+static DRAM_ATTR uint8_t s_ota_read_buffer[OTA_READ_BUFFER_SIZE];
+static TaskHandle_t s_ota_task_handle;
+static ota_task_context_t *s_ota_pending_context;
 
 static void ota_send_logf(const char *level, const char *fmt, ...)
 {
@@ -96,9 +110,8 @@ static ota_task_context_t *ota_task_context_create(
     return context;
 }
 
-static void ota_task(void *arg)
+static void ota_run(ota_task_context_t *context)
 {
-    ota_task_context_t *context = (ota_task_context_t *)arg;
     char *url = context->url;
     tater_ota_failure_callback_t failure_callback = context->failure_callback;
     esp_ota_handle_t ota = 0;
@@ -178,12 +191,8 @@ static void ota_task(void *arg)
         goto done;
     }
 
-    stage = "read buffer alloc";
-    buf = heap_caps_malloc(OTA_READ_BUFFER_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!buf) {
-        err = ESP_ERR_NO_MEM;
-        goto done;
-    }
+    stage = "read buffer select";
+    buf = s_ota_read_buffer;
 
     int64_t written = 0;
     while (true) {
@@ -240,9 +249,6 @@ done:
     if (ota) {
         esp_ota_abort(ota);
     }
-    if (buf) {
-        free(buf);
-    }
     if (client) {
         esp_http_client_cleanup(client);
     }
@@ -266,7 +272,19 @@ done:
     if (err != ESP_OK && failure_callback) {
         failure_callback(err);
     }
-    vTaskDelete(NULL);
+}
+
+static void ota_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ota_task_context_t *context = s_ota_pending_context;
+        s_ota_pending_context = NULL;
+        if (context) {
+            ota_run(context);
+        }
+    }
 }
 
 esp_err_t tater_ota_start_url(const char *url, tater_ota_failure_callback_t failure_callback)
@@ -290,20 +308,26 @@ esp_err_t tater_ota_start_url(const char *url, tater_ota_failure_callback_t fail
      * programming flash, so a PSRAM-backed stack can panic inside the cache
      * freeze path. The request context may use PSRAM, but never the task stack.
      */
-    BaseType_t ok = xTaskCreatePinnedToCore(
-        ota_task,
-        "tater_ota",
-        OTA_TASK_STACK_SIZE,
-        context,
-        7,
-        NULL,
-        1
-    );
-    if (ok != pdPASS) {
-        free(context);
-        s_running = false;
-        return ota_start_failed("OTA task allocation", ESP_ERR_NO_MEM);
+    s_ota_pending_context = context;
+    if (!s_ota_task_handle) {
+        s_ota_task_handle = xTaskCreateStaticPinnedToCore(
+            ota_task,
+            "tater_ota",
+            OTA_TASK_STACK_SIZE,
+            NULL,
+            7,
+            s_ota_task_stack,
+            &s_ota_task_buffer,
+            1
+        );
+        if (!s_ota_task_handle) {
+            s_ota_pending_context = NULL;
+            free(context);
+            s_running = false;
+            return ota_start_failed("reserved OTA task creation", ESP_ERR_NO_MEM);
+        }
     }
+    xTaskNotifyGive(s_ota_task_handle);
     return ESP_OK;
 }
 

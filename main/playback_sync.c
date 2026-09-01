@@ -9,6 +9,28 @@ static uint32_t playback_sync_abs_i32(int32_t value)
     return value < 0 ? (uint32_t)(-(int64_t)value) : (uint32_t)value;
 }
 
+static void playback_sync_slew_configure(
+    tater_playback_sync_slew_t *state,
+    uint32_t settle_output_frames
+)
+{
+    uint32_t pending_abs = playback_sync_abs_i32(state->pending_frames);
+    if (pending_abs == 0) {
+        state->step_interval_output_frames = 0;
+        state->frames_until_step = 0;
+        return;
+    }
+    uint32_t settle_frames = settle_output_frames > 0 ? settle_output_frames : 1;
+    uint32_t interval = settle_frames / pending_abs;
+    state->step_interval_output_frames = interval > 0 ? interval : 1;
+    if (
+        state->frames_until_step == 0
+        || state->frames_until_step > state->step_interval_output_frames
+    ) {
+        state->frames_until_step = state->step_interval_output_frames;
+    }
+}
+
 void tater_playback_sync_slew_init(tater_playback_sync_slew_t *state)
 {
     if (state) {
@@ -33,21 +55,28 @@ void tater_playback_sync_slew_queue(
         pending = -max_pending_frames;
     }
     state->pending_frames = (int32_t)pending;
-    uint32_t pending_abs = playback_sync_abs_i32(state->pending_frames);
-    if (pending_abs == 0) {
-        state->step_interval_output_frames = 0;
-        state->frames_until_step = 0;
+    playback_sync_slew_configure(state, settle_output_frames);
+}
+
+void tater_playback_sync_slew_replace(
+    tater_playback_sync_slew_t *state,
+    int32_t correction_frames,
+    uint32_t settle_output_frames,
+    int32_t max_pending_frames
+)
+{
+    if (!state || max_pending_frames <= 0) {
         return;
     }
-    uint32_t settle_frames = settle_output_frames > 0 ? settle_output_frames : 1;
-    uint32_t interval = settle_frames / pending_abs;
-    state->step_interval_output_frames = interval > 0 ? interval : 1;
-    if (
-        state->frames_until_step == 0
-        || state->frames_until_step > state->step_interval_output_frames
-    ) {
-        state->frames_until_step = state->step_interval_output_frames;
+
+    if (correction_frames > max_pending_frames) {
+        correction_frames = max_pending_frames;
+    } else if (correction_frames < -max_pending_frames) {
+        correction_frames = -max_pending_frames;
     }
+    state->pending_frames = correction_frames;
+    state->frames_until_step = 0;
+    playback_sync_slew_configure(state, settle_output_frames);
 }
 
 int32_t tater_playback_sync_slew_next_step(

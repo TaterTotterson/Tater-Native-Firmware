@@ -6,7 +6,7 @@
 #define TATER_BOARD_DISPLAY_NAME "Voice PE"
 #define TATER_DEVICE_ID_PREFIX "voicepe"
 #define TATER_DEFAULT_DEVICE_NAME "Tater Voice PE"
-#define TATER_FIRMWARE_VERSION "native-voicepe-0.3.16"
+#define TATER_FIRMWARE_VERSION "native-voicepe-0.3.17"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6
@@ -30,6 +30,8 @@
 #define TATER_SPK_CHANNELS 2
 #define TATER_SPK_BITS 32
 #define TATER_MEDIA_RENDER_LATENCY_FRAMES 1080
+/* Keep synchronized I2S playback fed ahead of local wake inference. */
+#define TATER_MEDIA_PLAYBACK_TASK_PRIORITY 7
 
 #define TATER_LED_PIN GPIO_NUM_21
 #define TATER_LED_POWER_EN GPIO_NUM_45
