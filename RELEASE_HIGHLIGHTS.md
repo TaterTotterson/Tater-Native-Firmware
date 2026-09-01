@@ -1,4 +1,4 @@
-- Releases Satellite1 firmware `0.3.15`; Voice PE, ReSpeaker XVF3800, and S3 Box remain on `0.3.14`.
-- Consolidates all public Satellite1 revisions onto the main `satellite1` firmware and retires the separate Beta.1 target.
-- Updates Satellite1 USB-PD handling to select the best supported fixed 5-20 V contract while keeping the amplifier on its safe mode-0 profile below 9 V.
-- Devices already using the retired beta OTA family require one manual USB installation of `satellite1`; normal OTA updates resume afterward.
+- Releases native firmware `0.3.16` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Moves synchronized playback telemetry onto a dedicated non-blocking queue so network status reports cannot pause audio or make stereo and multi-room speakers drift apart.
+- Reports the first real audio submission as the playback start and preserves ordered start, playhead, and completion events without blocking the speaker task.
+- Honors Tater's requested jump, slew, and settling duration for smoother startup realignment and ongoing Music Core synchronization.

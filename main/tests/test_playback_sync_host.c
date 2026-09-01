@@ -64,6 +64,23 @@ static void test_slew_step_can_be_restored_after_starvation(void)
     assert(slew.pending_frames == -1);
 }
 
+static void test_slew_honors_longer_settle_window(void)
+{
+    tater_playback_sync_slew_t slew;
+    tater_playback_sync_slew_init(&slew);
+    tater_playback_sync_slew_queue(&slew, 48, 4 * 48000, 480);
+    int corrections = 0;
+    for (int chunk = 0; chunk < 188; chunk++) {
+        corrections += tater_playback_sync_slew_next_step(&slew, 256);
+    }
+    assert(corrections >= 11 && corrections <= 13);
+    for (int chunk = 188; chunk < 750; chunk++) {
+        corrections += tater_playback_sync_slew_next_step(&slew, 256);
+    }
+    assert(corrections == 48);
+    assert(slew.pending_frames == 0);
+}
+
 static void test_rendered_cursor_excludes_hardware_queue(void)
 {
     assert(tater_playback_sync_rendered_source_frames(960, 0, 960) == 0);
@@ -85,6 +102,7 @@ int main(void)
     test_fade_finishes();
     test_slew_is_distributed_over_settle_window();
     test_slew_step_can_be_restored_after_starvation();
+    test_slew_honors_longer_settle_window();
     test_rendered_cursor_excludes_hardware_queue();
     puts("playback_sync host tests passed");
     return 0;
