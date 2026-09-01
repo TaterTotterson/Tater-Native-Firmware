@@ -81,12 +81,31 @@ void tater_playback_mix_frames(
 
     for (size_t frame = 0; frame < frame_count; frame++) {
         advance_background_gain(state);
+        int32_t background_gain_q16 = state->background_gain_q16;
+        if (background_gain_q16 < 0) {
+            background_gain_q16 = 0;
+        } else if (background_gain_q16 > TATER_PLAYBACK_GAIN_ONE_Q16) {
+            background_gain_q16 = TATER_PLAYBACK_GAIN_ONE_Q16;
+        }
+        int32_t foreground_gain_q16 = TATER_PLAYBACK_GAIN_ONE_Q16;
+        if (foreground_stereo && background_stereo) {
+            /*
+             * Treat the configured background level as part of a shared mix
+             * budget.  This fades the foreground in while the background is
+             * ducking and guarantees that two full-scale sources cannot hard
+             * clip simply because they are being overlaid.
+             */
+            foreground_gain_q16 =
+                TATER_PLAYBACK_GAIN_ONE_Q16 - background_gain_q16;
+        }
         for (size_t channel = 0; channel < 2; channel++) {
             size_t index = (frame * 2) + channel;
             int32_t foreground = foreground_stereo ? foreground_stereo[index] : 0;
             int32_t background = background_stereo ? background_stereo[index] : 0;
-            int32_t mixed = foreground
-                + (int32_t)(((int64_t)background * state->background_gain_q16)
+            int32_t mixed =
+                (int32_t)(((int64_t)foreground * foreground_gain_q16)
+                    / TATER_PLAYBACK_GAIN_ONE_Q16)
+                + (int32_t)(((int64_t)background * background_gain_q16)
                     / TATER_PLAYBACK_GAIN_ONE_Q16);
             output_stereo[index] = saturate_s16(mixed);
         }

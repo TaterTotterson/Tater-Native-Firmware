@@ -6,7 +6,7 @@
 #define TATER_BOARD_DISPLAY_NAME "Voice PE"
 #define TATER_DEVICE_ID_PREFIX "voicepe"
 #define TATER_DEFAULT_DEVICE_NAME "Tater Voice PE"
-#define TATER_FIRMWARE_VERSION "native-voicepe-0.3.17"
+#define TATER_FIRMWARE_VERSION "native-voicepe-0.3.18"
 
 #define TATER_I2C_SDA GPIO_NUM_5
 #define TATER_I2C_SCL GPIO_NUM_6

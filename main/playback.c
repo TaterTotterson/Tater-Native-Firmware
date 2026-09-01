@@ -64,6 +64,12 @@ static const size_t PLAYBACK_OVERLAY_RING_FRAMES = TATER_SPK_SAMPLE_RATE;
 #ifndef TATER_MEDIA_PLAYBACK_TASK_PRIORITY
 #define TATER_MEDIA_PLAYBACK_TASK_PRIORITY 5
 #endif
+#ifndef TATER_MEDIA_DECODER_TASK_PRIORITY
+#define TATER_MEDIA_DECODER_TASK_PRIORITY 5
+#endif
+#ifndef TATER_OVERLAY_DECODER_TASK_PRIORITY
+#define TATER_OVERLAY_DECODER_TASK_PRIORITY 6
+#endif
 
 typedef struct playback_pcm_sink playback_pcm_sink_t;
 
@@ -3150,8 +3156,11 @@ static void media_session_task(void *arg)
     bool render_clock_available = false;
     int32_t correction_since_report = 0;
     uint32_t underrun_events = 0;
+    uint32_t overlay_underrun_events = 0;
     uint32_t rejoin_count = 0;
     uint32_t recovery_fade_frames_remaining = 0;
+    bool overlay_media_starved = false;
+    bool overlay_foreground_starved = false;
     int64_t scheduled_start_us = 0;
     int64_t actual_start_us = 0;
     int64_t last_playhead_us = 0;
@@ -3214,7 +3223,7 @@ static void media_session_task(void *arg)
         "media_decoder",
         PLAYBACK_SCENE_BACKGROUND_TASK_STACK,
         session->media_decoder,
-        4,
+        TATER_MEDIA_DECODER_TASK_PRIORITY,
         &session->media_decoder_task,
         0,
         &session->media_decoder->task_with_caps
@@ -3454,7 +3463,7 @@ static void media_session_task(void *arg)
                 &session->media_ring,
                 media_input_frames,
                 requested_media_frames,
-                media_finished ? 0 : pdMS_TO_TICKS(30)
+                (media_finished || has_overlay) ? 0 : pdMS_TO_TICKS(30)
             );
             source_frames_written += got_media;
 
@@ -3463,6 +3472,7 @@ static void media_session_task(void *arg)
             scene_pcm_ring_snapshot(&session->media_ring, &current_fill, &current_ended);
             (void)current_fill;
             if (got_media == requested_media_frames && got_media > 0) {
+                overlay_media_starved = false;
                 tater_playback_sync_resample_stereo(
                     media_input_frames,
                     got_media,
@@ -3483,7 +3493,20 @@ static void media_session_task(void *arg)
                         media_output_frames * TATER_SPK_CHANNELS * sizeof(int16_t)
                     );
                 }
-                if (!current_ended && !has_overlay) {
+                if (!current_ended && has_overlay) {
+                    if (!overlay_media_starved) {
+                        underrun_events++;
+                        overlay_underrun_events++;
+                    }
+                    overlay_media_starved = true;
+                    /*
+                     * Never wait for the background decoder from the speaker
+                     * task.  The frame buffers were cleared above, so a late
+                     * block becomes silence instead of an I2S deadline miss.
+                     */
+                    media_output_frames = PLAYBACK_MIX_CHUNK_FRAMES;
+                } else if (!current_ended) {
+                    overlay_media_starved = false;
                     rebuffering = true;
                     underrun_events++;
                     media_output_frames = PLAYBACK_MIX_CHUNK_FRAMES;
@@ -3495,6 +3518,8 @@ static void media_session_task(void *arg)
                         (unsigned)requested_media_frames,
                         (unsigned)underrun_events
                     );
+                } else {
+                    overlay_media_starved = false;
                 }
             }
             if (media_output_frames > 0) {
@@ -3520,12 +3545,27 @@ static void media_session_task(void *arg)
                 &session->overlay_ring,
                 foreground_frames,
                 PLAYBACK_MIX_CHUNK_FRAMES,
-                pdMS_TO_TICKS(30)
+                0
             );
             size_t overlay_fill = 0;
             bool overlay_ended = false;
             scene_pcm_ring_snapshot(&session->overlay_ring, &overlay_fill, &overlay_ended);
+            if (!overlay_ended && got_foreground < PLAYBACK_MIX_CHUNK_FRAMES) {
+                if (!overlay_foreground_starved) {
+                    underrun_events++;
+                    overlay_underrun_events++;
+                }
+                overlay_foreground_starved = true;
+                /* Keep the speaker clock running even if both decoders are late. */
+                if (media_output_frames < PLAYBACK_MIX_CHUNK_FRAMES) {
+                    media_output_frames = PLAYBACK_MIX_CHUNK_FRAMES;
+                }
+            } else {
+                overlay_foreground_starved = false;
+            }
             release_after_write = overlay_ended && overlay_fill == 0;
+        } else {
+            overlay_foreground_starved = false;
         }
 
         size_t output_frames = media_output_frames > got_foreground
@@ -3633,6 +3673,7 @@ static void media_session_task(void *arg)
                 correction_since_report,
                 rebuffering,
                 underrun_events,
+                overlay_underrun_events,
                 rejoin_count,
                 rejoin_frames_total
             );
@@ -4253,7 +4294,7 @@ esp_err_t tater_playback_play_overlay(const tater_playback_overlay_t *overlay)
         "tts_overlay",
         PLAYBACK_SCENE_BACKGROUND_TASK_STACK,
         s_media_session.overlay_decoder,
-        5,
+        TATER_OVERLAY_DECODER_TASK_PRIORITY,
         &s_media_session.overlay_decoder_task,
         0,
         &s_media_session.overlay_decoder->task_with_caps

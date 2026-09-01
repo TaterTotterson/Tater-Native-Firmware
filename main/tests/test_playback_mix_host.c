@@ -14,24 +14,24 @@ static void test_fixed_background_gain(void)
     tater_playback_mix_init(&state, 25);
     tater_playback_mix_frames(&state, foreground, background, output, 2);
 
-    assert(output[0] == 2000);
-    assert(output[1] == 0);
-    assert(output[2] == 1000);
-    assert(output[3] == -3000);
+    assert(output[0] == 1750);
+    assert(output[1] == 250);
+    assert(output[2] == 500);
+    assert(output[3] == -2500);
 }
 
-static void test_saturation(void)
+static void test_overlay_mix_reserves_headroom(void)
 {
     tater_playback_mix_state_t state;
     const int16_t foreground[] = {30000, -30000};
     const int16_t background[] = {10000, -10000};
     int16_t output[2] = {0};
 
-    tater_playback_mix_init(&state, 100);
+    tater_playback_mix_init(&state, 20);
     tater_playback_mix_frames(&state, foreground, background, output, 1);
 
-    assert(output[0] == INT16_MAX);
-    assert(output[1] == INT16_MIN);
+    assert(output[0] > 25000 && output[0] < 27000);
+    assert(output[1] < -25000 && output[1] > -27000);
 }
 
 static void test_ramp_reaches_target(void)
@@ -80,8 +80,8 @@ static void test_overlay_duck_and_release_preserves_background(void)
     tater_playback_mix_set_background(&state, 20, 4);
     tater_playback_mix_frames(&state, foreground, background, ducked, 4);
     assert(ducked[0] > ducked[6]);
-    assert(ducked[6] >= 2999);
-    assert(ducked[6] <= 3000);
+    assert(ducked[6] >= 2799);
+    assert(ducked[6] <= 2800);
 
     tater_playback_mix_set_background(&state, 100, 4);
     tater_playback_mix_frames(&state, NULL, background, released, 4);
@@ -130,7 +130,7 @@ static void test_stereo_channel_routing(void)
 int main(void)
 {
     test_fixed_background_gain();
-    test_saturation();
+    test_overlay_mix_reserves_headroom();
     test_ramp_reaches_target();
     test_overlay_duck_and_release_preserves_background();
     test_stereo_channel_routing();

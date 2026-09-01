@@ -96,6 +96,7 @@ void tater_protocol_send_media_session_playhead(
     int32_t correction_frames,
     bool rebuffering,
     uint32_t underrun_events,
+    uint32_t overlay_underrun_events,
     uint32_t rejoin_count,
     uint64_t rejoin_frames
 );
