@@ -1,4 +1,4 @@
-- Releases native firmware `0.3.18` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Keeps ducked music and announcement audio feeding the speaker continuously, preventing the buffer gaps that could sound like static or crackling.
-- Protects the music and announcement decoders from competing work and reports overlay-specific underruns through playback telemetry for easier diagnosis.
-- Gives simultaneous music and speech a shared headroom budget so loud announcement peaks do not hard-clip while the background fades down.
+- Releases native firmware `0.3.19` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Prevents competing WebSocket reconnect paths from creating overlapping connections and repeated disconnect loops.
+- Makes the lifecycle watchdog the single reconnect owner and fully retires the previous client before opening a replacement.
+- Ignores late events from retired clients and throttles recovery attempts while preserving automatic recovery from stalled connections.

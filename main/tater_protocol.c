@@ -27,6 +27,7 @@
 #include "audio_aec.h"
 #include "audio_i2s.h"
 #include "native_settings.h"
+#include "network_recovery.h"
 #include "ota_update.h"
 #include "playback.h"
 #include "server_url.h"
@@ -85,6 +86,7 @@ static int64_t s_voice_started_us;
 static char s_voice_source[24];
 static int64_t s_last_link_down_us;
 static int64_t s_link_down_started_us;
+static int64_t s_client_started_us;
 static int64_t s_last_reconnect_attempt_us;
 static int64_t s_last_hello_us;
 static bool s_hello_acked;
@@ -215,9 +217,6 @@ typedef struct {
     bool task_with_caps;
 } tater_voice_watchdog_args_t;
 
-#define TATER_WS_RECONNECT_AFTER_MS 30000
-#define TATER_WS_RECONNECT_MIN_INTERVAL_MS 10000
-#define TATER_WS_HELLO_ACK_TIMEOUT_MS 5000
 #define TATER_WS_RESTART_FAILURE_LIMIT 3
 #define TATER_JSON_SEND_LINK_DOWN_FAILURES 3
 #define TATER_PLAYBACK_VISUAL_HOLD_MS 30000
@@ -619,10 +618,11 @@ static esp_err_t create_websocket_client(void)
         .keep_alive_idle = 30,
         .keep_alive_interval = 10,
         .keep_alive_count = 3,
-        .disable_auto_reconnect = false,
+        /* The application watchdog below exclusively owns reconnects. */
+        .disable_auto_reconnect = true,
         .reconnect_timeout_ms = 3000,
         .network_timeout_ms = 15000,
-        .enable_close_reconnect = true,
+        .enable_close_reconnect = false,
         .headers = strlen(s_auth_header) > 0 ? s_auth_header : NULL,
     };
     if (strncasecmp(s_ws_url, "wss://", 6) == 0) {
@@ -641,11 +641,11 @@ static esp_err_t create_websocket_client(void)
     return ESP_OK;
 }
 
-static esp_err_t restart_websocket_client(bool recreate_client)
+static esp_err_t recreate_websocket_client(tater_ws_recovery_reason_t reason)
 {
     s_ws_lifecycle_restart = true;
     s_ws_restart_count++;
-    mark_link_down(recreate_client ? "websocket auth refresh" : "websocket lifecycle restart");
+    mark_link_down(tater_ws_recovery_reason_name(reason));
 
     /*
      * Stop new sends through websocket_ready(), then briefly acquire the send
@@ -659,29 +659,28 @@ static esp_err_t restart_websocket_client(bool recreate_client)
     }
 
     esp_websocket_client_handle_t client = s_client;
+    s_client = NULL;
     if (client) {
         esp_err_t stop_err = esp_websocket_client_stop(client);
         if (stop_err != ESP_OK) {
             ESP_LOGW(TAG, "websocket lifecycle stop result=%s", esp_err_to_name(stop_err));
         }
+        esp_err_t destroy_err = esp_websocket_client_destroy(client);
+        if (destroy_err != ESP_OK) {
+            s_client = client;
+            s_ws_lifecycle_restart = false;
+            ESP_LOGE(TAG, "websocket lifecycle destroy result=%s", esp_err_to_name(destroy_err));
+            return destroy_err;
+        }
     }
 
-    if (recreate_client || !client) {
-        if (client) {
-            s_client = NULL;
-            esp_err_t destroy_err = esp_websocket_client_destroy(client);
-            if (destroy_err != ESP_OK) {
-                ESP_LOGW(TAG, "websocket lifecycle destroy result=%s", esp_err_to_name(destroy_err));
-            }
-        }
-        esp_err_t create_err = create_websocket_client();
-        if (create_err != ESP_OK) {
-            s_ws_lifecycle_restart = false;
-            ESP_LOGE(TAG, "websocket lifecycle create result=%s", esp_err_to_name(create_err));
-            return create_err;
-        }
-        s_recreate_client_on_reconnect = false;
+    esp_err_t create_err = create_websocket_client();
+    if (create_err != ESP_OK) {
+        s_ws_lifecycle_restart = false;
+        ESP_LOGE(TAG, "websocket lifecycle create result=%s", esp_err_to_name(create_err));
+        return create_err;
     }
+    s_recreate_client_on_reconnect = false;
 
     vTaskDelay(pdMS_TO_TICKS(250));
 
@@ -690,6 +689,7 @@ static esp_err_t restart_websocket_client(bool recreate_client)
      * Other senders still see s_connected=false until that event arrives.
      */
     s_ws_lifecycle_restart = false;
+    s_client_started_us = esp_timer_get_time();
     esp_err_t start_err = esp_websocket_client_start(s_client);
     if (start_err != ESP_OK) {
         ESP_LOGW(TAG, "websocket lifecycle start result=%s", esp_err_to_name(start_err));
@@ -702,52 +702,42 @@ static void reconnect_watchdog_task(void *arg)
     (void)arg;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        if (s_ws_lifecycle_restart) {
-            continue;
-        }
-
         int64_t now_us = esp_timer_get_time();
         int64_t since_attempt_us = s_last_reconnect_attempt_us > 0 ? now_us - s_last_reconnect_attempt_us : INT64_MAX;
-        int64_t down_us = s_link_down_started_us > 0 ? now_us - s_link_down_started_us : now_us;
+        int64_t down_us = s_link_down_started_us > 0 ? now_us - s_link_down_started_us : 0;
+        int64_t client_start_age_us = s_client_started_us > 0 ? now_us - s_client_started_us : now_us;
         int64_t hello_age_us = s_last_hello_us > 0 ? now_us - s_last_hello_us : INT64_MAX;
-        bool recreate_client = s_recreate_client_on_reconnect || !s_client;
-        const char *reason = "down";
-
-        if (websocket_ready() && !recreate_client) {
-            s_ws_restart_failures = 0;
+        tater_ws_recovery_state_t recovery_state = {
+            .lifecycle_restart_active = s_ws_lifecycle_restart,
+            .client_available = s_client != NULL,
+            .transport_connected = websocket_transport_ready(),
+            .hello_acked = s_hello_acked,
+            .auth_refresh_requested = s_recreate_client_on_reconnect,
+            .link_down_seen = s_link_down_started_us > 0,
+            .link_down_age_ms = down_us > 0 ? (uint64_t)(down_us / 1000) : 0,
+            .client_start_age_ms = client_start_age_us > 0 ? (uint64_t)(client_start_age_us / 1000) : 0,
+            .hello_age_ms = hello_age_us > 0 ? (uint64_t)(hello_age_us / 1000) : 0,
+            .since_attempt_ms = since_attempt_us > 0 ? (uint64_t)(since_attempt_us / 1000) : 0,
+        };
+        tater_ws_recovery_reason_t reason = tater_ws_recovery_decide(&recovery_state);
+        if (reason == TATER_WS_RECOVERY_NONE) {
+            if (websocket_ready()) {
+                s_ws_restart_failures = 0;
+            }
             continue;
-        }
-
-        if (s_recreate_client_on_reconnect) {
-            if (since_attempt_us < (int64_t)TATER_WS_RECONNECT_MIN_INTERVAL_MS * 1000) {
-                continue;
-            }
-            reason = "auth_refresh";
-        } else if (websocket_transport_ready() && !s_hello_acked) {
-            if (hello_age_us < (int64_t)TATER_WS_HELLO_ACK_TIMEOUT_MS * 1000
-                || since_attempt_us < (int64_t)TATER_WS_RECONNECT_MIN_INTERVAL_MS * 1000) {
-                continue;
-            }
-            reason = "hello_ack_timeout";
-            down_us = hello_age_us;
-        } else {
-            if (down_us < (int64_t)TATER_WS_RECONNECT_AFTER_MS * 1000
-                || since_attempt_us < (int64_t)TATER_WS_RECONNECT_MIN_INTERVAL_MS * 1000) {
-                continue;
-            }
         }
 
         s_last_reconnect_attempt_us = now_us;
         ESP_LOGW(
             TAG,
-            "websocket reconnect watchdog reason=%s down_ms=%lld client_connected=%d hello_acked=%d",
-            reason,
-            (long long)(down_us / 1000),
+            "websocket reconnect watchdog reason=%s down_ms=%llu client_connected=%d hello_acked=%d",
+            tater_ws_recovery_reason_name(reason),
+            (unsigned long long)recovery_state.link_down_age_ms,
             s_connected,
             s_hello_acked
         );
 
-        esp_err_t restart_err = restart_websocket_client(recreate_client);
+        esp_err_t restart_err = recreate_websocket_client(reason);
         if (restart_err == ESP_OK) {
             s_ws_restart_failures = 0;
             continue;
@@ -3169,6 +3159,10 @@ static const char *websocket_error_type_name(esp_websocket_error_type_t type)
 static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
+    if (data && data->client && data->client != s_client) {
+        ESP_LOGD(TAG, "ignoring stale websocket event id=%ld", (long)event_id);
+        return;
+    }
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
         s_connected = true;
@@ -3287,6 +3281,7 @@ void tater_protocol_start(void)
     if (s_ws_url[0]) {
         websocket_start_err = create_websocket_client();
         if (websocket_start_err == ESP_OK) {
+            s_client_started_us = esp_timer_get_time();
             websocket_start_err = esp_websocket_client_start(s_client);
         }
     }

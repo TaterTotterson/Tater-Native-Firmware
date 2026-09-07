@@ -88,8 +88,9 @@ negotiation and a safe 5V amplifier fallback.
 - Streams mic audio as 16 kHz, 16-bit, mono PCM binary WebSocket frames
 - Uses an audio transmit queue and reconnect-aware send path to reduce random
   voice-session disconnects
-- Uses native WebSocket auto-reconnect plus a lifecycle watchdog that can
-  recover a stuck client without deadlocking an in-flight hello or audio send
+- Uses a single-owner WebSocket lifecycle watchdog that destroys the previous
+  client before reconnecting, preventing overlapping connections while still
+  recovering a stuck client without deadlocking an in-flight hello or audio send
 - Supports native firmware OTA commands from Tater
 - Sends logs, OTA status, playback-finished events, timer events, and trainer
   feedback events
