@@ -14,6 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PLATFORMIO_CORE_DIR: ${{ github.workspace }}/.platformio
+      PLATFORMIO_VERSION: "6.1.19"
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -29,12 +30,12 @@ jobs:
         with:
           path: |
             .platformio
-          key: platformio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'dependencies.lock', 'main/idf_component.yml') }}
+          key: platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-${{ hashFiles('platformio.ini', 'dependencies.lock', 'main/idf_component.yml') }}
           restore-keys: |
-            platformio-${{ runner.os }}-
+            platformio-${{ runner.os }}-${{ env.PLATFORMIO_VERSION }}-
 
       - name: Install PlatformIO
-        run: python -m pip install --upgrade pip platformio
+        run: python -m pip install --upgrade pip "platformio==${PLATFORMIO_VERSION}"
 
       - name: Build firmware
         run: platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
