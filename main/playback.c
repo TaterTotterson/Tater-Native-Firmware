@@ -64,6 +64,14 @@ static const size_t PLAYBACK_OVERLAY_RING_FRAMES = TATER_SPK_SAMPLE_RATE;
 #ifndef TATER_MEDIA_PLAYBACK_TASK_PRIORITY
 #define TATER_MEDIA_PLAYBACK_TASK_PRIORITY 5
 #endif
+#ifndef TATER_FOREGROUND_PLAYBACK_TASK_PRIORITY
+/*
+ * Boards that keep local wake inference active during playback must feed all
+ * speaker paths at the same protected priority as synchronized media.  This
+ * covers ordinary replies, audio scenes, wake sounds, and tones too.
+ */
+#define TATER_FOREGROUND_PLAYBACK_TASK_PRIORITY TATER_MEDIA_PLAYBACK_TASK_PRIORITY
+#endif
 #ifndef TATER_MEDIA_DECODER_TASK_PRIORITY
 #define TATER_MEDIA_DECODER_TASK_PRIORITY 5
 #endif
@@ -3935,7 +3943,7 @@ static esp_err_t play_url(const char *url, bool notify_finished)
         "tater_playback",
         PLAYBACK_URL_TASK_STACK,
         request,
-        5,
+        TATER_FOREGROUND_PLAYBACK_TASK_PRIORITY,
         &s_task,
         1,
         &request->task_with_caps
@@ -4013,7 +4021,7 @@ esp_err_t tater_playback_play_scene(const tater_playback_scene_t *scene)
         "tater_scene",
         PLAYBACK_URL_TASK_STACK,
         request,
-        5,
+        TATER_FOREGROUND_PLAYBACK_TASK_PRIORITY,
         &s_task,
         1,
         &request->task_with_caps
@@ -4348,7 +4356,7 @@ static esp_err_t play_wav_data_local(const uint8_t *data, size_t len, const char
         "tater_wake_wav",
         8192,
         request,
-        5,
+        TATER_FOREGROUND_PLAYBACK_TASK_PRIORITY,
         &s_task,
         1,
         &request->task_with_caps
@@ -4390,7 +4398,7 @@ static esp_err_t play_tone_async(uint32_t frequency_hz, uint32_t duration_ms, ui
         "tater_tone",
         PLAYBACK_TONE_TASK_STACK,
         tone,
-        5,
+        TATER_FOREGROUND_PLAYBACK_TASK_PRIORITY,
         &s_task,
         1,
         &tone->task_with_caps

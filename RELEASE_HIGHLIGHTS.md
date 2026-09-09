@@ -1,4 +1,4 @@
-- Releases native firmware `0.3.19` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Prevents competing WebSocket reconnect paths from creating overlapping connections and repeated disconnect loops.
-- Makes the lifecycle watchdog the single reconnect owner and fully retires the previous client before opening a replacement.
-- Ignores late events from retired clients and throttles recovery attempts while preserving automatic recovery from stalled connections.
+- Releases native firmware `0.3.20` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Protects standalone replies, audio scenes, wake sounds, and tones from speaker-buffer starvation while local wake-word processing remains active.
+- Gives those speaker-feeding paths the same scheduling priority already used by synchronized media playback on Voice PE, Satellite1, and ReSpeaker.
+- Keeps ESP32-S3-BOX-3 playback scheduling unchanged while retaining a consistent combined firmware release version.
