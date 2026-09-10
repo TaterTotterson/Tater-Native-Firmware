@@ -6,6 +6,8 @@
 
 int main(void)
 {
+    assert(TATER_WS_HELLO_ACK_TIMEOUT_MS == 15000U);
+
     assert(tater_wifi_retry_delay_ms(0, 0) == 0);
     assert(tater_wifi_retry_delay_ms(1, 250) == 0);
     assert(tater_wifi_retry_delay_ms(2, 0) == 250);

@@ -31,6 +31,7 @@ idf_component_register(
         "timer_sound_assets.c"
         "wake_engine.cc"
         "wake_detection_policy.c"
+        "wake_model_policy.c"
         "wake_model_assets.c"
         "wake_sound_assets.c"
         "wifi_station.c"

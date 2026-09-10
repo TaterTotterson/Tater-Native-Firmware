@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "leds.h"
+#include "wake_model_policy.h"
 
 static const char *TAG = "tater_settings";
 
@@ -138,6 +139,7 @@ void tater_live_settings_init_defaults(void)
     strlcpy_or_empty(s_settings.wake_engine, "micro_wake_word", sizeof(s_settings.wake_engine));
     strlcpy_or_empty(s_settings.wake_word, "hey_tater", sizeof(s_settings.wake_word));
     strlcpy_or_empty(s_settings.wake_word_url, "", sizeof(s_settings.wake_word_url));
+    strlcpy_or_empty(s_settings.wake_model_revision, "", sizeof(s_settings.wake_model_revision));
     s_settings.wake_settings_generation = 0;
 #if TATER_BOARD_SAT1
     strlcpy_or_empty(s_settings.wake_sensitivity, "high", sizeof(s_settings.wake_sensitivity));
@@ -233,6 +235,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *wake_engine = cJSON_GetObjectItem(payload, "wake_engine");
     const cJSON *wake_word = cJSON_GetObjectItem(payload, "wake_word");
     const cJSON *wake_word_url = cJSON_GetObjectItem(payload, "wake_word_url");
+    const cJSON *wake_model_revision = cJSON_GetObjectItem(payload, "wake_model_revision");
     const cJSON *wake_sensitivity = cJSON_GetObjectItem(payload, "wake_sensitivity");
     const cJSON *wake_environment = cJSON_GetObjectItem(payload, "wake_environment");
     const cJSON *wake_threshold = cJSON_GetObjectItem(payload, "wake_threshold");
@@ -268,6 +271,17 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *led_replying_animation = cJSON_GetObjectItem(payload, "led_replying_animation");
     const cJSON *logging_level = cJSON_GetObjectItem(payload, "logging_level");
 
+    char previous_wake_word[sizeof(s_settings.wake_word)];
+    char previous_wake_word_url[sizeof(s_settings.wake_word_url)];
+    char previous_wake_model_revision[sizeof(s_settings.wake_model_revision)];
+    strlcpy_or_empty(previous_wake_word, s_settings.wake_word, sizeof(previous_wake_word));
+    strlcpy_or_empty(previous_wake_word_url, s_settings.wake_word_url, sizeof(previous_wake_word_url));
+    strlcpy_or_empty(
+        previous_wake_model_revision,
+        s_settings.wake_model_revision,
+        sizeof(previous_wake_model_revision)
+    );
+
     if (cJSON_IsString(wake_engine) && wake_engine->valuestring && wake_engine->valuestring[0]) {
         strlcpy_or_empty(s_settings.wake_engine, wake_engine->valuestring, sizeof(s_settings.wake_engine));
     }
@@ -276,6 +290,13 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     }
     if (cJSON_IsString(wake_word_url) && wake_word_url->valuestring) {
         strlcpy_or_empty(s_settings.wake_word_url, wake_word_url->valuestring, sizeof(s_settings.wake_word_url));
+    }
+    if (cJSON_IsString(wake_model_revision) && wake_model_revision->valuestring) {
+        strlcpy_or_empty(
+            s_settings.wake_model_revision,
+            wake_model_revision->valuestring,
+            sizeof(s_settings.wake_model_revision)
+        );
     }
     if (cJSON_IsString(wake_sensitivity) && wake_sensitivity->valuestring && wake_sensitivity->valuestring[0]) {
         strlcpy_or_empty(s_settings.wake_sensitivity, wake_sensitivity->valuestring, sizeof(s_settings.wake_sensitivity));
@@ -384,7 +405,15 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     if (cJSON_IsString(logging_level) && logging_level->valuestring && logging_level->valuestring[0]) {
         strlcpy_or_empty(s_settings.logging_level, logging_level->valuestring, sizeof(s_settings.logging_level));
     }
-    s_settings.wake_settings_generation++;
+    if (tater_wake_model_config_changed(
+            previous_wake_word,
+            previous_wake_word_url,
+            previous_wake_model_revision,
+            s_settings.wake_word,
+            s_settings.wake_word_url,
+            s_settings.wake_model_revision)) {
+        s_settings.wake_settings_generation++;
+    }
 
     ESP_LOGI(
         TAG,
@@ -437,6 +466,7 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddStringToObject(settings, "wake_engine", s_settings.wake_engine);
     cJSON_AddStringToObject(settings, "wake_word", s_settings.wake_word);
     cJSON_AddStringToObject(settings, "wake_word_url", s_settings.wake_word_url);
+    cJSON_AddStringToObject(settings, "wake_model_revision", s_settings.wake_model_revision);
     cJSON_AddNumberToObject(settings, "wake_settings_generation", s_settings.wake_settings_generation);
     cJSON_AddStringToObject(settings, "wake_sensitivity", s_settings.wake_sensitivity);
     cJSON_AddStringToObject(settings, "wake_environment", s_settings.wake_environment);

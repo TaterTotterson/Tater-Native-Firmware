@@ -1,4 +1,4 @@
-- Releases native firmware `0.3.21` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Keeps wake-word listening active during uninterrupted music on Voice PE, Satellite1, and ReSpeaker through their hardware-AEC microphone paths.
-- Monitors replies and announcements only when barge-in is enabled, preventing a satellite's own reply from waking it when barge-in is off.
-- Preserves the dedicated `Stop` wake model while a timer or alarm is ringing, independently of the normal playback policy.
+- Releases native firmware `0.3.22` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Gives Tater's WebSocket handshake its full server response window before recovery restarts a genuinely stuck connection.
+- Keeps the active or cached custom wake model across ordinary reconnects instead of downloading it again when unchanged settings are replayed.
+- Refreshes a custom wake model when its selection, URL, or supplied package revision actually changes.

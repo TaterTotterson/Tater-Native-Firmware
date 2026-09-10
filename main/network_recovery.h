@@ -17,7 +17,8 @@ extern "C" {
  */
 #define TATER_WS_RECONNECT_AFTER_MS (3000U)
 #define TATER_WS_RECONNECT_MIN_INTERVAL_MS (5000U)
-#define TATER_WS_HELLO_ACK_TIMEOUT_MS (5000U)
+/* Allow Tater's 10-second server handshake window to finish before recovery. */
+#define TATER_WS_HELLO_ACK_TIMEOUT_MS (15000U)
 #define TATER_WS_INITIAL_CONNECT_TIMEOUT_MS (20000U)
 
 typedef enum {
