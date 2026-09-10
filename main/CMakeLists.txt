@@ -13,6 +13,7 @@ idf_component_register(
         "boards/voice_pe/button_voice_pe.c"
         "boards/voice_pe/led_ring_voice_pe.c"
         "cache_storage.c"
+        "display_clock.c"
         "doa_activity_gate.c"
         "doa_direction_memory.c"
         "native_settings.c"

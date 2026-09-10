@@ -1,4 +1,4 @@
-- Releases native firmware `0.3.23` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Restores the WebSocket library's single, serialized reconnect path for ordinary network and server disconnects.
-- Removes the competing application reconnect watchdog that could leave overlapping connection attempts during recovery.
-- Keeps a one-time client refresh after pairing so newly saved device credentials are used on future reconnects.
+- Releases native firmware `0.3.24` for ESP32-S3-BOX-3; the other satellite targets remain on `0.3.23`.
+- Reuses one serialized keep-alive HTTP session for the S3 Box clock, sensor, event, and snapshot requests.
+- Prevents the display pollers from competing for the ESP32's limited TCP connections.
+- Keeps the clock visible from live Tater time settings even when the optional display feed is unavailable.

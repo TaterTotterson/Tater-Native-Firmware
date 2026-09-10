@@ -14,6 +14,7 @@
 #include "driver/gpio.h"
 #include "driver/ledc.h"
 #include "driver/spi_master.h"
+#include "display_clock.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
@@ -94,6 +95,14 @@ typedef struct {
     uint16_t height;
 } display_jpeg_session_t;
 
+typedef struct {
+    uint8_t *data;
+    size_t length;
+    size_t capacity;
+    size_t max_bytes;
+    esp_err_t error;
+} display_http_response_t;
+
 static const rgb_t TATER_ORANGE = {227, 36, 0};
 static const rgb_t TATER_ORANGE_DIM = {58, 12, 0};
 static const rgb_t TATER_DISPLAY_ORANGE = {255, 138, 0};
@@ -127,6 +136,8 @@ static volatile int64_t s_feedback_until_us;
 static SemaphoreHandle_t s_feed_lock;
 static display_feed_t s_feed;
 static SemaphoreHandle_t s_notification_lock;
+static SemaphoreHandle_t s_http_lock;
+static esp_http_client_handle_t s_http_client;
 static display_notification_t s_notification;
 static uint16_t *s_notification_image;
 static uint32_t s_last_display_event_seq;
@@ -1152,57 +1163,179 @@ static esp_err_t parse_display_feed(const char *json, size_t json_len, display_f
     return ESP_OK;
 }
 
+static void *display_alloc(size_t size)
+{
+    void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ptr) {
+        ptr = heap_caps_malloc(size, MALLOC_CAP_8BIT);
+    }
+    return ptr;
+}
+
+static uint8_t *display_realloc(uint8_t *data, size_t size)
+{
+    if (!data) {
+        return display_alloc(size);
+    }
+    uint8_t *grown = heap_caps_realloc(data, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!grown) {
+        grown = heap_caps_realloc(data, size, MALLOC_CAP_8BIT);
+    }
+    return grown;
+}
+
+static esp_err_t display_http_event_handler(esp_http_client_event_t *event)
+{
+    if (!event || event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0) {
+        return ESP_OK;
+    }
+
+    display_http_response_t *response = event->user_data;
+    if (!response || response->error != ESP_OK) {
+        return response ? response->error : ESP_ERR_INVALID_STATE;
+    }
+
+    size_t incoming = (size_t)event->data_len;
+    if (incoming > response->max_bytes - response->length) {
+        response->error = ESP_ERR_INVALID_SIZE;
+        return response->error;
+    }
+
+    size_t needed = response->length + incoming;
+    if (needed > response->capacity) {
+        size_t next_capacity = response->capacity ? response->capacity * 2 : 4096;
+        int64_t content_length = esp_http_client_get_content_length(event->client);
+        if (content_length > 0 && (uint64_t)content_length <= response->max_bytes) {
+            next_capacity = (size_t)content_length;
+        }
+        if (next_capacity < needed) {
+            next_capacity = needed;
+        }
+        if (next_capacity > response->max_bytes) {
+            next_capacity = response->max_bytes;
+        }
+        uint8_t *grown = display_realloc(response->data, next_capacity);
+        if (!grown) {
+            response->error = ESP_ERR_NO_MEM;
+            return response->error;
+        }
+        response->data = grown;
+        response->capacity = next_capacity;
+    }
+
+    memcpy(response->data + response->length, event->data, incoming);
+    response->length += incoming;
+    return ESP_OK;
+}
+
+static esp_err_t display_http_request(
+    const char *url,
+    size_t max_bytes,
+    uint8_t **out_data,
+    size_t *out_len,
+    int *out_status
+)
+{
+    if (!url || !url[0] || max_bytes == 0 || !out_data || !out_len || !s_http_lock) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_data = NULL;
+    *out_len = 0;
+    if (out_status) {
+        *out_status = 0;
+    }
+
+    if (xSemaphoreTake(s_http_lock, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = ESP_OK;
+    if (!s_http_client) {
+        esp_http_client_config_t cfg = {
+            .url = url,
+            .timeout_ms = 5000,
+            .buffer_size = 2048,
+            .buffer_size_tx = 1024,
+            .event_handler = display_http_event_handler,
+            .keep_alive_enable = true,
+            .keep_alive_idle = 30,
+            .keep_alive_interval = 10,
+            .keep_alive_count = 3,
+        };
+        s_http_client = esp_http_client_init(&cfg);
+        if (!s_http_client) {
+            err = ESP_ERR_NO_MEM;
+        }
+    } else {
+        err = esp_http_client_set_url(s_http_client, url);
+    }
+
+    display_http_response_t response = {
+        .max_bytes = max_bytes,
+        .error = ESP_OK,
+    };
+    if (err == ESP_OK) {
+        err = esp_http_client_set_user_data(s_http_client, &response);
+    }
+    if (err == ESP_OK) {
+        const char *token = tater_protocol_token();
+        if (token && token[0]) {
+            err = esp_http_client_set_header(s_http_client, "X-Tater-Token", token);
+        } else {
+            (void)esp_http_client_delete_header(s_http_client, "X-Tater-Token");
+        }
+    }
+    if (err == ESP_OK) {
+        err = esp_http_client_set_method(s_http_client, HTTP_METHOD_GET);
+    }
+    if (err == ESP_OK) {
+        err = esp_http_client_perform(s_http_client);
+    }
+
+    int status = s_http_client ? esp_http_client_get_status_code(s_http_client) : 0;
+    if (out_status) {
+        *out_status = status;
+    }
+    if (err == ESP_OK && response.error != ESP_OK) {
+        err = response.error;
+    }
+    if (err == ESP_OK && status != 200) {
+        err = ESP_FAIL;
+    }
+    if (err == ESP_OK && response.length == 0) {
+        err = ESP_FAIL;
+    }
+
+    if (s_http_client) {
+        (void)esp_http_client_set_user_data(s_http_client, NULL);
+        if (err != ESP_OK) {
+            esp_http_client_close(s_http_client);
+        }
+    }
+    if (err == ESP_OK) {
+        *out_data = response.data;
+        *out_len = response.length;
+    } else {
+        free(response.data);
+    }
+    xSemaphoreGive(s_http_lock);
+    return err;
+}
+
 static esp_err_t fetch_display_feed_url(const char *url, display_feed_t *feed)
 {
     if (!url || !url[0] || !feed) {
         return ESP_ERR_INVALID_ARG;
     }
-    char *body = heap_caps_malloc(DISPLAY_FEED_RESPONSE_MAX + 1, MALLOC_CAP_8BIT);
-    if (!body) {
-        return ESP_ERR_NO_MEM;
-    }
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .timeout_ms = 3000,
-        .buffer_size = 1024,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) {
-        free(body);
-        return ESP_FAIL;
-    }
-    const char *token = tater_protocol_token();
-    if (token && token[0]) {
-        esp_http_client_set_header(client, "X-Tater-Token", token);
-    }
-    esp_err_t err = esp_http_client_open(client, 0);
+    uint8_t *body = NULL;
+    size_t body_len = 0;
+    int status = 0;
+    esp_err_t err = display_http_request(url, DISPLAY_FEED_RESPONSE_MAX, &body, &body_len, &status);
     if (err == ESP_OK) {
-        (void)esp_http_client_fetch_headers(client);
-        int total = 0;
-        while (total < DISPLAY_FEED_RESPONSE_MAX) {
-            int got = esp_http_client_read(client, body + total, DISPLAY_FEED_RESPONSE_MAX - total);
-            if (got < 0) {
-                err = ESP_FAIL;
-                break;
-            }
-            if (got == 0) {
-                break;
-            }
-            total += got;
-        }
-        if (err == ESP_OK) {
-            int status = esp_http_client_get_status_code(client);
-            body[total] = '\0';
-            if (status == 200 && total > 0) {
-                err = parse_display_feed(body, (size_t)total, feed);
-            } else {
-                ESP_LOGW(TAG, "display feed status=%d bytes=%d", status, total);
-                err = ESP_FAIL;
-            }
-        }
+        err = parse_display_feed((const char *)body, body_len, feed);
+    } else {
+        ESP_LOGW(TAG, "display feed request failed err=%s status=%d", esp_err_to_name(err), status);
     }
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
     free(body);
     return err;
 }
@@ -1225,105 +1358,17 @@ static bool fetch_display_feed(void)
     return false;
 }
 
-static void *display_alloc(size_t size)
-{
-    void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!ptr) {
-        ptr = heap_caps_malloc(size, MALLOC_CAP_8BIT);
-    }
-    return ptr;
-}
-
 static esp_err_t fetch_http_bytes(const char *url, size_t max_bytes, uint8_t **out_data, size_t *out_len)
 {
     if (!url || !url[0] || !out_data || !out_len || max_bytes == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    *out_data = NULL;
-    *out_len = 0;
-    esp_http_client_config_t cfg = {
-        .url = url,
-        .timeout_ms = 5000,
-        .buffer_size = 2048,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) {
-        return ESP_FAIL;
+    int status = 0;
+    esp_err_t err = display_http_request(url, max_bytes, out_data, out_len, &status);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "display request failed err=%s status=%d", esp_err_to_name(err), status);
     }
-    const char *token = tater_protocol_token();
-    if (token && token[0]) {
-        esp_http_client_set_header(client, "X-Tater-Token", token);
-    }
-    esp_err_t err = esp_http_client_open(client, 0);
-    uint8_t *data = NULL;
-    size_t total = 0;
-    size_t capacity = 0;
-    int64_t expected_length = -1;
-    if (err == ESP_OK) {
-        (void)esp_http_client_fetch_headers(client);
-        int status = esp_http_client_get_status_code(client);
-        int64_t content_length = esp_http_client_get_content_length(client);
-        if (status != 200 || content_length > (int64_t)max_bytes) {
-            ESP_LOGW(TAG, "display image status=%d content_length=%lld", status, (long long)content_length);
-            err = ESP_FAIL;
-        } else {
-            expected_length = content_length;
-            capacity = content_length > 0 ? (size_t)content_length : 64 * 1024;
-            if (capacity > max_bytes) {
-                capacity = max_bytes;
-            }
-            if (capacity == 0) {
-                capacity = 1;
-            }
-            data = display_alloc(capacity);
-            if (!data) {
-                err = ESP_ERR_NO_MEM;
-            }
-        }
-    }
-    while (err == ESP_OK) {
-        if (expected_length >= 0 && total >= (size_t)expected_length) {
-            break;
-        }
-        if (total == capacity) {
-            if (capacity >= max_bytes) {
-                err = ESP_ERR_INVALID_SIZE;
-                break;
-            }
-            size_t next_capacity = capacity * 2;
-            if (next_capacity > max_bytes) {
-                next_capacity = max_bytes;
-            }
-            uint8_t *grown = heap_caps_realloc(data, next_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (!grown) {
-                grown = heap_caps_realloc(data, next_capacity, MALLOC_CAP_8BIT);
-            }
-            if (!grown) {
-                err = ESP_ERR_NO_MEM;
-                break;
-            }
-            data = grown;
-            capacity = next_capacity;
-        }
-        int got = esp_http_client_read(client, (char *)data + total, capacity - total);
-        if (got < 0) {
-            err = ESP_FAIL;
-            break;
-        }
-        if (got == 0) {
-            break;
-        }
-        total += (size_t)got;
-    }
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    if (err != ESP_OK || total == 0) {
-        free(data);
-        return err == ESP_OK ? ESP_FAIL : err;
-    }
-    *out_data = data;
-    *out_len = total;
-    return ESP_OK;
+    return err;
 }
 
 static UINT display_jpeg_input(JDEC *decoder, BYTE *buffer, UINT requested)
@@ -1654,13 +1699,26 @@ static void render_home_dashboard(const tater_live_settings_t *settings)
 
     display_feed_t feed;
     display_feed_snapshot(&feed);
+    uint32_t local_seconds = 0;
+    char local_clock_time[12] = {0};
+    char local_clock_ampm[8] = {0};
+    bool local_clock_valid = tater_live_settings_local_seconds(&local_seconds)
+        && tater_display_format_local_clock(
+            local_seconds,
+            local_clock_time,
+            sizeof(local_clock_time),
+            local_clock_ampm,
+            sizeof(local_clock_ampm)
+        );
+    const char *best_clock_time = local_clock_valid ? local_clock_time : (feed.has_clock ? feed.clock_time : NULL);
+    const char *best_clock_ampm = local_clock_valid ? local_clock_ampm : (feed.clock_ampm[0] ? feed.clock_ampm : NULL);
     if (feed.has_stats) {
         if (feed.clock_date[0]) {
             draw_centered_text(42, feed.clock_date, scale_for_width(feed.clock_date, 2, 300), TATER_TEXT_MUTED);
         }
-        draw_centered_text(62, feed.has_clock ? feed.clock_time : "--:--", 7, TATER_WHITE);
-        if (feed.clock_ampm[0]) {
-            draw_right_fit_text(310, 88, feed.clock_ampm, 2, 38, TATER_TEXT_MUTED);
+        draw_centered_text(62, best_clock_time ? best_clock_time : "--:--", 7, TATER_WHITE);
+        if (best_clock_ampm) {
+            draw_right_fit_text(310, 88, best_clock_ampm, 2, 38, TATER_TEXT_MUTED);
         }
         render_sensor_card(12, 128, "INSIDE", feed.temp_in, feed.humidity_in);
         render_sensor_card(166, 128, "OUTSIDE", feed.temp_out, feed.humidity_out);
@@ -1680,18 +1738,20 @@ static void render_home_dashboard(const tater_live_settings_t *settings)
     const char *device_name = tater_protocol_device_name();
     const char *room = tater_protocol_room();
     const char *date_text = feed.clock_date[0] ? feed.clock_date : TATER_FIRMWARE_VERSION;
-    const char *clock_text = feed.has_clock ? feed.clock_time : (tater_protocol_is_connected() ? "ONLINE" : "WAIT");
+    const char *clock_text = best_clock_time ? best_clock_time : (tater_protocol_is_connected() ? "ONLINE" : "WAIT");
+    const char *clock_ampm = best_clock_ampm;
     if (s_state == TATER_STATE_PROVISIONING) {
         date_text = "TATER-SETUP";
         clock_text = "SETUP";
+        clock_ampm = NULL;
     } else if (s_state == TATER_STATE_DISCONNECTED) {
-        clock_text = feed.has_clock ? feed.clock_time : "WAIT";
+        clock_text = best_clock_time ? best_clock_time : "WAIT";
     }
 
     draw_centered_text(44, date_text, scale_for_width(date_text, 2, 300), TATER_TEXT_MUTED);
     draw_centered_text(62, clock_text, 7, TATER_WHITE);
-    if (!feed.has_stats && feed.has_clock && feed.clock_ampm[0]) {
-        draw_text(252, 88, feed.clock_ampm, 2, TATER_TEXT_MUTED);
+    if (clock_ampm) {
+        draw_text(252, 88, clock_ampm, 2, TATER_TEXT_MUTED);
     }
     render_info_card(12, 128, "SERVER", server);
     render_info_card(166, 128, room && room[0] ? "ROOM" : "DEVICE", room && room[0] ? room : device_name);
@@ -2178,6 +2238,8 @@ esp_err_t tater_leds_init(void)
     ESP_RETURN_ON_FALSE(s_feed_lock, ESP_ERR_NO_MEM, TAG, "display feed lock alloc failed");
     s_notification_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_notification_lock, ESP_ERR_NO_MEM, TAG, "display notification lock alloc failed");
+    s_http_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_http_lock, ESP_ERR_NO_MEM, TAG, "display HTTP lock alloc failed");
     display_feed_defaults(&s_feed);
     memset(&s_notification, 0, sizeof(s_notification));
     s_notification_image = display_alloc(DISPLAY_EVENT_IMAGE_WIDTH * DISPLAY_EVENT_IMAGE_HEIGHT * sizeof(uint16_t));
