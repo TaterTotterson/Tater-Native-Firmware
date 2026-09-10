@@ -4447,3 +4447,23 @@ bool tater_playback_media_session_active(void)
     xSemaphoreGive(s_media_session.lock);
     return active;
 }
+
+bool tater_playback_uninterrupted_media_active(void)
+{
+    if (!s_media_session.lock) {
+        return false;
+    }
+    if (xSemaphoreTake(s_media_session.lock, 0) != pdTRUE) {
+        /* A transient state change should pause detection, not admit an echo. */
+        return false;
+    }
+    bool active =
+        s_media_session.active
+        && s_media_session.accepting_overlays
+        && !s_media_session.overlay_pending
+        && !s_media_session.overlay_active
+        && !s_media_session.overlay_releasing
+        && !s_abort;
+    xSemaphoreGive(s_media_session.lock);
+    return active;
+}

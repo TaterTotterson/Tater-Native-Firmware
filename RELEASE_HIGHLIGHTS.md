@@ -1,4 +1,4 @@
-- Releases native firmware `0.3.20` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Protects standalone replies, audio scenes, wake sounds, and tones from speaker-buffer starvation while local wake-word processing remains active.
-- Gives those speaker-feeding paths the same scheduling priority already used by synchronized media playback on Voice PE, Satellite1, and ReSpeaker.
-- Keeps ESP32-S3-BOX-3 playback scheduling unchanged while retaining a consistent combined firmware release version.
+- Releases native firmware `0.3.21` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Keeps wake-word listening active during uninterrupted music on Voice PE, Satellite1, and ReSpeaker through their hardware-AEC microphone paths.
+- Monitors replies and announcements only when barge-in is enabled, preventing a satellite's own reply from waking it when barge-in is off.
+- Preserves the dedicated `Stop` wake model while a timer or alarm is ringing, independently of the normal playback policy.

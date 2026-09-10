@@ -48,9 +48,9 @@ updates use the normal `satellite1` OTA family.
 - four-microphone fractional-delay, delay-and-sum beamforming with continuous
   talker tracking, per-microphone gain calibration, unhealthy-microphone
   fallback, and automatic omni steering during playback
-- wake-word detection that remains active during speaker playback using the
-  XMOS hardware-referenced AEC channel, independent of the barge-in setting;
-  barge-in only decides whether a confirmed wake stops the playing audio
+- wake-word detection that remains active during uninterrupted music using the
+  XMOS hardware-referenced AEC channel; replies and announcements are monitored
+  only when barge-in is enabled so the satellite cannot wake itself
 - sensitivity settings that adjust the effective detector threshold, plus a
   `tv_nearby` profile that admits stronger candidates and requires Tater wake
   verification before opening a voice session (with fail-open handling when

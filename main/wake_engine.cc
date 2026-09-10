@@ -2385,11 +2385,6 @@ bool runtime_enabled()
     if (tater_ota_is_running() || !tater_protocol_can_start_local_wake()) {
         return false;
     }
-#if !TATER_CAP_WAKE_DURING_PLAYBACK
-    if (tater_playback_is_playing() && !settings->barge_in_enabled) {
-        return false;
-    }
-#endif
     return true;
 }
 

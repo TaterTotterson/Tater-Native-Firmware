@@ -109,8 +109,9 @@ negotiation and a safe 5V amplifier fallback.
 - Optional good-wake and close-miss raw PCM upload hooks for the trainer
 - Continued-chat mic reopen
 - On Voice PE, Satellite1, and ReSpeaker XVF3800, wake-word listening remains
-  active during playback through their hardware-AEC microphone paths; barge-in
-  only controls whether a confirmed wake stops the playing audio
+  active during uninterrupted music through their hardware-AEC microphone
+  paths. Replies and announcements are monitored only when barge-in is enabled,
+  preventing the satellite's own speech from waking it
 - On S3 Box, playback-time wake remains opt-in through barge-in until its
   firmware AEC path is ready for production use
 - Firmware-side adaptive AEC with live strength and delay settings

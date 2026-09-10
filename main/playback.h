@@ -71,3 +71,4 @@ esp_err_t tater_playback_play_tone_local(uint32_t frequency_hz, uint32_t duratio
 void tater_playback_stop(void);
 bool tater_playback_is_playing(void);
 bool tater_playback_media_session_active(void);
+bool tater_playback_uninterrupted_media_active(void);

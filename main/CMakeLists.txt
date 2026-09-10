@@ -23,6 +23,7 @@ idf_component_register(
         "playback_mix.c"
         "playback_recovery.c"
         "playback_sync.c"
+        "playback_wake_policy.c"
         "provisioning.c"
         "server_url.c"
         "tater_config.c"

@@ -30,6 +30,7 @@
 #include "network_recovery.h"
 #include "ota_update.h"
 #include "playback.h"
+#include "playback_wake_policy.h"
 #include "server_url.h"
 #include "timer_sound_assets.h"
 #include "wake_engine.h"
@@ -3356,11 +3357,13 @@ bool tater_protocol_can_start_local_wake(void)
     if (settings && settings->muted) {
         return false;
     }
-#if !TATER_CAP_WAKE_DURING_PLAYBACK
-    if (tater_playback_is_playing()) {
-        return settings && settings->barge_in_enabled;
+    if (!tater_playback_wake_allowed(
+            tater_playback_is_playing(),
+            tater_playback_uninterrupted_media_active(),
+            settings && settings->barge_in_enabled,
+            TATER_CAP_WAKE_DURING_PLAYBACK != 0)) {
+        return false;
     }
-#endif
     return s_current_state != TATER_STATE_OTA && s_current_state != TATER_STATE_PROVISIONING;
 }
 
