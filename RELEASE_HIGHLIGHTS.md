@@ -1,4 +1,4 @@
-- Releases native firmware `0.3.22` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Gives Tater's WebSocket handshake its full server response window before recovery restarts a genuinely stuck connection.
-- Keeps the active or cached custom wake model across ordinary reconnects instead of downloading it again when unchanged settings are replayed.
-- Refreshes a custom wake model when its selection, URL, or supplied package revision actually changes.
+- Releases native firmware `0.3.23` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Restores the WebSocket library's single, serialized reconnect path for ordinary network and server disconnects.
+- Removes the competing application reconnect watchdog that could leave overlapping connection attempts during recovery.
+- Keeps a one-time client refresh after pairing so newly saved device credentials are used on future reconnects.

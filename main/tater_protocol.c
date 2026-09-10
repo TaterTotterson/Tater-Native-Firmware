@@ -1,6 +1,5 @@
 #include "tater_protocol.h"
 
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,10 +85,6 @@ static uint32_t s_voice_generation;
 static int64_t s_voice_started_us;
 static char s_voice_source[24];
 static int64_t s_last_link_down_us;
-static int64_t s_link_down_started_us;
-static int64_t s_client_started_us;
-static int64_t s_last_reconnect_attempt_us;
-static int64_t s_last_hello_us;
 static bool s_hello_acked;
 static bool s_playback_return_armed;
 static tater_state_t s_playback_return_state = TATER_STATE_IDLE;
@@ -122,7 +117,6 @@ static int s_last_ws_http_status;
 static int s_last_audio_send_result;
 static uint32_t s_last_audio_send_samples;
 static uint32_t s_audio_send_failure_total;
-static bool s_recreate_client_on_reconnect;
 static volatile bool s_ws_lifecycle_restart;
 static uint32_t s_ws_restart_count;
 static uint32_t s_ws_restart_failures;
@@ -218,7 +212,6 @@ typedef struct {
     bool task_with_caps;
 } tater_voice_watchdog_args_t;
 
-#define TATER_WS_RESTART_FAILURE_LIMIT 3
 #define TATER_JSON_SEND_LINK_DOWN_FAILURES 3
 #define TATER_PLAYBACK_VISUAL_HOLD_MS 30000
 
@@ -563,9 +556,6 @@ static void mark_link_down(const char *detail)
     bool changed = s_connected || s_voice_active;
     int64_t now_us = esp_timer_get_time();
     s_last_link_down_us = now_us;
-    if (s_link_down_started_us <= 0) {
-        s_link_down_started_us = now_us;
-    }
     snprintf(s_last_link_down_detail, sizeof(s_last_link_down_detail), "%s", detail ? detail : "disconnected");
     s_connected = false;
     s_hello_acked = false;
@@ -619,11 +609,11 @@ static esp_err_t create_websocket_client(void)
         .keep_alive_idle = 30,
         .keep_alive_interval = 10,
         .keep_alive_count = 3,
-        /* The application watchdog below exclusively owns reconnects. */
-        .disable_auto_reconnect = true,
+        /* Let the client serialize normal reconnect attempts in its own task. */
+        .disable_auto_reconnect = false,
         .reconnect_timeout_ms = 3000,
         .network_timeout_ms = 15000,
-        .enable_close_reconnect = false,
+        .enable_close_reconnect = true,
         .headers = strlen(s_auth_header) > 0 ? s_auth_header : NULL,
     };
     if (strncasecmp(s_ws_url, "wss://", 6) == 0) {
@@ -642,11 +632,11 @@ static esp_err_t create_websocket_client(void)
     return ESP_OK;
 }
 
-static esp_err_t recreate_websocket_client(tater_ws_recovery_reason_t reason)
+static esp_err_t refresh_websocket_auth_client(void)
 {
     s_ws_lifecycle_restart = true;
     s_ws_restart_count++;
-    mark_link_down(tater_ws_recovery_reason_name(reason));
+    mark_link_down("websocket auth refresh");
 
     /*
      * Stop new sends through websocket_ready(), then briefly acquire the send
@@ -681,8 +671,6 @@ static esp_err_t recreate_websocket_client(tater_ws_recovery_reason_t reason)
         ESP_LOGE(TAG, "websocket lifecycle create result=%s", esp_err_to_name(create_err));
         return create_err;
     }
-    s_recreate_client_on_reconnect = false;
-
     vTaskDelay(pdMS_TO_TICKS(250));
 
     /*
@@ -690,7 +678,6 @@ static esp_err_t recreate_websocket_client(tater_ws_recovery_reason_t reason)
      * Other senders still see s_connected=false until that event arrives.
      */
     s_ws_lifecycle_restart = false;
-    s_client_started_us = esp_timer_get_time();
     esp_err_t start_err = esp_websocket_client_start(s_client);
     if (start_err != ESP_OK) {
         ESP_LOGW(TAG, "websocket lifecycle start result=%s", esp_err_to_name(start_err));
@@ -698,66 +685,20 @@ static esp_err_t recreate_websocket_client(tater_ws_recovery_reason_t reason)
     return start_err;
 }
 
-static void reconnect_watchdog_task(void *arg)
+static void websocket_auth_refresh_task(void *arg)
 {
     (void)arg;
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        int64_t now_us = esp_timer_get_time();
-        int64_t since_attempt_us = s_last_reconnect_attempt_us > 0 ? now_us - s_last_reconnect_attempt_us : INT64_MAX;
-        int64_t down_us = s_link_down_started_us > 0 ? now_us - s_link_down_started_us : 0;
-        int64_t client_start_age_us = s_client_started_us > 0 ? now_us - s_client_started_us : now_us;
-        int64_t hello_age_us = s_last_hello_us > 0 ? now_us - s_last_hello_us : INT64_MAX;
-        tater_ws_recovery_state_t recovery_state = {
-            .lifecycle_restart_active = s_ws_lifecycle_restart,
-            .client_available = s_client != NULL,
-            .transport_connected = websocket_transport_ready(),
-            .hello_acked = s_hello_acked,
-            .auth_refresh_requested = s_recreate_client_on_reconnect,
-            .link_down_seen = s_link_down_started_us > 0,
-            .link_down_age_ms = down_us > 0 ? (uint64_t)(down_us / 1000) : 0,
-            .client_start_age_ms = client_start_age_us > 0 ? (uint64_t)(client_start_age_us / 1000) : 0,
-            .hello_age_ms = hello_age_us > 0 ? (uint64_t)(hello_age_us / 1000) : 0,
-            .since_attempt_ms = since_attempt_us > 0 ? (uint64_t)(since_attempt_us / 1000) : 0,
-        };
-        tater_ws_recovery_reason_t reason = tater_ws_recovery_decide(&recovery_state);
-        if (reason == TATER_WS_RECOVERY_NONE) {
-            if (websocket_ready()) {
-                s_ws_restart_failures = 0;
-            }
-            continue;
-        }
-
-        s_last_reconnect_attempt_us = now_us;
-        ESP_LOGW(
-            TAG,
-            "websocket reconnect watchdog reason=%s down_ms=%llu client_connected=%d hello_acked=%d",
-            tater_ws_recovery_reason_name(reason),
-            (unsigned long long)recovery_state.link_down_age_ms,
-            s_connected,
-            s_hello_acked
-        );
-
-        esp_err_t restart_err = recreate_websocket_client(reason);
-        if (restart_err == ESP_OK) {
-            s_ws_restart_failures = 0;
-            continue;
-        }
-
+    /* Leave the hello callback before stopping the client that delivered it. */
+    vTaskDelay(pdMS_TO_TICKS(250));
+    ESP_LOGI(TAG, "refreshing websocket client with saved device credential");
+    esp_err_t refresh_err = refresh_websocket_auth_client();
+    if (refresh_err != ESP_OK) {
         s_ws_restart_failures++;
-        ESP_LOGE(
-            TAG,
-            "websocket lifecycle recovery failed count=%lu/%u err=%s",
-            (unsigned long)s_ws_restart_failures,
-            TATER_WS_RESTART_FAILURE_LIMIT,
-            esp_err_to_name(restart_err)
-        );
-        if (s_ws_restart_failures >= TATER_WS_RESTART_FAILURE_LIMIT) {
-            ESP_LOGE(TAG, "websocket client cannot restart; rebooting for network stack recovery");
-            vTaskDelay(pdMS_TO_TICKS(500));
-            esp_restart();
-        }
+        ESP_LOGE(TAG, "websocket auth refresh failed: %s", esp_err_to_name(refresh_err));
+    } else {
+        s_ws_restart_failures = 0;
     }
+    vTaskDelete(NULL);
 }
 
 static esp_err_t audio_tx_init(void)
@@ -2372,7 +2313,6 @@ static void send_simple_result(
 static void send_hello(void)
 {
     s_hello_acked = false;
-    s_last_hello_us = esp_timer_get_time();
     cJSON *root = new_envelope("hello");
     cJSON *payload = cJSON_GetObjectItem(root, "payload");
     cJSON_AddStringToObject(payload, "device_id", s_device_id);
@@ -2515,8 +2455,18 @@ static void handle_text_message(const char *data, int len)
                 if (save_err == ESP_OK) {
                     strlcpy(s_config.token, device_token, sizeof(s_config.token));
                     snprintf(s_auth_header, sizeof(s_auth_header), "X-Tater-Token: %s\r\n", s_config.token);
-                    s_recreate_client_on_reconnect = true;
                     ESP_LOGI(TAG, "paired with Tater; saved device credential and queued websocket auth refresh");
+                    BaseType_t task_ok = xTaskCreate(
+                        websocket_auth_refresh_task,
+                        "tater_ws_auth",
+                        4096,
+                        NULL,
+                        4,
+                        NULL
+                    );
+                    if (task_ok != pdPASS) {
+                        ESP_LOGE(TAG, "websocket auth refresh task create failed");
+                    }
                 } else {
                     ESP_LOGE(TAG, "device credential save failed: %s", esp_err_to_name(save_err));
                     emit_state(TATER_STATE_ERROR, "credential save failed");
@@ -3169,8 +3119,6 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
         s_connected = true;
         s_hello_acked = false;
         s_json_send_failure_streak = 0;
-        s_link_down_started_us = 0;
-        s_last_reconnect_attempt_us = 0;
         clear_voice_capture_state();
         s_rx_text_logs = 0;
         ESP_LOGI(TAG, "connected %s", s_ws_url);
@@ -3282,7 +3230,6 @@ void tater_protocol_start(void)
     if (s_ws_url[0]) {
         websocket_start_err = create_websocket_client();
         if (websocket_start_err == ESP_OK) {
-            s_client_started_us = esp_timer_get_time();
             websocket_start_err = esp_websocket_client_start(s_client);
         }
     }
@@ -3291,12 +3238,6 @@ void tater_protocol_start(void)
         emit_state(TATER_STATE_ERROR, s_ws_url[0] ? "websocket startup failed" : "invalid server URL");
     }
 
-    if (s_ws_url[0]) {
-        BaseType_t task_ok = xTaskCreate(reconnect_watchdog_task, "tater_ws_reconnect", 4096, NULL, 4, NULL);
-        if (task_ok != pdPASS) {
-            ESP_LOGE(TAG, "websocket reconnect watchdog task create failed");
-        }
-    }
     if (!s_timer_monitor_task) {
         BaseType_t timer_task_ok = xTaskCreate(timer_monitor_task, "tater_timer", 5120, NULL, 4, &s_timer_monitor_task);
         if (timer_task_ok != pdPASS) {
