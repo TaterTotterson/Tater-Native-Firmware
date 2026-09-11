@@ -23,6 +23,7 @@
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "native_settings.h"
@@ -2232,6 +2233,38 @@ static void display_event_task(void *arg)
     }
 }
 
+static BaseType_t create_display_task(
+    TaskFunction_t task,
+    const char *name,
+    uint32_t stack_depth,
+    UBaseType_t priority
+)
+{
+    /*
+     * The S3 Box display keeps three tasks alive for the lifetime of the
+     * device. Their stacks do not need DMA/internal memory, so keep that
+     * scarce pool available to Wi-Fi, WebSocket, and audio transports.
+     */
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+        task,
+        name,
+        stack_depth,
+        NULL,
+        priority,
+        NULL,
+        0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (created == pdPASS) {
+        ESP_LOGI(TAG, "display task %s stack allocated in PSRAM", name);
+        return created;
+    }
+    ESP_LOGW(TAG, "display task %s PSRAM stack unavailable; using internal RAM", name);
+#endif
+    return xTaskCreatePinnedToCore(task, name, stack_depth, NULL, priority, NULL, 0);
+}
+
 esp_err_t tater_leds_init(void)
 {
     s_feed_lock = xSemaphoreCreateMutex();
@@ -2255,9 +2288,24 @@ esp_err_t tater_leds_init(void)
     s_display_ready = true;
     render_state_screen();
     ESP_ERROR_CHECK_WITHOUT_ABORT(lcd_flush());
-    xTaskCreatePinnedToCore(display_task, "tater_display", 8192, NULL, 4, NULL, 0);
-    xTaskCreatePinnedToCore(display_feed_task, "tater_display_feed", 6144, NULL, 3, NULL, 0);
-    xTaskCreatePinnedToCore(display_event_task, "tater_display_event", 8192, NULL, 3, NULL, 0);
+    ESP_RETURN_ON_FALSE(
+        create_display_task(display_task, "tater_display", 8192, 4) == pdPASS,
+        ESP_ERR_NO_MEM,
+        TAG,
+        "display task create failed"
+    );
+    ESP_RETURN_ON_FALSE(
+        create_display_task(display_feed_task, "tater_display_feed", 6144, 3) == pdPASS,
+        ESP_ERR_NO_MEM,
+        TAG,
+        "display feed task create failed"
+    );
+    ESP_RETURN_ON_FALSE(
+        create_display_task(display_event_task, "tater_display_event", 8192, 3) == pdPASS,
+        ESP_ERR_NO_MEM,
+        TAG,
+        "display event task create failed"
+    );
     return ESP_OK;
 }
 

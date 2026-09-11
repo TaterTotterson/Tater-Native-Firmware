@@ -1,4 +1,4 @@
-- Releases native firmware `0.3.24` for ESP32-S3-BOX-3; the other satellite targets remain on `0.3.23`.
-- Reuses one serialized keep-alive HTTP session for the S3 Box clock, sensor, event, and snapshot requests.
-- Prevents the display pollers from competing for the ESP32's limited TCP connections.
-- Keeps the clock visible from live Tater time settings even when the optional display feed is unavailable.
+- Releases native firmware `0.3.25` for ESP32-S3-BOX-3; the other satellite targets remain on `0.3.23`.
+- Moves the S3 Box's persistent display-task stacks into PSRAM, reserving internal memory for Wi-Fi, WebSocket, and audio operations.
+- Prevents display activity from starving reply playback and continued-chat transport operations of internal memory.
+- Improves S3 Box reply-start responsiveness and connection stability without changing its WebSocket reconnect behavior.
