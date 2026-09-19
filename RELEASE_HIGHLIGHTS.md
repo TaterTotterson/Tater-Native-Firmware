@@ -1,4 +1,6 @@
-- Releases native firmware `0.3.25` for ESP32-S3-BOX-3; the other satellite targets remain on `0.3.23`.
-- Moves the S3 Box's persistent display-task stacks into PSRAM, reserving internal memory for Wi-Fi, WebSocket, and audio operations.
-- Prevents display activity from starving reply playback and continued-chat transport operations of internal memory.
-- Improves S3 Box reply-start responsiveness and connection stability without changing its WebSocket reconnect behavior.
+- Releases native firmware `0.4.0` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Adds an always-on, low-duty passive BLE observer that sends bounded nearby-device batches to Tater over the existing native WebSocket.
+- Pauses BLE scanning during voice capture, playback, OTA, and other audio-critical work, then resumes automatically without a user-facing toggle.
+- Adds BLE controller, scanner, advertisement, and internal-heap diagnostics to native satellite status reports.
+- Moves the voice preroll buffer to PSRAM, removes disabled software-AEC working buffers, and reduces Wi-Fi buffer pressure to preserve internal memory.
+- Keeps Voice PE HTTPS playback and voice operation stable while BLE presence scanning is active.

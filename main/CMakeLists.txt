@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "audio_aec.c"
+        "ble_scanner.c"
         "boards/voice_pe/audio_voice_pe.c"
         "boards/sat1/audio_sat1.c"
         "boards/sat1/sat1_pd_policy.c"
@@ -40,6 +41,7 @@ idf_component_register(
     REQUIRES
         driver
         app_update
+        bt
         esp_event
         esp_http_client
         esp_http_server

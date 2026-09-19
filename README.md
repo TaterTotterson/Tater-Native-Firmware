@@ -321,6 +321,12 @@ center TTS on grouped members together.
 - Native intercom/push-to-talk hooks through the same satellite transport
 - Broadcast/intercom routing is handled by Tater so room targeting can happen on
   the server side
+- Always-on passive BLE observation using the ESP32-S3 radio. Native satellites
+  batch nearby advertisements to Tater for presence, sensor decoding, and
+  automations. The scanner starts automatically, uses bounded buffers, and pauses
+  during critical voice/playback activity. Audio preroll and network
+  allocations use PSRAM so the Bluetooth controller retains enough internal
+  memory on all four supported board families, including Voice PE.
 
 ### Board-Specific Hardware
 

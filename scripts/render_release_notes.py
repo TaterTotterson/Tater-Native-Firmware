@@ -64,9 +64,9 @@ def main() -> int:
 
     devices = manifest.get("devices") if isinstance(manifest.get("devices"), list) else []
     firmware_versions = {
-        text(device.get("firmware_version"))
+        text(device.get("display_version")) or text(device.get("firmware_version"))
         for device in devices
-        if isinstance(device, dict) and text(device.get("firmware_version"))
+        if isinstance(device, dict) and (text(device.get("display_version")) or text(device.get("firmware_version")))
     }
     version_summary = (
         "- Ships one shared native firmware version across all supported satellite targets."

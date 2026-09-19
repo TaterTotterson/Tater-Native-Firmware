@@ -1,6 +1,7 @@
 #include "audio_i2s.h"
 #include "board.h"
 #include "button.h"
+#include "ble_scanner.h"
 #include "cache_storage.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
@@ -154,14 +155,21 @@ void app_main(void)
         tater_leds_set_state(TATER_STATE_DISCONNECTED);
     }
     tater_protocol_init(&s_config, on_tater_state, on_tater_play_url, on_tater_play_tone, on_tater_ota_url);
+    tater_ble_scanner_init(tater_protocol_send_ble_adverts);
     tater_protocol_start();
     ESP_ERROR_CHECK_WITHOUT_ABORT(tater_wake_engine_init());
 
     tater_audio_i2s_start_task();
     tater_button_start_task();
 
+    unsigned heartbeat_ticks = 0;
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        vTaskDelay(pdMS_TO_TICKS(250));
+        tater_ble_scanner_poll(tater_protocol_audio_busy());
+        if (++heartbeat_ticks < 20) {
+            continue;
+        }
+        heartbeat_ticks = 0;
         ESP_LOGI(
             TAG,
             "heartbeat connected=%d voice_active=%d free_heap=%lu",

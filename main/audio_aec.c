@@ -28,6 +28,7 @@ static const char *TAG = "tater_aec";
 #define TATER_ENABLE_EXPERIMENTAL_AEC 0
 #endif
 
+#if TATER_ENABLE_EXPERIMENTAL_AEC
 static int16_t s_reference_ring[AEC_REF_RING_SAMPLES];
 static size_t s_reference_write;
 static size_t s_reference_count;
@@ -38,10 +39,12 @@ static portMUX_TYPE s_reference_lock = portMUX_INITIALIZER_UNLOCKED;
 static float s_filter[AEC_FILTER_TAPS];
 static float s_history[AEC_FILTER_TAPS];
 static size_t s_history_pos;
+#endif
 
 static tater_audio_aec_stats_t s_stats;
 static portMUX_TYPE s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 
+#if TATER_ENABLE_EXPERIMENTAL_AEC
 static float clamp01(float value)
 {
     if (value <= 0.0f) {
@@ -63,6 +66,7 @@ static int16_t clamp_s16_from_float(float value)
     }
     return (int16_t)(value + (value >= 0.0f ? 0.5f : -0.5f));
 }
+#endif
 
 static float normalized_abs_mean(const int16_t *samples, size_t count)
 {
@@ -78,6 +82,7 @@ static float normalized_abs_mean(const int16_t *samples, size_t count)
     return ((float)sum / (float)count) / 32768.0f;
 }
 
+#if TATER_ENABLE_EXPERIMENTAL_AEC
 static size_t configured_delay_samples(uint8_t delay_ms)
 {
     size_t samples = ((size_t)delay_ms * (size_t)TATER_MIC_SAMPLE_RATE) / 1000U;
@@ -133,6 +138,7 @@ static void update_reference_stats(size_t reference_frames, float speaker_level,
     s_stats.delay_ms = delay_ms;
     portEXIT_CRITICAL(&s_stats_lock);
 }
+#endif
 
 static void update_stats(
     bool enabled,
@@ -166,6 +172,7 @@ static void update_stats(
 
 void tater_audio_aec_init(void)
 {
+#if TATER_ENABLE_EXPERIMENTAL_AEC
     memset(s_reference_ring, 0, sizeof(s_reference_ring));
     memset(s_filter, 0, sizeof(s_filter));
     memset(s_history, 0, sizeof(s_history));
@@ -174,11 +181,16 @@ void tater_audio_aec_init(void)
     s_reference_resample_accum = 0;
     s_history_pos = 0;
     s_last_reference_us = 0;
+#endif
     memset(&s_stats, 0, sizeof(s_stats));
     s_stats.enabled = false;
     s_stats.strength_percent = 70;
     s_stats.delay_ms = AEC_DEFAULT_DELAY_MS;
+#if TATER_ENABLE_EXPERIMENTAL_AEC
     ESP_LOGI(TAG, "aec initialized taps=%u ring=%u sample_rate=%u", AEC_FILTER_TAPS, AEC_REF_RING_SAMPLES, TATER_MIC_SAMPLE_RATE);
+#else
+    ESP_LOGI(TAG, "software aec disabled; using board audio processing");
+#endif
 }
 
 void tater_audio_aec_note_speaker_frames(const int16_t *stereo_frames, size_t frame_count)

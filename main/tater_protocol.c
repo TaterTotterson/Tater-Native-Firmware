@@ -25,6 +25,7 @@
 #include "freertos/task.h"
 #include "audio_aec.h"
 #include "audio_i2s.h"
+#include "ble_scanner.h"
 #include "native_settings.h"
 #include "network_recovery.h"
 #include "ota_update.h"
@@ -216,6 +217,7 @@ typedef struct {
 #define TATER_PLAYBACK_VISUAL_HOLD_MS 30000
 
 #define TATER_AUDIO_PREROLL_SAMPLES (TATER_MIC_SAMPLE_RATE)
+#define TATER_AUDIO_PREROLL_FALLBACK_SAMPLES (TATER_MIC_SAMPLE_RATE / 4)
 #define TATER_AUDIO_TX_QUEUE_CHUNKS 128
 #ifndef TATER_AUDIO_TX_BATCH_FRAMES
 #define TATER_AUDIO_TX_BATCH_FRAMES 320
@@ -246,7 +248,9 @@ typedef struct {
     bool task_with_caps;
 } tater_wake_verify_tx_args_t;
 
-static int16_t s_audio_preroll[TATER_AUDIO_PREROLL_SAMPLES];
+static int16_t *s_audio_preroll;
+static size_t s_audio_preroll_capacity;
+static bool s_audio_preroll_psram;
 static size_t s_audio_preroll_start;
 static size_t s_audio_preroll_count;
 static tater_audio_tx_chunk_t *s_audio_tx_queue;
@@ -1054,6 +1058,41 @@ static void clear_audio_preroll_locked(void)
     s_audio_preroll_count = 0;
 }
 
+static void audio_preroll_init(void)
+{
+    if (s_audio_preroll) {
+        return;
+    }
+
+    s_audio_preroll_capacity = TATER_AUDIO_PREROLL_SAMPLES;
+    s_audio_preroll = (int16_t *)heap_caps_calloc(
+        s_audio_preroll_capacity,
+        sizeof(s_audio_preroll[0]),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    s_audio_preroll_psram = s_audio_preroll != NULL;
+    if (!s_audio_preroll) {
+        s_audio_preroll_capacity = TATER_AUDIO_PREROLL_FALLBACK_SAMPLES;
+        s_audio_preroll = (int16_t *)heap_caps_calloc(
+            s_audio_preroll_capacity,
+            sizeof(s_audio_preroll[0]),
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+        );
+    }
+    if (!s_audio_preroll) {
+        s_audio_preroll_capacity = 0;
+        ESP_LOGW(TAG, "audio preroll unavailable; voice capture will start after acknowledgement");
+        return;
+    }
+    ESP_LOGI(
+        TAG,
+        "audio preroll ready samples=%u bytes=%u memory=%s",
+        (unsigned)s_audio_preroll_capacity,
+        (unsigned)(s_audio_preroll_capacity * sizeof(s_audio_preroll[0])),
+        s_audio_preroll_psram ? "psram" : "internal-fallback"
+    );
+}
+
 static void clear_voice_capture_state(void)
 {
     if (s_send_lock) {
@@ -1082,17 +1121,17 @@ static void clear_voice_capture_state(void)
 
 static void buffer_audio_preroll_locked(const int16_t *pcm, size_t sample_count)
 {
-    if (!pcm || sample_count == 0) {
+    if (!pcm || sample_count == 0 || !s_audio_preroll || s_audio_preroll_capacity == 0) {
         return;
     }
     for (size_t i = 0; i < sample_count; i++) {
-        if (s_audio_preroll_count < TATER_AUDIO_PREROLL_SAMPLES) {
-            size_t index = (s_audio_preroll_start + s_audio_preroll_count) % TATER_AUDIO_PREROLL_SAMPLES;
+        if (s_audio_preroll_count < s_audio_preroll_capacity) {
+            size_t index = (s_audio_preroll_start + s_audio_preroll_count) % s_audio_preroll_capacity;
             s_audio_preroll[index] = pcm[i];
             s_audio_preroll_count++;
         } else {
             s_audio_preroll[s_audio_preroll_start] = pcm[i];
-            s_audio_preroll_start = (s_audio_preroll_start + 1) % TATER_AUDIO_PREROLL_SAMPLES;
+            s_audio_preroll_start = (s_audio_preroll_start + 1) % s_audio_preroll_capacity;
         }
     }
 }
@@ -1274,7 +1313,7 @@ uint32_t tater_protocol_send_wake_verification(
 
 static void flush_audio_preroll_locked(void)
 {
-    if (!websocket_ready() || !s_voice_active || s_audio_preroll_count == 0) {
+    if (!websocket_ready() || !s_voice_active || !s_audio_preroll || s_audio_preroll_count == 0) {
         clear_audio_preroll_locked();
         return;
     }
@@ -1284,14 +1323,14 @@ static void flush_audio_preroll_locked(void)
     while (s_audio_preroll_count > 0) {
         size_t chunk_samples = s_audio_preroll_count < TATER_AUDIO_TX_BATCH_FRAMES ? s_audio_preroll_count : TATER_AUDIO_TX_BATCH_FRAMES;
         for (size_t i = 0; i < chunk_samples; i++) {
-            chunk[i] = s_audio_preroll[(s_audio_preroll_start + i) % TATER_AUDIO_PREROLL_SAMPLES];
+            chunk[i] = s_audio_preroll[(s_audio_preroll_start + i) % s_audio_preroll_capacity];
         }
         if (!audio_tx_enqueue(chunk, chunk_samples, "preroll")) {
             ESP_LOGW(TAG, "audio preroll queue failed samples=%u", (unsigned)chunk_samples);
             clear_audio_preroll_locked();
             return;
         }
-        s_audio_preroll_start = (s_audio_preroll_start + chunk_samples) % TATER_AUDIO_PREROLL_SAMPLES;
+        s_audio_preroll_start = (s_audio_preroll_start + chunk_samples) % s_audio_preroll_capacity;
         s_audio_preroll_count -= chunk_samples;
         flushed += chunk_samples;
     }
@@ -2342,6 +2381,8 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "ota", true);
     cJSON_AddBoolToObject(caps, "xmos", TATER_CAP_XMOS);
     cJSON_AddBoolToObject(caps, "aec", true);
+    cJSON_AddBoolToObject(caps, "ble_advertisements", tater_ble_scanner_supported());
+    cJSON_AddNumberToObject(caps, "ble_advertisements_version", 1);
     cJSON_AddBoolToObject(caps, "audio_scenes", true);
     cJSON_AddBoolToObject(caps, "audio_ducking", true);
     cJSON_AddBoolToObject(caps, "looping_background_audio", true);
@@ -3204,6 +3245,7 @@ void tater_protocol_init(
     s_play_tone_cb = play_tone_cb;
     s_ota_url_cb = ota_url_cb;
     tater_live_settings_init_defaults();
+    audio_preroll_init();
     s_send_lock = xSemaphoreCreateMutex();
     s_timer_lock = xSemaphoreCreateMutex();
     esp_err_t audio_tx_err = audio_tx_init();
@@ -3265,6 +3307,17 @@ bool tater_protocol_timer_is_ringing(void)
 bool tater_protocol_timer_is_active(void)
 {
     return timer_any_active();
+}
+
+bool tater_protocol_audio_busy(void)
+{
+    return s_voice_active
+        || s_current_state == TATER_STATE_LISTENING
+        || s_current_state == TATER_STATE_SPEAKING
+        || s_current_state == TATER_STATE_TOOL_CALL
+        || s_current_state == TATER_STATE_OTA
+        || tater_playback_is_playing()
+        || tater_playback_media_session_active();
 }
 
 void tater_protocol_timer_stop_from_device(void)
@@ -3361,6 +3414,16 @@ void tater_protocol_send_status(const char *state)
     }
     cJSON_AddNumberToObject(payload, "uptime_s", (int)(esp_timer_get_time() / 1000000LL));
     cJSON_AddNumberToObject(payload, "free_heap", esp_get_free_heap_size());
+    cJSON_AddNumberToObject(
+        payload,
+        "free_internal_heap",
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+    );
+    cJSON_AddNumberToObject(
+        payload,
+        "min_internal_heap",
+        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+    );
     cJSON_AddBoolToObject(payload, "voice_active", s_voice_active);
     cJSON_AddBoolToObject(payload, "voice_start_pending", s_voice_start_pending);
     cJSON *timer = cJSON_CreateObject();
@@ -3427,6 +3490,25 @@ void tater_protocol_send_status(const char *state)
     cJSON_AddNumberToObject(transport, "media_tx_dropped", s_media_tx_dropped);
     cJSON_AddItemToObject(payload, "transport", transport);
     cJSON_AddItemToObject(payload, "reset", reset_diag_json());
+    tater_ble_scanner_stats_t ble_stats = {0};
+    tater_ble_scanner_get_stats(&ble_stats);
+    cJSON *ble = cJSON_CreateObject();
+    cJSON_AddBoolToObject(ble, "supported", ble_stats.supported);
+    cJSON_AddBoolToObject(ble, "enabled", ble_stats.enabled);
+    cJSON_AddBoolToObject(ble, "initialized", ble_stats.initialized);
+    cJSON_AddBoolToObject(ble, "synced", ble_stats.synced);
+    cJSON_AddBoolToObject(ble, "scanning", ble_stats.scanning);
+    cJSON_AddBoolToObject(ble, "paused_for_audio", ble_stats.paused_for_audio);
+    cJSON_AddNumberToObject(ble, "adverts_seen", ble_stats.adverts_seen);
+    cJSON_AddNumberToObject(ble, "adverts_sent", ble_stats.adverts_sent);
+    cJSON_AddNumberToObject(ble, "adverts_filtered", ble_stats.adverts_filtered);
+    cJSON_AddNumberToObject(ble, "adverts_dropped", ble_stats.adverts_dropped);
+    cJSON_AddNumberToObject(ble, "batches_sent", ble_stats.batches_sent);
+    cJSON_AddNumberToObject(ble, "controller_resets", ble_stats.controller_resets);
+    cJSON_AddNumberToObject(ble, "last_error", ble_stats.last_error);
+    cJSON_AddNumberToObject(ble, "internal_heap_free", ble_stats.internal_heap_free);
+    cJSON_AddNumberToObject(ble, "internal_heap_min", ble_stats.internal_heap_min);
+    cJSON_AddItemToObject(payload, "ble", ble);
 #if TATER_BOARD_SAT1
     /*
      * The server already owns and reports the desired live settings.  Echoing
@@ -3665,6 +3747,77 @@ void tater_protocol_stop_voice(bool abort)
     send_json(root);
     clear_voice_capture_state();
     emit_state(TATER_STATE_IDLE, "local voice.stop");
+}
+
+bool tater_protocol_send_ble_adverts(
+    const tater_ble_advert_t *adverts,
+    size_t count,
+    uint32_t batch_id
+)
+{
+    if (!adverts || count == 0 || !websocket_ready() || tater_protocol_audio_busy()) {
+        return false;
+    }
+    if (count > TATER_BLE_BATCH_MAX) {
+        count = TATER_BLE_BATCH_MAX;
+    }
+
+    cJSON *root = new_envelope("ble.advertisements");
+    if (!root) {
+        return false;
+    }
+    cJSON *payload = cJSON_GetObjectItem(root, "payload");
+    cJSON *rows = cJSON_CreateArray();
+    if (!payload || !rows) {
+        cJSON_Delete(rows);
+        cJSON_Delete(root);
+        return false;
+    }
+    cJSON_AddNumberToObject(payload, "version", 1);
+    cJSON_AddNumberToObject(payload, "batch_id", batch_id);
+    cJSON_AddNumberToObject(payload, "device_uptime_ms", (double)(esp_timer_get_time() / 1000ULL));
+
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+    static const char hex_digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < count; i++) {
+        const tater_ble_advert_t *advert = &adverts[i];
+        size_t data_len = advert->data_len;
+        if (data_len > TATER_BLE_ADV_DATA_MAX) {
+            data_len = TATER_BLE_ADV_DATA_MAX;
+        }
+        char address[18];
+        snprintf(
+            address,
+            sizeof(address),
+            "%02x:%02x:%02x:%02x:%02x:%02x",
+            advert->address[5],
+            advert->address[4],
+            advert->address[3],
+            advert->address[2],
+            advert->address[1],
+            advert->address[0]
+        );
+        char data_hex[(TATER_BLE_ADV_DATA_MAX * 2) + 1];
+        for (size_t j = 0; j < data_len; j++) {
+            data_hex[j * 2] = hex_digits[(advert->data[j] >> 4) & 0x0f];
+            data_hex[(j * 2) + 1] = hex_digits[advert->data[j] & 0x0f];
+        }
+        data_hex[data_len * 2] = '\0';
+
+        cJSON *row = cJSON_CreateObject();
+        if (!row) {
+            continue;
+        }
+        cJSON_AddStringToObject(row, "address", address);
+        cJSON_AddNumberToObject(row, "address_type", advert->address_type);
+        cJSON_AddNumberToObject(row, "rssi", advert->rssi);
+        cJSON_AddNumberToObject(row, "event_type", advert->event_type);
+        cJSON_AddStringToObject(row, "data", data_hex);
+        cJSON_AddNumberToObject(row, "age_ms", (uint32_t)(now_ms - advert->observed_ms));
+        cJSON_AddItemToArray(rows, row);
+    }
+    cJSON_AddItemToObject(payload, "adverts", rows);
+    return send_json(root) >= 0;
 }
 
 void tater_protocol_send_audio(const int16_t *pcm, size_t sample_count)

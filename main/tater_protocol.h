@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ble_scanner.h"
 #include "tater_config.h"
 
 typedef enum {
@@ -39,6 +40,7 @@ bool tater_protocol_timer_is_active(void);
 bool tater_protocol_timer_is_ringing(void);
 void tater_protocol_timer_stop_from_device(void);
 bool tater_protocol_can_detect_timer_stop(void);
+bool tater_protocol_audio_busy(void);
 const char *tater_protocol_device_id(void);
 const char *tater_protocol_device_name(void);
 const char *tater_protocol_room(void);
@@ -49,6 +51,11 @@ void tater_protocol_start_voice(const char *wake_word, const char *source);
 void tater_protocol_start_voice_with_conversation(const char *wake_word, const char *source, const char *conversation_id);
 void tater_protocol_stop_voice(bool abort);
 void tater_protocol_send_audio(const int16_t *pcm, size_t sample_count);
+bool tater_protocol_send_ble_adverts(
+    const tater_ble_advert_t *adverts,
+    size_t count,
+    uint32_t batch_id
+);
 uint32_t tater_protocol_send_wake_verification(
     uint32_t request_id,
     const int16_t *pcm,
