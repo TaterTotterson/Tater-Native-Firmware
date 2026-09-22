@@ -75,9 +75,12 @@ static const size_t PLAYBACK_OVERLAY_RING_FRAMES = TATER_SPK_SAMPLE_RATE;
 #ifndef TATER_MEDIA_DECODER_TASK_PRIORITY
 #define TATER_MEDIA_DECODER_TASK_PRIORITY 5
 #endif
-#ifndef TATER_OVERLAY_DECODER_TASK_PRIORITY
-#define TATER_OVERLAY_DECODER_TASK_PRIORITY 6
-#endif
+/*
+ * Persistent media and its speech overlay decode on the same core.  Keep both
+ * producers at one priority so either ring can make progress while the other
+ * is being consumed.  Giving the overlay decoder a higher priority lets it
+ * immediately refill on every speaker read and can starve the music decoder.
+ */
 
 typedef struct playback_pcm_sink playback_pcm_sink_t;
 
@@ -2423,11 +2426,16 @@ static esp_err_t scene_background_sink_write(
     if (skip >= frame_count) {
         return ESP_OK;
     }
-    return scene_pcm_ring_write(
+    esp_err_t err = scene_pcm_ring_write(
         request->ring,
         stereo_frames + (skip * TATER_SPK_CHANNELS),
         frame_count - skip
     );
+    if (err == ESP_OK) {
+        /* Let an equal-priority media/overlay decoder run between PCM blocks. */
+        taskYIELD();
+    }
+    return err;
 }
 
 static void scene_background_task(void *arg)
@@ -3165,6 +3173,8 @@ static void media_session_task(void *arg)
     int32_t correction_since_report = 0;
     uint32_t underrun_events = 0;
     uint32_t overlay_underrun_events = 0;
+    uint32_t background_underrun_events = 0;
+    uint32_t foreground_underrun_events = 0;
     uint32_t rejoin_count = 0;
     uint32_t recovery_fade_frames_remaining = 0;
     bool overlay_media_starved = false;
@@ -3505,6 +3515,7 @@ static void media_session_task(void *arg)
                     if (!overlay_media_starved) {
                         underrun_events++;
                         overlay_underrun_events++;
+                        background_underrun_events++;
                     }
                     overlay_media_starved = true;
                     /*
@@ -3517,6 +3528,7 @@ static void media_session_task(void *arg)
                     overlay_media_starved = false;
                     rebuffering = true;
                     underrun_events++;
+                    background_underrun_events++;
                     media_output_frames = PLAYBACK_MIX_CHUNK_FRAMES;
                     ESP_LOGW(
                         TAG,
@@ -3562,6 +3574,7 @@ static void media_session_task(void *arg)
                 if (!overlay_foreground_starved) {
                     underrun_events++;
                     overlay_underrun_events++;
+                    foreground_underrun_events++;
                 }
                 overlay_foreground_starved = true;
                 /* Keep the speaker clock running even if both decoders are late. */
@@ -3682,6 +3695,8 @@ static void media_session_task(void *arg)
                 rebuffering,
                 underrun_events,
                 overlay_underrun_events,
+                background_underrun_events,
+                foreground_underrun_events,
                 rejoin_count,
                 rejoin_frames_total
             );
@@ -4302,7 +4317,7 @@ esp_err_t tater_playback_play_overlay(const tater_playback_overlay_t *overlay)
         "tts_overlay",
         PLAYBACK_SCENE_BACKGROUND_TASK_STACK,
         s_media_session.overlay_decoder,
-        TATER_OVERLAY_DECODER_TASK_PRIORITY,
+        TATER_MEDIA_DECODER_TASK_PRIORITY,
         &s_media_session.overlay_decoder_task,
         0,
         &s_media_session.overlay_decoder->task_with_caps

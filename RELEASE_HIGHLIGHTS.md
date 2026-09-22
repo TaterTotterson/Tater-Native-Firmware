@@ -1,6 +1,4 @@
-- Releases native firmware `0.4.0` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Adds an always-on, low-duty passive BLE observer that sends bounded nearby-device batches to Tater over the existing native WebSocket.
-- Pauses BLE scanning during voice capture, playback, OTA, and other audio-critical work, then resumes automatically without a user-facing toggle.
-- Adds BLE controller, scanner, advertisement, and internal-heap diagnostics to native satellite status reports.
-- Moves the voice preroll buffer to PSRAM, removes disabled software-AEC working buffers, and reduces Wi-Fi buffer pressure to preserve internal memory.
-- Keeps Voice PE HTTPS playback and voice operation stable while BLE presence scanning is active.
+- Releases native firmware `0.4.1` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Improves music ducking and spoken-overlay playback by sharing decoder time fairly, preventing speech decoding from starving the background stream.
+- Adds separate background and foreground underrun telemetry to make playback interruptions easier to diagnose.
+- Uses TLS 1.2 for reliable secure WebSocket and HTTPS interoperability while retaining certificate verification.

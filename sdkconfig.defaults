@@ -39,7 +39,10 @@ CONFIG_BT_CTRL_HCI_MODE_VHCI=y
 CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_NUM=50
 CONFIG_BT_CTRL_SCAN_DUPL_CACHE_SIZE=20
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
-CONFIG_MBEDTLS_SSL_PROTO_TLS1_3=y
+# Native satellites use TLS 1.2 for consistent WSS/HTTPS interoperability
+# across local reverse proxies and public services. Certificate verification
+# remains enabled below through the ESP certificate bundle.
+# CONFIG_MBEDTLS_SSL_PROTO_TLS1_3 is not set
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

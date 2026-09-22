@@ -281,6 +281,8 @@ an abrupt dropped or repeated frame. If a stream underruns, the satellite
 rebuilds its buffer, skips forward to the shared wall-clock timeline, and fades
 back in while reporting rebuffer, underrun, and rejoin telemetry. Corrections
 are deferred during a TTS overlay, so speech mixing and ducking stay intact.
+The two decoders share CPU time fairly, and playhead telemetry separates
+background-media underruns from foreground-overlay underruns.
 Scheduled `audio.overlay.start` commands use the same clock mapping to duck and
 center TTS on grouped members together.
 

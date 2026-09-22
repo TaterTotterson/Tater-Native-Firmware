@@ -159,6 +159,8 @@ typedef struct {
             bool rebuffering;
             uint32_t underrun_events;
             uint32_t overlay_underrun_events;
+            uint32_t background_underrun_events;
+            uint32_t foreground_underrun_events;
             uint32_t rejoin_count;
             uint64_t rejoin_frames;
         } playhead;
@@ -1561,6 +1563,16 @@ static int send_media_tx_event_now(const tater_media_tx_event_t *event)
             payload,
             "overlay_underrun_events",
             event->payload.playhead.overlay_underrun_events
+        );
+        cJSON_AddNumberToObject(
+            payload,
+            "background_underrun_events",
+            event->payload.playhead.background_underrun_events
+        );
+        cJSON_AddNumberToObject(
+            payload,
+            "foreground_underrun_events",
+            event->payload.playhead.foreground_underrun_events
         );
         cJSON_AddNumberToObject(payload, "rejoin_count", event->payload.playhead.rejoin_count);
         cJSON_AddNumberToObject(payload, "rejoin_frames", (double)event->payload.playhead.rejoin_frames);
@@ -4175,6 +4187,8 @@ void tater_protocol_send_media_session_playhead(
     bool rebuffering,
     uint32_t underrun_events,
     uint32_t overlay_underrun_events,
+    uint32_t background_underrun_events,
+    uint32_t foreground_underrun_events,
     uint32_t rejoin_count,
     uint64_t rejoin_frames
 )
@@ -4192,6 +4206,8 @@ void tater_protocol_send_media_session_playhead(
         .payload.playhead.rebuffering = rebuffering,
         .payload.playhead.underrun_events = underrun_events,
         .payload.playhead.overlay_underrun_events = overlay_underrun_events,
+        .payload.playhead.background_underrun_events = background_underrun_events,
+        .payload.playhead.foreground_underrun_events = foreground_underrun_events,
         .payload.playhead.rejoin_count = rejoin_count,
         .payload.playhead.rejoin_frames = rejoin_frames,
     };
