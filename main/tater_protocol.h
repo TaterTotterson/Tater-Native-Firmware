@@ -56,6 +56,17 @@ bool tater_protocol_send_ble_adverts(
     size_t count,
     uint32_t batch_id
 );
+void tater_protocol_send_ble_enrollment_status(
+    const char *enrollment_id,
+    const char *status,
+    const char *error
+);
+void tater_protocol_send_ble_enrollment_result(
+    const char *enrollment_id,
+    bool ok,
+    const uint8_t irk[16],
+    const char *error
+);
 uint32_t tater_protocol_send_wake_verification(
     uint32_t request_id,
     const int16_t *pcm,
