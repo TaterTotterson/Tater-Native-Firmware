@@ -1,4 +1,4 @@
-- Releases native firmware `0.4.1` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Improves music ducking and spoken-overlay playback by sharing decoder time fairly, preventing speech decoding from starving the background stream.
-- Adds separate background and foreground underrun telemetry to make playback interruptions easier to diagnose.
-- Uses TLS 1.2 for reliable secure WebSocket and HTTPS interoperability while retaining certificate verification.
+- Releases native firmware `0.4.2` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Adds the `Audio Glow` reply animation on LED-ring satellites, with the full ring smoothly following the audio actually rendered by the speaker.
+- Makes `Audio Glow` the reply-animation default for new Voice PE, Satellite1, and ReSpeaker installations while preserving existing users' saved choices.
+- Keeps ESP32-S3-BOX-3 on its existing reply visual because its display does not support the ring effect.

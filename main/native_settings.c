@@ -183,7 +183,11 @@ void tater_live_settings_init_defaults(void)
     strlcpy_or_empty(s_settings.led_listening_animation, "directional", sizeof(s_settings.led_listening_animation));
     strlcpy_or_empty(s_settings.led_thinking_animation, "sparkle", sizeof(s_settings.led_thinking_animation));
     strlcpy_or_empty(s_settings.led_tool_call_animation, "ping_pong", sizeof(s_settings.led_tool_call_animation));
+#if TATER_BOARD_S3_BOX
     strlcpy_or_empty(s_settings.led_replying_animation, "voice_ring", sizeof(s_settings.led_replying_animation));
+#else
+    strlcpy_or_empty(s_settings.led_replying_animation, "audio_glow", sizeof(s_settings.led_replying_animation));
+#endif
     strlcpy_or_empty(s_settings.logging_level, "info", sizeof(s_settings.logging_level));
 #if TATER_BOARD_S3_BOX
     tater_leds_set_brightness(s_settings.screen_brightness);

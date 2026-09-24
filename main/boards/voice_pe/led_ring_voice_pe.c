@@ -1,5 +1,6 @@
 #include "leds.h"
 
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 #include <strings.h>
@@ -54,6 +55,7 @@ static volatile uint8_t s_button_feedback_value;
 static volatile int64_t s_button_feedback_until_us;
 static float s_thinking_levels[TATER_LED_COUNT];
 static float s_speaking_radius = 1.25f;
+static float s_audio_glow_envelope;
 static bool s_tool_forward = true;
 static uint8_t s_tool_index;
 static float s_listening_position = 6.0f;
@@ -858,6 +860,27 @@ static void replying(uint32_t tick, rgb_t color)
     }
 }
 
+// Audio Glow keeps the entire ring at one brightness and follows the audio
+// that is actually being rendered by the speaker. A fast attack preserves
+// consonants while the slower release prevents distracting frame-to-frame
+// flicker between audio blocks.
+static void audio_glow(rgb_t color)
+{
+    float target = clamp01(tater_audio_speaker_level() / 0.22f);
+    target = powf(target, 0.70f);
+    float alpha = target > s_audio_glow_envelope ? 0.60f : 0.30f;
+    s_audio_glow_envelope += (target - s_audio_glow_envelope) * alpha;
+
+    float perceptual = 0.06f + (s_audio_glow_envelope * 0.94f);
+    float duty = powf(perceptual, 2.20f);
+    if (duty < 0.008f) {
+        duty = 0.008f;
+    }
+    for (int i = 0; i < TATER_LED_COUNT; i++) {
+        set_color_level(i, color, duty);
+    }
+}
+
 static void render_voice_animation(const char *animation, const char *fallback, uint32_t tick, rgb_t color)
 {
     const char *token = animation && animation[0] ? animation : fallback;
@@ -867,6 +890,8 @@ static void render_voice_animation(const char *animation, const char *fallback, 
         thinking(tick, color);
     } else if (animation_is(token, "ping_pong")) {
         tool_call(tick, color);
+    } else if (animation_is(token, "audio_glow")) {
+        audio_glow(color);
     } else if (animation_is(token, "voice_ring")) {
         replying(tick, color);
     } else if (animation_is(token, "spinner")) {
@@ -1107,6 +1132,7 @@ static void render(void)
         s_render_epoch = s_state_epoch;
         s_animation_tick = 0;
         s_speaking_radius = 1.25f;
+        s_audio_glow_envelope = 0.0f;
         s_tool_forward = true;
         s_tool_index = 0;
         s_listening_position = (float)TATER_LED_COUNT / 2.0f;
@@ -1177,7 +1203,7 @@ static void render(void)
         render_voice_animation(settings ? settings->led_thinking_animation : "", "sparkle", s_animation_tick, voice_color);
         break;
     case TATER_STATE_SPEAKING:
-        render_voice_animation(settings ? settings->led_replying_animation : "", "voice_ring", s_animation_tick, voice_color);
+        render_voice_animation(settings ? settings->led_replying_animation : "", "audio_glow", s_animation_tick, voice_color);
         break;
     case TATER_STATE_TOOL_CALL:
         render_voice_animation(settings ? settings->led_tool_call_animation : "", "ping_pong", s_animation_tick, voice_color);
