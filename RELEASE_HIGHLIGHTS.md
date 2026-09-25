@@ -1,4 +1,4 @@
-- Releases native firmware `0.4.4` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Restores passive BLE room-presence scanning by registering a valid access callback for the enrollment notification characteristic.
-- Keeps passive presence scanning available if the optional enrollment GATT service cannot initialize.
-- Retains the secure, short-lived phone and watch enrollment flow introduced in `0.4.3`.
+- Releases native firmware `0.4.5` as a forward-installable stability rollback for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Restores the production-tested firmware behavior from `0.4.2`.
+- Removes the experimental BLE device-enrollment path added after `0.4.2`.
+- Retains passive BLE presence reporting and the `Audio Glow` reply animation.

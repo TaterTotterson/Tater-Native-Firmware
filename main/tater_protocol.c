@@ -2395,8 +2395,6 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "aec", true);
     cJSON_AddBoolToObject(caps, "ble_advertisements", tater_ble_scanner_supported());
     cJSON_AddNumberToObject(caps, "ble_advertisements_version", 1);
-    cJSON_AddBoolToObject(caps, "ble_enrollment", tater_ble_enrollment_supported());
-    cJSON_AddNumberToObject(caps, "ble_enrollment_version", 1);
     cJSON_AddBoolToObject(caps, "audio_scenes", true);
     cJSON_AddBoolToObject(caps, "audio_ducking", true);
     cJSON_AddBoolToObject(caps, "looping_background_audio", true);
@@ -3121,25 +3119,6 @@ static void handle_text_message(const char *data, int len)
         cJSON *empty = cJSON_CreateObject();
         timer_cancel_from_payload(cJSON_IsObject(payload) ? payload : empty, request_id, "cleared");
         cJSON_Delete(empty);
-    } else if (strcmp(type, "ble.enrollment.start") == 0 && cJSON_IsObject(payload)) {
-        const cJSON *id_item = cJSON_GetObjectItem(payload, "enrollment_id");
-        const cJSON *name_item = cJSON_GetObjectItem(payload, "display_name");
-        const cJSON *timeout_item = cJSON_GetObjectItem(payload, "timeout_s");
-        const char *enrollment_id = cJSON_IsString(id_item) ? id_item->valuestring : "";
-        const char *display_name = cJSON_IsString(name_item) ? name_item->valuestring : "";
-        uint32_t timeout_s = (uint32_t)json_u16_clamped(timeout_item, 90, 180);
-        esp_err_t err = tater_ble_enrollment_start(enrollment_id, display_name, timeout_s);
-        if (err != ESP_OK) {
-            tater_protocol_send_ble_enrollment_result(
-                enrollment_id,
-                false,
-                NULL,
-                esp_err_to_name(err)
-            );
-        }
-    } else if (strcmp(type, "ble.enrollment.cancel") == 0 && cJSON_IsObject(payload)) {
-        const cJSON *id_item = cJSON_GetObjectItem(payload, "enrollment_id");
-        tater_ble_enrollment_cancel(cJSON_IsString(id_item) ? id_item->valuestring : "");
     } else if (strcmp(type, "ota.url") == 0 && cJSON_IsObject(payload)) {
         const cJSON *url_item = cJSON_GetObjectItem(payload, "url");
         if (cJSON_IsString(url_item) && s_ota_url_cb) {
@@ -3851,56 +3830,6 @@ bool tater_protocol_send_ble_adverts(
     }
     cJSON_AddItemToObject(payload, "adverts", rows);
     return send_json(root) >= 0;
-}
-
-void tater_protocol_send_ble_enrollment_status(
-    const char *enrollment_id,
-    const char *status,
-    const char *error
-)
-{
-    if (!websocket_ready()) {
-        return;
-    }
-    cJSON *root = new_envelope("ble.enrollment.status");
-    cJSON *payload = cJSON_GetObjectItem(root, "payload");
-    cJSON_AddStringToObject(payload, "enrollment_id", enrollment_id ? enrollment_id : "");
-    cJSON_AddStringToObject(payload, "status", status ? status : "");
-    if (error && error[0]) {
-        cJSON_AddStringToObject(payload, "error", error);
-    }
-    send_json(root);
-}
-
-void tater_protocol_send_ble_enrollment_result(
-    const char *enrollment_id,
-    bool ok,
-    const uint8_t irk[16],
-    const char *error
-)
-{
-    if (!websocket_ready()) {
-        return;
-    }
-    cJSON *root = new_envelope("ble.enrollment.result");
-    cJSON *payload = cJSON_GetObjectItem(root, "payload");
-    cJSON_AddStringToObject(payload, "enrollment_id", enrollment_id ? enrollment_id : "");
-    cJSON_AddBoolToObject(payload, "ok", ok);
-    if (ok && irk) {
-        static const char hex[] = "0123456789abcdef";
-        char encoded[33];
-        for (size_t i = 0; i < 16; i++) {
-            encoded[i * 2] = hex[(irk[i] >> 4) & 0x0f];
-            encoded[(i * 2) + 1] = hex[irk[i] & 0x0f];
-        }
-        encoded[32] = '\0';
-        cJSON_AddStringToObject(payload, "irk", encoded);
-        memset(encoded, 0, sizeof(encoded));
-    }
-    if (error && error[0]) {
-        cJSON_AddStringToObject(payload, "error", error);
-    }
-    send_json(root);
 }
 
 void tater_protocol_send_audio(const int16_t *pcm, size_t sample_count)

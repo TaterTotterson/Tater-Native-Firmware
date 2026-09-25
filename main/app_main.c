@@ -16,7 +16,6 @@
 #include "provisioning.h"
 #include <stdbool.h>
 #include <stdio.h>
-#include <string.h>
 #include "tater_config.h"
 #include "tater_protocol.h"
 #include "wake_engine.h"
@@ -167,24 +166,6 @@ void app_main(void)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(250));
         tater_ble_scanner_poll(tater_protocol_audio_busy());
-        tater_ble_enrollment_event_t enrollment_event;
-        while (tater_ble_enrollment_take_event(&enrollment_event)) {
-            if (enrollment_event.type == TATER_BLE_ENROLLMENT_EVENT_RESULT) {
-                tater_protocol_send_ble_enrollment_result(
-                    enrollment_event.enrollment_id,
-                    enrollment_event.ok,
-                    enrollment_event.ok ? enrollment_event.irk : NULL,
-                    enrollment_event.error
-                );
-            } else if (enrollment_event.type == TATER_BLE_ENROLLMENT_EVENT_STATUS) {
-                tater_protocol_send_ble_enrollment_status(
-                    enrollment_event.enrollment_id,
-                    enrollment_event.status,
-                    enrollment_event.error
-                );
-            }
-            memset(&enrollment_event, 0, sizeof(enrollment_event));
-        }
         if (++heartbeat_ticks < 20) {
             continue;
         }
