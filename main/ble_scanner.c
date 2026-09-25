@@ -68,6 +68,8 @@ static size_t s_enrollment_event_head;
 static size_t s_enrollment_event_count;
 
 #if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+static volatile bool s_enrollment_available;
+
 typedef struct {
     bool active;
     bool capture_pending;
@@ -111,6 +113,7 @@ static const struct ble_gatt_svc_def s_enrollment_services[] = {
         .characteristics = (struct ble_gatt_chr_def[]) {
             {
                 .uuid = BLE_UUID16_DECLARE(0x2a37),
+                .access_cb = enrollment_gatt_access,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
             },
             {
@@ -575,11 +578,14 @@ static void start_stack(void)
     int rc = enrollment_gatt_init();
     if (rc != 0) {
         portENTER_CRITICAL(&s_ble_lock);
-        s_requested_enabled = false;
+        s_enrollment_available = false;
         s_stats.last_error = rc;
         portEXIT_CRITICAL(&s_ble_lock);
-        ESP_LOGE(TAG, "BLE enrollment GATT init failed rc=%d", rc);
-        return;
+        ESP_LOGE(
+            TAG,
+            "BLE enrollment GATT init failed rc=%d; passive presence scanning will continue",
+            rc
+        );
     }
     ble_store_config_init();
     s_initialized = true;
@@ -658,7 +664,7 @@ bool tater_ble_scanner_supported(void)
 bool tater_ble_enrollment_supported(void)
 {
 #if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
-    return true;
+    return s_enrollment_available;
 #else
     return false;
 #endif
@@ -785,6 +791,9 @@ void tater_ble_scanner_init(tater_ble_batch_callback_t batch_callback)
     memset(&s_stats, 0, sizeof(s_stats));
     s_stats.supported = supported;
     s_requested_enabled = supported;
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    s_enrollment_available = supported;
+#endif
     portEXIT_CRITICAL(&s_ble_lock);
 }
 

@@ -1,4 +1,4 @@
-- Releases native firmware `0.4.3` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Adds one-shot BLE enrollment so any native ESP32 satellite can securely pair a nearby phone or watch and report its identity resolving key to Tater.
-- Requires an explicit, short-lived enrollment request from Tater, removes the temporary bond after key capture, and resumes passive room-presence scanning.
-- Advertises BLE enrollment support through the native satellite protocol while keeping identity keys out of logs.
+- Releases native firmware `0.4.4` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Restores passive BLE room-presence scanning by registering a valid access callback for the enrollment notification characteristic.
+- Keeps passive presence scanning available if the optional enrollment GATT service cannot initialize.
+- Retains the secure, short-lived phone and watch enrollment flow introduced in `0.4.3`.
