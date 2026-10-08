@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -50,6 +51,9 @@ using sendspin::SendspinPersistenceProvider;
 constexpr uint16_t SENDSPIN_PORT = 8928;
 constexpr size_t SENDSPIN_AUDIO_BUFFER_BYTES = 512 * 1024;
 constexpr size_t SENDSPIN_SYNC_STACK_BYTES = 8192;
+constexpr uint16_t SENDSPIN_STARTUP_HEADROOM_MS = 120;
+constexpr unsigned SENDSPIN_SYNC_TASK_PRIORITY = 7;
+constexpr int64_t SENDSPIN_STARVATION_MIN_US = 10000;
 constexpr TickType_t SENDSPIN_LOOP_TICKS = pdMS_TO_TICKS(5);
 constexpr const char *SENDSPIN_NVS_NAMESPACE = "sendspin";
 constexpr const char *SENDSPIN_NVS_LAST_SERVER = "last_server";
@@ -70,6 +74,19 @@ std::atomic<uint8_t> s_output_volume{80};
 std::atomic<uint8_t> s_desired_volume{80};
 std::atomic<uint8_t> s_output_channel{TATER_SENDSPIN_OUTPUT_STEREO};
 std::atomic<uint64_t> s_written_frames{0};
+std::atomic<uint32_t> s_streams_started{0};
+std::atomic<uint32_t> s_streams_completed{0};
+std::atomic<uint32_t> s_audio_write_failures{0};
+std::atomic<uint32_t> s_render_clock_failures{0};
+std::atomic<uint32_t> s_output_starvations{0};
+std::atomic<uint32_t> s_last_starvation_us{0};
+std::atomic<uint32_t> s_max_starvation_us{0};
+std::atomic<uint32_t> s_max_queued_frames{0};
+std::atomic<uint32_t> s_time_sync_updates{0};
+std::atomic<uint32_t> s_clock_error_us{0};
+std::atomic<uint32_t> s_max_clock_error_us{0};
+std::atomic<int64_t> s_output_empty_since_us{0};
+std::atomic<bool> s_received_stream_audio{false};
 
 char s_friendly_name[TATER_CFG_DEVICE_NAME_LEN] = {};
 char s_client_id[48] = {};
@@ -104,6 +121,34 @@ bool configure_sendspin_sync_stack(unsigned priority) {
 
 bool native_audio_claimed() {
     return s_native_audio_claim_count.load(std::memory_order_acquire) != 0;
+}
+
+void update_atomic_max(std::atomic<uint32_t> &target, uint32_t value) {
+    uint32_t current = target.load(std::memory_order_relaxed);
+    while (value > current && !target.compare_exchange_weak(
+        current,
+        value,
+        std::memory_order_relaxed,
+        std::memory_order_relaxed
+    )) {
+    }
+}
+
+void finish_output_starvation(int64_t now_us) {
+    int64_t started_us = s_output_empty_since_us.exchange(0, std::memory_order_acq_rel);
+    if (started_us <= 0 || now_us <= started_us) {
+        return;
+    }
+    int64_t duration_us = now_us - started_us;
+    if (duration_us < SENDSPIN_STARVATION_MIN_US) {
+        return;
+    }
+    uint32_t bounded_us = static_cast<uint32_t>(
+        std::min<int64_t>(duration_us, UINT32_MAX)
+    );
+    s_output_starvations.fetch_add(1, std::memory_order_relaxed);
+    s_last_starvation_us.store(bounded_us, std::memory_order_relaxed);
+    update_atomic_max(s_max_starvation_us, bounded_us);
 }
 
 const char *output_channel_name(tater_sendspin_output_channel_t channel) {
@@ -250,6 +295,16 @@ private:
 
 class TaterClientListener final : public SendspinClientListener {
 public:
+    void on_time_sync_updated(float error) override {
+        uint32_t error_us = static_cast<uint32_t>(std::min<double>(
+            std::abs(static_cast<double>(error)),
+            static_cast<double>(UINT32_MAX)
+        ));
+        s_time_sync_updates.fetch_add(1, std::memory_order_relaxed);
+        s_clock_error_us.store(error_us, std::memory_order_relaxed);
+        update_atomic_max(s_max_clock_error_us, error_us);
+    }
+
     void on_request_high_performance() override {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
     }
@@ -274,6 +329,8 @@ public:
             return 0;
         }
 
+        finish_output_starvation(esp_timer_get_time());
+
         int16_t *samples = reinterpret_cast<int16_t *>(data);
         size_t sample_count = length / sizeof(int16_t);
         size_t frames = length / (TATER_SPK_CHANNELS * sizeof(int16_t));
@@ -293,15 +350,29 @@ public:
         esp_err_t err = tater_audio_write_speaker_frames(samples, frames);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Sendspin I2S write failed: %s", esp_err_to_name(err));
+            s_audio_write_failures.fetch_add(1, std::memory_order_relaxed);
             s_disconnect_requested.store(true, std::memory_order_release);
             return 0;
         }
-        s_written_frames.fetch_add(static_cast<uint64_t>(frames), std::memory_order_release);
+        uint64_t written = s_written_frames.fetch_add(
+            static_cast<uint64_t>(frames),
+            std::memory_order_acq_rel
+        ) + frames;
+        uint64_t notified = notified_frames_.load(std::memory_order_acquire);
+        uint64_t queued = written > notified ? written - notified : 0;
+        update_atomic_max(
+            s_max_queued_frames,
+            static_cast<uint32_t>(std::min<uint64_t>(queued, UINT32_MAX))
+        );
+        s_received_stream_audio.store(true, std::memory_order_release);
         return length;
     }
 
     void on_stream_start() override {
         s_stream_active.store(true, std::memory_order_release);
+        s_streams_started.fetch_add(1, std::memory_order_relaxed);
+        s_output_empty_since_us.store(0, std::memory_order_release);
+        s_received_stream_audio.store(false, std::memory_order_release);
         if (native_audio_claimed()) {
             ESP_LOGW(TAG, "rejecting Sendspin stream while native audio owns the speaker");
             s_disconnect_requested.store(true, std::memory_order_release);
@@ -328,13 +399,14 @@ public:
         tater_audio_render_clock_t clock = {};
         if (!tater_audio_speaker_render_clock_snapshot(&clock)) {
             ESP_LOGE(TAG, "Sendspin render clock unavailable");
+            s_render_clock_failures.fetch_add(1, std::memory_order_relaxed);
             tater_audio_speaker_end();
             s_disconnect_requested.store(true, std::memory_order_release);
             return;
         }
         last_completed_frames_ = clock.completed_frames;
         pending_prefix_frames_ = clock.submitted_frames - clock.completed_frames;
-        notified_frames_ = 0;
+        notified_frames_.store(0, std::memory_order_release);
         s_written_frames.store(0, std::memory_order_release);
         s_speaker_owned.store(true, std::memory_order_release);
         ESP_LOGI(
@@ -349,11 +421,14 @@ public:
 
     void on_stream_end() override {
         s_stream_active.store(false, std::memory_order_release);
+        s_streams_completed.fetch_add(1, std::memory_order_relaxed);
+        s_output_empty_since_us.store(0, std::memory_order_release);
+        s_received_stream_audio.store(false, std::memory_order_release);
         if (s_speaker_owned.exchange(false, std::memory_order_acq_rel)) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(tater_audio_speaker_end());
         }
         s_written_frames.store(0, std::memory_order_release);
-        notified_frames_ = 0;
+        notified_frames_.store(0, std::memory_order_release);
         ESP_LOGI(TAG, "Sendspin stream ended");
     }
 
@@ -377,6 +452,7 @@ public:
         }
         tater_audio_render_clock_t clock = {};
         if (!tater_audio_speaker_render_clock_snapshot(&clock)) {
+            s_render_clock_failures.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         uint32_t completed_delta = clock.completed_frames - last_completed_frames_;
@@ -389,14 +465,25 @@ public:
         pending_prefix_frames_ = 0;
 
         uint64_t written = s_written_frames.load(std::memory_order_acquire);
-        uint64_t outstanding = written > notified_frames_ ? written - notified_frames_ : 0;
+        uint64_t notified = notified_frames_.load(std::memory_order_acquire);
+        uint64_t outstanding = written > notified ? written - notified : 0;
+        if (outstanding == 0 && written > 0
+            && s_received_stream_audio.load(std::memory_order_acquire)) {
+            int64_t expected = 0;
+            (void)s_output_empty_since_us.compare_exchange_strong(
+                expected,
+                esp_timer_get_time(),
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed
+            );
+        }
         uint32_t played_audio_frames = static_cast<uint32_t>(
             std::min<uint64_t>(completed_delta, outstanding)
         );
         if (played_audio_frames == 0) {
             return;
         }
-        notified_frames_ += played_audio_frames;
+        notified_frames_.fetch_add(played_audio_frames, std::memory_order_acq_rel);
         player_->notify_audio_played(played_audio_frames, esp_timer_get_time());
     }
 
@@ -404,7 +491,7 @@ private:
     PlayerRole *player_;
     uint32_t last_completed_frames_{0};
     uint32_t pending_prefix_frames_{0};
-    uint64_t notified_frames_{0};
+    std::atomic<uint64_t> notified_frames_{0};
 };
 
 bool start_mdns_advertisement() {
@@ -459,7 +546,8 @@ void sendspin_task(void *arg) {
         (static_cast<int64_t>(TATER_MEDIA_RENDER_LATENCY_FRAMES) * 1000000LL)
         / TATER_SPK_SAMPLE_RATE
     );
-    player_config.extra_startup_silence_ms = 50;
+    player_config.extra_startup_silence_ms = SENDSPIN_STARTUP_HEADROOM_MS;
+    player_config.priority = SENDSPIN_SYNC_TASK_PRIORITY;
     player_config.psram_stack = configure_sendspin_sync_stack(player_config.priority);
     player_config.decode_buffer_location = MemoryLocation::PREFER_EXTERNAL;
 
@@ -618,4 +706,25 @@ extern "C" const char *tater_sendspin_output_channel_mode(void) {
 
 extern "C" bool tater_sendspin_is_playing(void) {
     return s_stream_active.load(std::memory_order_acquire);
+}
+
+extern "C" void tater_sendspin_stats_snapshot(tater_sendspin_stats_t *stats) {
+    if (!stats) {
+        return;
+    }
+    std::memset(stats, 0, sizeof(*stats));
+    stats->active = s_stream_active.load(std::memory_order_acquire);
+    stats->streams_started = s_streams_started.load(std::memory_order_relaxed);
+    stats->streams_completed = s_streams_completed.load(std::memory_order_relaxed);
+    stats->audio_write_failures = s_audio_write_failures.load(std::memory_order_relaxed);
+    stats->render_clock_failures = s_render_clock_failures.load(std::memory_order_relaxed);
+    stats->output_starvations = s_output_starvations.load(std::memory_order_relaxed);
+    stats->last_starvation_us = s_last_starvation_us.load(std::memory_order_relaxed);
+    stats->max_starvation_us = s_max_starvation_us.load(std::memory_order_relaxed);
+    stats->max_queued_frames = s_max_queued_frames.load(std::memory_order_relaxed);
+    stats->time_sync_updates = s_time_sync_updates.load(std::memory_order_relaxed);
+    stats->clock_error_us = s_clock_error_us.load(std::memory_order_relaxed);
+    stats->max_clock_error_us = s_max_clock_error_us.load(std::memory_order_relaxed);
+    stats->startup_headroom_ms = SENDSPIN_STARTUP_HEADROOM_MS;
+    stats->sync_task_priority = SENDSPIN_SYNC_TASK_PRIORITY;
 }

@@ -2949,6 +2949,24 @@ void tater_protocol_send_status(const char *state)
         s_last_json_send_type[0] ? s_last_json_send_type : ""
     );
     cJSON_AddItemToObject(payload, "transport", transport);
+    tater_sendspin_stats_t sendspin_stats = {0};
+    tater_sendspin_stats_snapshot(&sendspin_stats);
+    cJSON *sendspin = cJSON_CreateObject();
+    cJSON_AddBoolToObject(sendspin, "active", sendspin_stats.active);
+    cJSON_AddNumberToObject(sendspin, "streams_started", sendspin_stats.streams_started);
+    cJSON_AddNumberToObject(sendspin, "streams_completed", sendspin_stats.streams_completed);
+    cJSON_AddNumberToObject(sendspin, "audio_write_failures", sendspin_stats.audio_write_failures);
+    cJSON_AddNumberToObject(sendspin, "render_clock_failures", sendspin_stats.render_clock_failures);
+    cJSON_AddNumberToObject(sendspin, "output_starvations", sendspin_stats.output_starvations);
+    cJSON_AddNumberToObject(sendspin, "last_starvation_us", sendspin_stats.last_starvation_us);
+    cJSON_AddNumberToObject(sendspin, "max_starvation_us", sendspin_stats.max_starvation_us);
+    cJSON_AddNumberToObject(sendspin, "max_queued_frames", sendspin_stats.max_queued_frames);
+    cJSON_AddNumberToObject(sendspin, "time_sync_updates", sendspin_stats.time_sync_updates);
+    cJSON_AddNumberToObject(sendspin, "clock_error_us", sendspin_stats.clock_error_us);
+    cJSON_AddNumberToObject(sendspin, "max_clock_error_us", sendspin_stats.max_clock_error_us);
+    cJSON_AddNumberToObject(sendspin, "startup_headroom_ms", sendspin_stats.startup_headroom_ms);
+    cJSON_AddNumberToObject(sendspin, "sync_task_priority", sendspin_stats.sync_task_priority);
+    cJSON_AddItemToObject(payload, "sendspin", sendspin);
     cJSON_AddItemToObject(payload, "reset", reset_diag_json());
     tater_ble_scanner_stats_t ble_stats = {0};
     tater_ble_scanner_get_stats(&ble_stats);

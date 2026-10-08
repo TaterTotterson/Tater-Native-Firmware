@@ -1,3 +1,3 @@
-- Releases native firmware `0.4.8` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Prevents Sendspin FLAC playback from overflowing its decoder thread stack and rebooting a satellite.
-- Places the larger Sendspin synchronization and decoder stack in PSRAM on every supported native satellite, with a safe internal-memory fallback if PSRAM configuration is unavailable.
+- Releases native firmware `0.4.9` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Makes Sendspin music start and settle more smoothly with additional startup headroom and higher-priority synchronization.
+- Adds Sendspin clock, output-continuity, and playback diagnostics to satellite status for easier troubleshooting.
