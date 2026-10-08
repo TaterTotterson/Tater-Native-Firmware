@@ -1,7 +1,3 @@
-- Releases native firmware `0.4.7` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Replaces Tater's retired synchronized-media protocol with a Sendspin v1 player supporting FLAC and PCM at 48 kHz stereo, with direct discovery by Tater, Music Assistant, and other compatible controllers.
-- Adds persistent `stereo`, `left`, `right`, and `mono` Sendspin output modes so Tater stereo pairs keep their existing left/right assignments across reconnects and reboots.
-- Removes the legacy `audio.clock.sync` and `media.session.*` implementation instead of maintaining two grouped-playback stacks.
-- Preserves native voice replies, interactive TTS, announcements, wake cues, timers, tones, audio scenes, barge-in, and passive BLE presence reporting. Native audio temporarily releases Sendspin and makes the player available again when it finishes.
-- Adds No Animation for listening, thinking, tool-call, and replying states on LED-ring models while retaining setup, error, timer, mute, volume, OTA, and connection-status indicators.
-- Keeps the ReSpeaker image within its OTA partition by retaining the standard wake cue and omitting alternate embedded wake sounds.
+- Releases native firmware `0.4.8` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Prevents Sendspin FLAC playback from overflowing its decoder thread stack and rebooting a satellite.
+- Places the larger Sendspin synchronization and decoder stack in PSRAM on every supported native satellite, with a safe internal-memory fallback if PSRAM configuration is unavailable.

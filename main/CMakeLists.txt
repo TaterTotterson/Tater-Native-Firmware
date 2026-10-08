@@ -56,6 +56,7 @@ idf_component_register(
         led_strip
         mdns
         nvs_flash
+        pthread
         sendspin-cpp
         spiffs
         tflm_microfrontend

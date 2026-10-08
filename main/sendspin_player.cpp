@@ -12,7 +12,9 @@
 #include <vector>
 
 #include "board.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_pthread.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -47,6 +49,7 @@ using sendspin::SendspinPersistenceProvider;
 
 constexpr uint16_t SENDSPIN_PORT = 8928;
 constexpr size_t SENDSPIN_AUDIO_BUFFER_BYTES = 512 * 1024;
+constexpr size_t SENDSPIN_SYNC_STACK_BYTES = 8192;
 constexpr TickType_t SENDSPIN_LOOP_TICKS = pdMS_TO_TICKS(5);
 constexpr const char *SENDSPIN_NVS_NAMESPACE = "sendspin";
 constexpr const char *SENDSPIN_NVS_LAST_SERVER = "last_server";
@@ -70,6 +73,34 @@ std::atomic<uint64_t> s_written_frames{0};
 
 char s_friendly_name[TATER_CFG_DEVICE_NAME_LEN] = {};
 char s_client_id[48] = {};
+
+bool configure_sendspin_sync_stack(unsigned priority) {
+    esp_pthread_cfg_t config = esp_pthread_get_default_config();
+    config.stack_size = SENDSPIN_SYNC_STACK_BYTES;
+    config.prio = priority;
+    config.thread_name = "Sendspin";
+    config.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+
+    esp_err_t err = esp_pthread_set_cfg(&config);
+    if (err != ESP_OK) {
+        ESP_LOGW(
+            TAG,
+            "could not configure Sendspin PSRAM stack: %s; using internal stack",
+            esp_err_to_name(err)
+        );
+        return false;
+    }
+
+    // sendspin-cpp 0.8.0 asks ESP-IDF for MALLOC_CAP_SPIRAM without the
+    // required MALLOC_CAP_8BIT flag. ESP-IDF rejects that later request and
+    // retains this valid per-task configuration for the sync/decode pthread.
+    ESP_LOGI(
+        TAG,
+        "Sendspin sync stack configured bytes=%u memory=psram",
+        static_cast<unsigned>(SENDSPIN_SYNC_STACK_BYTES)
+    );
+    return true;
+}
 
 bool native_audio_claimed() {
     return s_native_audio_claim_count.load(std::memory_order_acquire) != 0;
@@ -429,7 +460,7 @@ void sendspin_task(void *arg) {
         / TATER_SPK_SAMPLE_RATE
     );
     player_config.extra_startup_silence_ms = 50;
-    player_config.psram_stack = true;
+    player_config.psram_stack = configure_sendspin_sync_stack(player_config.priority);
     player_config.decode_buffer_location = MemoryLocation::PREFER_EXTERNAL;
 
     PlayerRole &player = client.add_player(std::move(player_config));
