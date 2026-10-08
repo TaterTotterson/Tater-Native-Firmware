@@ -2152,6 +2152,7 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "sendspin_player", true);
     cJSON_AddNumberToObject(caps, "sendspin_version", 1);
     cJSON_AddBoolToObject(caps, "sendspin_output_channel_selection", true);
+    cJSON_AddBoolToObject(caps, "sendspin_output_delay_adjustable", true);
     cJSON *sendspin_output_channels = cJSON_CreateArray();
     cJSON_AddItemToArray(sendspin_output_channels, cJSON_CreateString("stereo"));
     cJSON_AddItemToArray(sendspin_output_channels, cJSON_CreateString("left"));
@@ -2965,6 +2966,9 @@ void tater_protocol_send_status(const char *state)
     cJSON_AddNumberToObject(sendspin, "clock_error_us", sendspin_stats.clock_error_us);
     cJSON_AddNumberToObject(sendspin, "max_clock_error_us", sendspin_stats.max_clock_error_us);
     cJSON_AddNumberToObject(sendspin, "startup_headroom_ms", sendspin_stats.startup_headroom_ms);
+    cJSON_AddNumberToObject(sendspin, "output_delay_ms", sendspin_stats.output_delay_ms);
+    cJSON_AddNumberToObject(sendspin, "fixed_output_delay_us", sendspin_stats.fixed_output_delay_us);
+    cJSON_AddBoolToObject(sendspin, "output_delay_adjustable", sendspin_stats.output_delay_adjustable);
     cJSON_AddNumberToObject(sendspin, "sync_task_priority", sendspin_stats.sync_task_priority);
     cJSON_AddItemToObject(payload, "sendspin", sendspin);
     cJSON_AddItemToObject(payload, "reset", reset_diag_json());

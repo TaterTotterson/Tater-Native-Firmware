@@ -85,6 +85,7 @@ std::atomic<uint32_t> s_max_queued_frames{0};
 std::atomic<uint32_t> s_time_sync_updates{0};
 std::atomic<uint32_t> s_clock_error_us{0};
 std::atomic<uint32_t> s_max_clock_error_us{0};
+std::atomic<uint16_t> s_output_delay_ms{0};
 std::atomic<int64_t> s_output_empty_since_us{0};
 std::atomic<bool> s_received_stream_audio{false};
 
@@ -446,6 +447,15 @@ public:
         s_muted.store(muted, std::memory_order_release);
     }
 
+    void on_static_delay_changed(uint16_t delay_ms) override {
+        s_output_delay_ms.store(delay_ms, std::memory_order_release);
+        ESP_LOGI(
+            TAG,
+            "Sendspin output delay calibration=%u ms",
+            static_cast<unsigned>(delay_ms)
+        );
+    }
+
     void poll_render_clock() {
         if (!s_speaker_owned.load(std::memory_order_acquire)) {
             return;
@@ -536,30 +546,39 @@ void sendspin_task(void *arg) {
     client_config.websocket_payload_location = MemoryLocation::PREFER_EXTERNAL;
 
     SendspinClient client(std::move(client_config));
+    TaterNetworkProvider network_provider;
+    TaterPersistenceProvider persistence_provider;
+    TaterClientListener client_listener;
+    // sendspin-cpp 0.8 captures the persistence provider when a role is
+    // created, so providers must be attached before add_player().
+    client.set_listener(&client_listener);
+    client.set_network_provider(&network_provider);
+    client.set_persistence_provider(&persistence_provider);
+
     PlayerRoleConfig player_config;
     player_config.audio_formats = {
         {SendspinCodecFormat::FLAC, TATER_SPK_CHANNELS, TATER_SPK_SAMPLE_RATE, 16},
         {SendspinCodecFormat::PCM, TATER_SPK_CHANNELS, TATER_SPK_SAMPLE_RATE, 16},
     };
     player_config.audio_buffer_capacity = SENDSPIN_AUDIO_BUFFER_BYTES;
-    player_config.fixed_delay_us = static_cast<int32_t>(
+    const int32_t fixed_output_delay_us = static_cast<int32_t>(
         (static_cast<int64_t>(TATER_MEDIA_RENDER_LATENCY_FRAMES) * 1000000LL)
         / TATER_SPK_SAMPLE_RATE
     );
+    player_config.fixed_delay_us = fixed_output_delay_us;
     player_config.extra_startup_silence_ms = SENDSPIN_STARTUP_HEADROOM_MS;
     player_config.priority = SENDSPIN_SYNC_TASK_PRIORITY;
     player_config.psram_stack = configure_sendspin_sync_stack(player_config.priority);
     player_config.decode_buffer_location = MemoryLocation::PREFER_EXTERNAL;
 
     PlayerRole &player = client.add_player(std::move(player_config));
+    // Every native board has its own fixed hardware-pipeline compensation
+    // above. Also advertise Sendspin's standard user-adjustable delay so a
+    // controller can align mixed hardware families without changing the
+    // board-specific value. The persistence provider keeps it across boots.
+    player.set_static_delay_adjustable(true);
     TaterPlayerListener player_listener(&player);
-    TaterNetworkProvider network_provider;
-    TaterPersistenceProvider persistence_provider;
-    TaterClientListener client_listener;
     player.set_listener(&player_listener);
-    client.set_listener(&client_listener);
-    client.set_network_provider(&network_provider);
-    client.set_persistence_provider(&persistence_provider);
 
     if (!client.start()) {
         ESP_LOGE(TAG, "Sendspin client failed to start");
@@ -567,6 +586,13 @@ void sendspin_task(void *arg) {
         vTaskDelete(nullptr);
         return;
     }
+    s_output_delay_ms.store(player.get_static_delay_ms(), std::memory_order_release);
+    ESP_LOGI(
+        TAG,
+        "Sendspin output timing fixed=%ld us adjustable=%u ms",
+        static_cast<long>(fixed_output_delay_us),
+        static_cast<unsigned>(player.get_static_delay_ms())
+    );
     player.update_volume(s_desired_volume.load(std::memory_order_acquire));
 
     bool mdns_started = false;
@@ -726,5 +752,11 @@ extern "C" void tater_sendspin_stats_snapshot(tater_sendspin_stats_t *stats) {
     stats->clock_error_us = s_clock_error_us.load(std::memory_order_relaxed);
     stats->max_clock_error_us = s_max_clock_error_us.load(std::memory_order_relaxed);
     stats->startup_headroom_ms = SENDSPIN_STARTUP_HEADROOM_MS;
+    stats->output_delay_ms = s_output_delay_ms.load(std::memory_order_relaxed);
+    stats->fixed_output_delay_us = static_cast<int32_t>(
+        (static_cast<int64_t>(TATER_MEDIA_RENDER_LATENCY_FRAMES) * 1000000LL)
+        / TATER_SPK_SAMPLE_RATE
+    );
+    stats->output_delay_adjustable = true;
     stats->sync_task_priority = SENDSPIN_SYNC_TASK_PRIORITY;
 }

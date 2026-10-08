@@ -31,6 +31,9 @@ typedef struct {
     uint32_t clock_error_us;
     uint32_t max_clock_error_us;
     uint16_t startup_headroom_ms;
+    uint16_t output_delay_ms;
+    int32_t fixed_output_delay_us;
+    bool output_delay_adjustable;
     uint8_t sync_task_priority;
 } tater_sendspin_stats_t;
 
