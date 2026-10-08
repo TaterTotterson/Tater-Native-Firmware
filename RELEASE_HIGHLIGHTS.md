@@ -1,3 +1,4 @@
 - Releases native firmware `0.4.9` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
 - Makes Sendspin music start and settle more smoothly with additional startup headroom and higher-priority synchronization.
 - Adds Sendspin clock, output-continuity, and playback diagnostics to satellite status for easier troubleshooting.
+- Enables Satellite1 3.5 mm line-out with automatic jack detection and live Internal, AUX, or Both output routing.

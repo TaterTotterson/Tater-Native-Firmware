@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include "audio_aec.h"
 #include "audio_render_clock.h"
@@ -87,6 +88,24 @@ extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_end[] asm("_binary_sat1
 #define SAT1_SPK_DMA_DESC_NUM 4
 #define SAT1_SPK_DMA_FRAME_NUM 240
 #define SAT1_SPK_WRITE_FRAMES SAT1_SPK_DMA_FRAME_NUM
+#define SAT1_PCM5122_GPIO_INPUT_REG 0x77
+#define SAT1_PCM5122_LINE_OUT_GPIO_MASK (1u << 2)
+#define SAT1_LINE_OUT_POLL_INTERVAL_US 200000
+#define SAT1_LINE_OUT_DEBOUNCE_SAMPLES 2
+
+typedef enum {
+    SAT1_OUTPUT_MODE_AUTO = 0,
+    SAT1_OUTPUT_MODE_INTERNAL,
+    SAT1_OUTPUT_MODE_AUX,
+    SAT1_OUTPUT_MODE_BOTH,
+} sat1_output_mode_t;
+
+typedef enum {
+    SAT1_OUTPUT_ACTIVE_NONE = 0,
+    SAT1_OUTPUT_ACTIVE_INTERNAL,
+    SAT1_OUTPUT_ACTIVE_AUX,
+    SAT1_OUTPUT_ACTIVE_BOTH,
+} sat1_output_active_t;
 
 static i2s_chan_handle_t s_rx_chan;
 static i2s_chan_handle_t s_tx_chan;
@@ -101,6 +120,14 @@ static bool s_speaker_primed;
 static bool s_speaker_session_active;
 static tater_audio_render_clock_state_t s_render_clock;
 static SemaphoreHandle_t s_speaker_mutex;
+static SemaphoreHandle_t s_output_mutex;
+static sat1_output_mode_t s_output_mode = SAT1_OUTPUT_MODE_AUTO;
+static sat1_output_active_t s_output_active = SAT1_OUTPUT_ACTIVE_NONE;
+static bool s_line_out_connected;
+static bool s_line_out_state_valid;
+static bool s_line_out_candidate;
+static uint8_t s_line_out_candidate_count;
+static int64_t s_line_out_last_poll_us;
 static uint8_t s_tas_power_mode = 0xff;
 static bool s_pd_fallback_warning_logged;
 static portMUX_TYPE s_speaker_level_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -493,6 +520,225 @@ static esp_err_t tas2780_deactivate(void)
     ESP_RETURN_ON_ERROR(tas2780_set_mute(true), TAG, "tas mute failed");
     ESP_RETURN_ON_ERROR(tas2780_write_page(0x00), TAG, "tas page failed");
     return i2c_write_reg(TATER_SAT1_TAS2780_I2C_ADDR, 0x02, 0x82);
+}
+
+static const char *sat1_output_mode_name(sat1_output_mode_t mode)
+{
+    switch (mode) {
+    case SAT1_OUTPUT_MODE_INTERNAL:
+        return "internal";
+    case SAT1_OUTPUT_MODE_AUX:
+        return "aux";
+    case SAT1_OUTPUT_MODE_BOTH:
+        return "both";
+    case SAT1_OUTPUT_MODE_AUTO:
+    default:
+        return "auto";
+    }
+}
+
+static const char *sat1_output_active_name(sat1_output_active_t output)
+{
+    switch (output) {
+    case SAT1_OUTPUT_ACTIVE_INTERNAL:
+        return "internal";
+    case SAT1_OUTPUT_ACTIVE_AUX:
+        return "aux";
+    case SAT1_OUTPUT_ACTIVE_BOTH:
+        return "both";
+    case SAT1_OUTPUT_ACTIVE_NONE:
+    default:
+        return "none";
+    }
+}
+
+static bool sat1_output_mode_parse(const char *mode, sat1_output_mode_t *out)
+{
+    if (!mode || !out) {
+        return false;
+    }
+    if (strcasecmp(mode, "auto") == 0) {
+        *out = SAT1_OUTPUT_MODE_AUTO;
+    } else if (strcasecmp(mode, "internal") == 0 || strcasecmp(mode, "speaker") == 0) {
+        *out = SAT1_OUTPUT_MODE_INTERNAL;
+    } else if (strcasecmp(mode, "aux") == 0 || strcasecmp(mode, "line_out") == 0 ||
+               strcasecmp(mode, "line-out") == 0) {
+        *out = SAT1_OUTPUT_MODE_AUX;
+    } else if (strcasecmp(mode, "both") == 0) {
+        *out = SAT1_OUTPUT_MODE_BOTH;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static esp_err_t sat1_output_mutex_ensure(void)
+{
+    if (!s_output_mutex) {
+        s_output_mutex = xSemaphoreCreateMutex();
+    }
+    return s_output_mutex ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+static sat1_output_active_t sat1_output_desired_locked(void)
+{
+    switch (s_output_mode) {
+    case SAT1_OUTPUT_MODE_INTERNAL:
+        return SAT1_OUTPUT_ACTIVE_INTERNAL;
+    case SAT1_OUTPUT_MODE_AUX:
+        return SAT1_OUTPUT_ACTIVE_AUX;
+    case SAT1_OUTPUT_MODE_BOTH:
+        return SAT1_OUTPUT_ACTIVE_BOTH;
+    case SAT1_OUTPUT_MODE_AUTO:
+    default:
+        return s_line_out_state_valid && s_line_out_connected
+            ? SAT1_OUTPUT_ACTIVE_AUX
+            : SAT1_OUTPUT_ACTIVE_INTERNAL;
+    }
+}
+
+static esp_err_t sat1_output_apply_locked(bool playing, uint8_t tas_power_mode)
+{
+    sat1_output_active_t desired = playing ? sat1_output_desired_locked() : SAT1_OUTPUT_ACTIVE_NONE;
+    bool wants_internal = desired == SAT1_OUTPUT_ACTIVE_INTERNAL || desired == SAT1_OUTPUT_ACTIVE_BOTH;
+    bool wants_aux = desired == SAT1_OUTPUT_ACTIVE_AUX || desired == SAT1_OUTPUT_ACTIVE_BOTH;
+    esp_err_t result = ESP_OK;
+
+    /* Mute every path being removed before enabling a replacement. */
+    if (!wants_aux) {
+        esp_err_t err = pcm5122_set_mute(true);
+        if (result == ESP_OK && err != ESP_OK) {
+            result = err;
+        }
+    }
+    if (!wants_internal) {
+        esp_err_t err = tas2780_deactivate();
+        if (result == ESP_OK && err != ESP_OK) {
+            result = err;
+        }
+    }
+
+    if (wants_internal) {
+        esp_err_t err = tas2780_activate(tas_power_mode);
+        if (result == ESP_OK && err != ESP_OK) {
+            result = err;
+        }
+    }
+    if (wants_aux) {
+        esp_err_t err = pcm5122_set_mute(false);
+        if (result == ESP_OK && err != ESP_OK) {
+            result = err;
+        }
+    }
+
+    if (result == ESP_OK) {
+        if (s_output_active != desired) {
+            ESP_LOGI(
+                TAG,
+                "audio output changed mode=%s active=%s jack=%d playing=%d",
+                sat1_output_mode_name(s_output_mode),
+                sat1_output_active_name(desired),
+                s_line_out_connected,
+                playing
+            );
+        }
+        s_output_active = desired;
+    }
+    return result;
+}
+
+static esp_err_t pcm5122_read_line_out_connected(bool *connected)
+{
+    if (!connected) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_RETURN_ON_ERROR(i2c_write_reg(TATER_SAT1_PCM5122_I2C_ADDR, 0x00, 0x00), TAG, "pcm page failed");
+    uint8_t gpio_input = 0;
+    ESP_RETURN_ON_ERROR(
+        i2c_read_reg(TATER_SAT1_PCM5122_I2C_ADDR, SAT1_PCM5122_GPIO_INPUT_REG, &gpio_input),
+        TAG,
+        "pcm gpio read failed"
+    );
+    *connected = (gpio_input & SAT1_PCM5122_LINE_OUT_GPIO_MASK) != 0;
+    return ESP_OK;
+}
+
+static void sat1_output_poll(int64_t now_us)
+{
+    if (now_us - s_line_out_last_poll_us < SAT1_LINE_OUT_POLL_INTERVAL_US) {
+        return;
+    }
+    s_line_out_last_poll_us = now_us;
+
+    bool connected = false;
+    if (pcm5122_read_line_out_connected(&connected) != ESP_OK) {
+        return;
+    }
+    if (connected == s_line_out_candidate) {
+        if (s_line_out_candidate_count < UINT8_MAX) {
+            s_line_out_candidate_count++;
+        }
+    } else {
+        s_line_out_candidate = connected;
+        s_line_out_candidate_count = 1;
+    }
+    if (s_line_out_candidate_count < SAT1_LINE_OUT_DEBOUNCE_SAMPLES ||
+        (s_line_out_state_valid && s_line_out_connected == connected)) {
+        return;
+    }
+
+    if (sat1_output_mutex_ensure() != ESP_OK ||
+        xSemaphoreTake(s_output_mutex, pdMS_TO_TICKS(250)) != pdTRUE) {
+        return;
+    }
+    bool changed = !s_line_out_state_valid || s_line_out_connected != connected;
+    s_line_out_state_valid = true;
+    s_line_out_connected = connected;
+    if (changed) {
+        ESP_LOGI(TAG, "line-out jack %s", connected ? "connected" : "disconnected");
+        if (s_output_mode == SAT1_OUTPUT_MODE_AUTO && s_speaker_session_active) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(
+                sat1_output_apply_locked(true, sat1_pd_recommended_tas_mode())
+            );
+        }
+    }
+    xSemaphoreGive(s_output_mutex);
+}
+
+esp_err_t tater_audio_sat1_set_output_mode(const char *mode)
+{
+    sat1_output_mode_t parsed = SAT1_OUTPUT_MODE_AUTO;
+    if (!sat1_output_mode_parse(mode, &parsed)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ESP_RETURN_ON_ERROR(sat1_output_mutex_ensure(), TAG, "output mutex failed");
+    ESP_RETURN_ON_FALSE(
+        xSemaphoreTake(s_output_mutex, pdMS_TO_TICKS(1000)) == pdTRUE,
+        ESP_ERR_TIMEOUT,
+        TAG,
+        "output mode lock timeout"
+    );
+    s_output_mode = parsed;
+    esp_err_t result = sat1_output_apply_locked(
+        s_speaker_session_active,
+        sat1_pd_recommended_tas_mode()
+    );
+    xSemaphoreGive(s_output_mutex);
+    return result;
+}
+
+bool tater_audio_sat1_output_status_snapshot(tater_audio_output_status_t *out)
+{
+    if (!out || sat1_output_mutex_ensure() != ESP_OK ||
+        xSemaphoreTake(s_output_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return false;
+    }
+    snprintf(out->mode, sizeof(out->mode), "%s", sat1_output_mode_name(s_output_mode));
+    snprintf(out->active_output, sizeof(out->active_output), "%s", sat1_output_active_name(s_output_active));
+    out->line_out_connected = s_line_out_state_valid && s_line_out_connected;
+    out->playing = s_speaker_session_active;
+    xSemaphoreGive(s_output_mutex);
+    return true;
 }
 
 static esp_err_t sat1_xmos_reset_boot(void)
@@ -1318,6 +1564,7 @@ static void doa_task(void *arg)
                 ESP_LOGW(TAG, "sat1 doa read failed count=%lu err=%s", (unsigned long)s_doa_failed_reads, esp_err_to_name(err));
             }
         }
+        sat1_output_poll(esp_timer_get_time());
         vTaskDelay(tater_protocol_voice_active() ? pdMS_TO_TICKS(25) : pdMS_TO_TICKS(125));
     }
 }
@@ -1656,6 +1903,7 @@ void tater_audio_i2s_start_task(void)
     if (!s_speaker_mutex) {
         s_speaker_mutex = xSemaphoreCreateMutex();
     }
+    ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_output_mutex_ensure());
     BaseType_t audio_created = xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
     if (audio_created != pdPASS) {
         ESP_LOGE(TAG, "sat1 audio task create failed");
@@ -1701,8 +1949,13 @@ esp_err_t tater_audio_speaker_begin(void)
         xSemaphoreGive(s_speaker_mutex);
         return ESP_ERR_INVALID_STATE;
     }
+    esp_err_t err = sat1_output_mutex_ensure();
+    if (err != ESP_OK || xSemaphoreTake(s_output_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        xSemaphoreGive(s_speaker_mutex);
+        return err == ESP_OK ? ESP_ERR_TIMEOUT : err;
+    }
     reset_speaker_audio_level();
-    ESP_ERROR_CHECK_WITHOUT_ABORT(pcm5122_set_mute(true));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_output_apply_locked(false, 0));
     uint8_t tas_power_mode = 0;
     sat1_pd_status_t pd_status = {0};
     if (sat1_pd_status_snapshot(&pd_status) && pd_status.state == SAT1_PD_STATE_NEGOTIATING) {
@@ -1725,15 +1978,10 @@ esp_err_t tater_audio_speaker_begin(void)
         );
         s_pd_fallback_warning_logged = true;
     }
-    esp_err_t err = tas2780_activate(tas_power_mode);
-    if (err != ESP_OK) {
-        xSemaphoreGive(s_speaker_mutex);
-        ESP_LOGE(TAG, "tas activate failed: %s", esp_err_to_name(err));
-        return err;
-    }
     if (s_speaker_enabled) {
         err = i2s_channel_disable(s_tx_chan);
         if (err != ESP_OK) {
+            xSemaphoreGive(s_output_mutex);
             xSemaphoreGive(s_speaker_mutex);
             ESP_LOGE(TAG, "speaker i2s disable failed: %s", esp_err_to_name(err));
             return err;
@@ -1743,6 +1991,7 @@ esp_err_t tater_audio_speaker_begin(void)
     tater_audio_render_clock_reset(&s_render_clock);
     err = i2s_channel_enable(s_tx_chan);
     if (err != ESP_OK) {
+        xSemaphoreGive(s_output_mutex);
         xSemaphoreGive(s_speaker_mutex);
         ESP_LOGE(TAG, "speaker i2s enable failed: %s", esp_err_to_name(err));
         return err;
@@ -1751,6 +2000,18 @@ esp_err_t tater_audio_speaker_begin(void)
     s_speaker_primed = false;
     speaker_prime_silence();
     s_speaker_session_active = true;
+    err = sat1_output_apply_locked(true, tas_power_mode);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "audio output activation failed: %s", esp_err_to_name(err));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(i2s_channel_disable(s_tx_chan));
+        s_speaker_enabled = false;
+        s_speaker_primed = false;
+        ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_output_apply_locked(false, 0));
+        xSemaphoreGive(s_output_mutex);
+        speaker_session_give();
+        return err;
+    }
+    xSemaphoreGive(s_output_mutex);
     return ESP_OK;
 }
 
@@ -1836,16 +2097,26 @@ esp_err_t tater_audio_speaker_end(void)
         return ESP_OK;
     }
     esp_err_t result = ESP_OK;
+    bool output_locked = sat1_output_mutex_ensure() == ESP_OK &&
+                         xSemaphoreTake(s_output_mutex, pdMS_TO_TICKS(1000)) == pdTRUE;
+    if (output_locked) {
+        esp_err_t err = sat1_output_apply_locked(false, 0);
+        if (result == ESP_OK && err != ESP_OK) {
+            result = err;
+        }
+    }
     if (s_speaker_enabled) {
         esp_err_t err = i2s_channel_disable(s_tx_chan);
         if (err != ESP_OK) {
             result = err;
         }
     }
-    ESP_ERROR_CHECK_WITHOUT_ABORT(tas2780_deactivate());
     s_speaker_enabled = false;
     s_speaker_primed = false;
     reset_speaker_audio_level();
+    if (output_locked) {
+        xSemaphoreGive(s_output_mutex);
+    }
     speaker_session_give();
     return result;
 }

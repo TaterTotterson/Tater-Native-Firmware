@@ -32,6 +32,7 @@ typedef struct {
     bool barge_in_enabled;
     uint8_t volume_percent;
     bool muted;
+    char audio_output_mode[16];
     uint8_t screen_brightness;
     bool screen_night_mode_enabled;
     uint8_t screen_night_brightness;

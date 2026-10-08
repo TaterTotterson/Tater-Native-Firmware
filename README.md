@@ -275,7 +275,9 @@ Satellite1 / Sat1:
 - XMOS firmware auto-update to `1.1.1` when the installed version differs
 - Lab-only four-channel raw USB microphone capture image for independent mic
   measurement; this diagnostic image is not embedded in normal Sat1 firmware
-- Line-out capability advertised to Tater
+- Automatic 3.5 mm jack detection plus live Internal, AUX, or Both output
+  selection in Tater; AUX is line-level and expects powered speakers or an
+  external amplifier
 
 ReSpeaker XVF3800:
 

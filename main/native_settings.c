@@ -171,6 +171,7 @@ void tater_live_settings_init_defaults(void)
     s_settings.barge_in_enabled = false;
     s_settings.volume_percent = 80;
     s_settings.muted = false;
+    strlcpy_or_empty(s_settings.audio_output_mode, "auto", sizeof(s_settings.audio_output_mode));
     s_settings.screen_brightness = 80;
     s_settings.screen_night_mode_enabled = false;
     s_settings.screen_night_brightness = 10;
@@ -265,6 +266,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *volume_percent = cJSON_GetObjectItem(payload, "volume_percent");
     const cJSON *muted = cJSON_GetObjectItem(payload, "muted");
     const cJSON *output_channel_mode = cJSON_GetObjectItem(payload, "output_channel_mode");
+    const cJSON *audio_output_mode = cJSON_GetObjectItem(payload, "audio_output_mode");
     const cJSON *screen_brightness = cJSON_GetObjectItem(payload, "screen_brightness");
     const cJSON *screen_night_mode_enabled = cJSON_GetObjectItem(payload, "screen_night_mode_enabled");
     const cJSON *screen_night_brightness = cJSON_GetObjectItem(payload, "screen_night_brightness");
@@ -362,6 +364,24 @@ bool tater_live_settings_apply_json(const cJSON *payload)
             ESP_LOGW(TAG, "ignoring invalid Sendspin output channel mode=%s", output_channel_mode->valuestring);
         }
     }
+    if (cJSON_IsString(audio_output_mode) && audio_output_mode->valuestring) {
+        const char *mode = audio_output_mode->valuestring;
+        bool valid_mode = strcasecmp(mode, "auto") == 0 ||
+                          strcasecmp(mode, "internal") == 0 ||
+                          strcasecmp(mode, "aux") == 0 ||
+                          strcasecmp(mode, "both") == 0;
+        if (valid_mode) {
+            strlcpy_or_empty(s_settings.audio_output_mode, mode, sizeof(s_settings.audio_output_mode));
+#if TATER_BOARD_SAT1
+            esp_err_t output_err = tater_audio_sat1_set_output_mode(mode);
+            if (output_err != ESP_OK) {
+                ESP_LOGW(TAG, "could not apply Sat1 audio output mode=%s err=%s", mode, esp_err_to_name(output_err));
+            }
+#endif
+        } else {
+            ESP_LOGW(TAG, "ignoring invalid audio output mode=%s", mode);
+        }
+    }
     s_settings.screen_brightness = json_u8_range(
         screen_brightness,
         s_settings.screen_brightness,
@@ -432,7 +452,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
 
     ESP_LOGI(
         TAG,
-        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s wake_gen=%u sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f verifier=%s/%ums/%ums wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d screen=%u night=%d/%u/%u-%u led=%u color=%s animations=%s/%s/%s/%s logging=%s",
+        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s wake_gen=%u sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f verifier=%s/%ums/%ums wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d output=%s screen=%u night=%d/%u/%u-%u led=%u color=%s animations=%s/%s/%s/%s logging=%s",
         s_settings.wake_engine,
         s_settings.wake_word,
         s_settings.wake_word_url,
@@ -456,6 +476,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
         s_settings.barge_in_enabled,
         s_settings.volume_percent,
         s_settings.muted,
+        s_settings.audio_output_mode,
         s_settings.screen_brightness,
         s_settings.screen_night_mode_enabled,
         s_settings.screen_night_brightness,
@@ -505,6 +526,9 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddNumberToObject(settings, "volume_percent", s_settings.volume_percent);
     cJSON_AddBoolToObject(settings, "muted", s_settings.muted);
     cJSON_AddStringToObject(settings, "output_channel_mode", tater_sendspin_output_channel_mode());
+#if TATER_BOARD_SAT1
+    cJSON_AddStringToObject(settings, "audio_output_mode", s_settings.audio_output_mode);
+#endif
     cJSON_AddNumberToObject(settings, "screen_brightness", s_settings.screen_brightness);
     cJSON_AddBoolToObject(settings, "screen_night_mode_enabled", s_settings.screen_night_mode_enabled);
     cJSON_AddNumberToObject(settings, "screen_night_brightness", s_settings.screen_night_brightness);

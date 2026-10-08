@@ -2999,6 +2999,17 @@ void tater_protocol_send_status(const char *state)
     if (applied_settings) {
         cJSON_AddNumberToObject(payload, "settings_generation", applied_settings->wake_settings_generation);
     }
+    tater_audio_output_status_t output_status = {0};
+    if (tater_audio_sat1_output_status_snapshot(&output_status)) {
+        cJSON *audio_output = cJSON_CreateObject();
+        if (audio_output) {
+            cJSON_AddStringToObject(audio_output, "mode", output_status.mode);
+            cJSON_AddStringToObject(audio_output, "active", output_status.active_output);
+            cJSON_AddBoolToObject(audio_output, "line_out_connected", output_status.line_out_connected);
+            cJSON_AddBoolToObject(audio_output, "playing", output_status.playing);
+            cJSON_AddItemToObject(payload, "audio_output", audio_output);
+        }
+    }
 #else
     tater_live_settings_add_status(payload);
 #endif

@@ -41,7 +41,9 @@ beta OTA family needs one manual USB installation of `satellite1`; subsequent
 updates use the normal `satellite1` OTA family.
 
 - 48 kHz microphone capture downsampled to 16 kHz mono for wake/STT streaming
-- shared-duplex I2S speaker playback through the PCM5122/TAS2780 path
+- shared-duplex I2S playback through the PCM5122 line-out and TAS2780 internal
+  speaker paths, with automatic 3.5 mm jack detection and live Internal, AUX,
+  or Both routing from Tater
 - guarded TAS2780 power policy described above
 - four-microphone XMOS DoA estimation with adaptive room-noise calibration,
   confidence filtering, and directional smoothing
@@ -59,7 +61,8 @@ updates use the normal `satellite1` OTA family.
   speech direction, and then return to a neutral listening state
 - bundled production XMOS firmware `1.1.1`, automatically installed at boot
   when the detected XMOS image differs
-- firmware-side adaptive AEC and line-out capability reporting to Tater
+- firmware-side adaptive AEC plus configured/active line-out status reporting
+  to Tater
 
 The PlatformIO environment is `sat1` for all supported Satellite1 hardware.
 Shared releases use the native firmware version, while board-only updates can
