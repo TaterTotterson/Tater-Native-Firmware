@@ -556,8 +556,10 @@ void sendspin_task(void *arg) {
     client.set_persistence_provider(&persistence_provider);
 
     PlayerRoleConfig player_config;
+    // Music Assistant's FLAC delivery currently reaches ESP clients in bursts
+    // that force audible hard resyncs. PCM is stable and is also the format
+    // used by the Tater HA bridge.
     player_config.audio_formats = {
-        {SendspinCodecFormat::FLAC, TATER_SPK_CHANNELS, TATER_SPK_SAMPLE_RATE, 16},
         {SendspinCodecFormat::PCM, TATER_SPK_CHANNELS, TATER_SPK_SAMPLE_RATE, 16},
     };
     player_config.audio_buffer_capacity = SENDSPIN_AUDIO_BUFFER_BYTES;
@@ -572,11 +574,10 @@ void sendspin_task(void *arg) {
     player_config.decode_buffer_location = MemoryLocation::PREFER_EXTERNAL;
 
     PlayerRole &player = client.add_player(std::move(player_config));
-    // Every native board has its own fixed hardware-pipeline compensation
-    // above. Also advertise Sendspin's standard user-adjustable delay so a
-    // controller can align mixed hardware families without changing the
-    // board-specific value. The persistence provider keeps it across boots.
-    player.set_static_delay_adjustable(true);
+    // Every native board has its own fixed hardware-pipeline compensation.
+    // Keep the optional server-adjustable delay disabled until the native
+    // clients can advertise it without destabilizing Music Assistant streams.
+    player.set_static_delay_adjustable(TATER_SENDSPIN_OUTPUT_DELAY_ADJUSTABLE);
     TaterPlayerListener player_listener(&player);
     player.set_listener(&player_listener);
 
@@ -757,6 +758,6 @@ extern "C" void tater_sendspin_stats_snapshot(tater_sendspin_stats_t *stats) {
         (static_cast<int64_t>(TATER_MEDIA_RENDER_LATENCY_FRAMES) * 1000000LL)
         / TATER_SPK_SAMPLE_RATE
     );
-    stats->output_delay_adjustable = true;
+    stats->output_delay_adjustable = TATER_SENDSPIN_OUTPUT_DELAY_ADJUSTABLE;
     stats->sync_task_priority = SENDSPIN_SYNC_TASK_PRIORITY;
 }

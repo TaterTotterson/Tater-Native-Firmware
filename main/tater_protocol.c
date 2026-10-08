@@ -2152,7 +2152,11 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "sendspin_player", true);
     cJSON_AddNumberToObject(caps, "sendspin_version", 1);
     cJSON_AddBoolToObject(caps, "sendspin_output_channel_selection", true);
-    cJSON_AddBoolToObject(caps, "sendspin_output_delay_adjustable", true);
+    cJSON_AddBoolToObject(
+        caps,
+        "sendspin_output_delay_adjustable",
+        TATER_SENDSPIN_OUTPUT_DELAY_ADJUSTABLE
+    );
     cJSON *sendspin_output_channels = cJSON_CreateArray();
     cJSON_AddItemToArray(sendspin_output_channels, cJSON_CreateString("stereo"));
     cJSON_AddItemToArray(sendspin_output_channels, cJSON_CreateString("left"));

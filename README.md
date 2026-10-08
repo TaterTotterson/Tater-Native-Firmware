@@ -186,7 +186,7 @@ scene.
 ### Sendspin Playback
 
 Each satellite advertises a Sendspin v1 player at `_sendspin._tcp` on port
-`8928`, with FLAC and PCM at 48 kHz, 16-bit stereo. Sendspin owns synchronized
+`8928`, with PCM at 48 kHz, 16-bit stereo. Sendspin owns synchronized
 music, stereo routing, playback timing, buffering, and played-frame feedback;
 the retired Tater `media.session.*` and `audio.clock.sync` protocol is no longer
 advertised or linked into the firmware.
@@ -198,11 +198,10 @@ performed after Sendspin decoding and before the shared output-volume stage, so
 both members receive the same synchronized stereo timeline and render only
 their assigned side.
 
-Every native target also advertises Sendspin's persistent per-player output
-delay adjustment. This is added to the board's fixed hardware-pipeline
-compensation so controllers such as Music Assistant can align mixed Voice PE,
-Satellite1, ReSpeaker XVF3800, S3 Box, and Echo groups without changing the
-timing defaults for same-model groups.
+Every native target retains its measured fixed hardware-pipeline compensation.
+The optional per-player adjustable-delay command is not advertised while its
+controller behavior is stabilized; this prevents the playback regression
+without changing the timing defaults for same-model groups.
 
 Voice replies targeted to one satellite, interactive TTS, wake cues, timers,
 and diagnostic tones remain native. Starting one of those clips asks the

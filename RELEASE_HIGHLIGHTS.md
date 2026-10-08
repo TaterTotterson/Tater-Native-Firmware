@@ -1,3 +1,3 @@
-- Releases native firmware `0.5.0` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Adds persistent per-satellite Sendspin output-delay calibration for tighter synchronization in mixed Echo and native-satellite groups.
-- Preserves each board's measured hardware compensation while exposing the adjustable and fixed timing values in satellite diagnostics.
+- Releases native firmware `0.5.1` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Fixes Sendspin music stuttering, repeated hard resynchronization, and playback disconnects seen with Music Assistant by using stable 48 kHz stereo PCM on native satellites.
+- Keeps each board's fixed hardware timing compensation while temporarily disabling the optional adjustable-delay control that triggered the regression.
