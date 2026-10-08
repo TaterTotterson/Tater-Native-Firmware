@@ -28,6 +28,11 @@ static bool wifi_has_ip(void)
     return connected;
 }
 
+bool tater_wifi_is_connected(void)
+{
+    return wifi_has_ip();
+}
+
 static uint32_t next_retry_attempt(void)
 {
     portENTER_CRITICAL(&s_wifi_state_lock);

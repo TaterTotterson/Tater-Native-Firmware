@@ -122,9 +122,13 @@ negotiation and a safe 5V amplifier fallback.
 - Compressed-stream jitter buffering for MP3/FLAC
 - Versioned audio scenes with a foreground stream, optional looping background,
   configurable source volumes, duck level, attack/release, and fade-out
-- Persistent media sessions that keep their decoder position while unrelated
-  TTS is mixed over the media, ducked, and restored
+- Sendspin player support for synchronized music, stereo groups, and multi-room
+  announcements from Tater, Home Assistant, and Music Assistant
+- Native Tater TTS and tool audio preempt Sendspin cleanly, then return the
+  speaker to Sendspin when the native clip finishes
 - Embedded on-device wake sounds
+- ReSpeaker XVF3800 keeps the standard wake cue in its constrained 8 MB image;
+  omitted catalog choices fall back to that cue
 - Custom wake-sound WAV URL support with persistent cache
 - Server-driven `play.tone` support for diagnostics
 - Per-device volume setting
@@ -179,112 +183,28 @@ The satellite emits `audio.scene.finished` with `scene_id` and `ok`, followed
 by the legacy `playback.finished` event. `audio.scene.stop` stops the active
 scene.
 
-For music that must continue across unrelated announcements, Tater starts a
-persistent media session:
+### Sendspin Playback
 
-```json
-{
-  "type": "media.session.start",
-  "payload": {
-    "session_id": "kitchen-song",
-    "media": {
-      "url": "https://example.test/song.mp3",
-      "volume_percent": 100,
-      "start_position_ms": 0,
-      "loop": false
-    }
-  }
-}
-```
+Each satellite advertises a Sendspin v1 player at `_sendspin._tcp` on port
+`8928`, with FLAC and PCM at 48 kHz, 16-bit stereo. Sendspin owns synchronized
+music, stereo routing, playback timing, buffering, and played-frame feedback;
+the retired Tater `media.session.*` and `audio.clock.sync` protocol is no longer
+advertised or linked into the firmware.
 
-`start_position_ms` optionally begins decoding at a requested track position.
-Tater uses it when the Music Core progress bar is moved or its rewind/forward
-controls are pressed. Active media-session volume can be changed without
-restarting the track:
+The player has persistent `stereo`, `left`, `right`, and `mono` output-channel
+modes. Tater assigns `left` and `right` when a satellite belongs to a saved
+stereo pair and restores `stereo` when it leaves the pair. Channel selection is
+performed after Sendspin decoding and before the shared output-volume stage, so
+both members receive the same synchronized stereo timeline and render only
+their assigned side.
 
-```json
-{
-  "type": "media.session.volume",
-  "payload": {
-    "session_id": "kitchen-song",
-    "volume_percent": 42
-  }
-}
-```
-
-While that decoder remains active, `audio.overlay.start` mixes foreground TTS
-without restarting or seeking the media:
-
-```json
-{
-  "type": "audio.overlay.start",
-  "payload": {
-    "overlay_id": "door-alert",
-    "foreground": {
-      "url": "https://example.test/door-alert.wav",
-      "kind": "tts",
-      "volume_percent": 100
-    },
-    "ducking": {
-      "target_percent": 20,
-      "attack_ms": 150,
-      "release_ms": 350
-    }
-  }
-}
-```
-
-The satellite emits `media.session.started`/`media.session.finished` and
-`audio.overlay.started`/`audio.overlay.finished`. A normal `play.url` received
-during an active media session is automatically promoted to an overlay for
-backward-compatible TTS callers. `media.session.stop` stops the media and any
-active overlay.
-
-Transient media sessions can identify speech with `media.content_type` and set
-`visual_mode` to `speaking` or `tool_call`. The satellite shows that visual
-state for the lifetime of the TTS session, then returns to the held tool-call
-state when applicable or to its normal idle/disconnected state. Persistent
-music sessions do not complete or replace the satellite's conversational
-visual state.
-
-For stereo pairs, Tater first measures each satellite's monotonic clock, then
-sends `media.session.prepare` to both members with the same URL and group id.
-Each satellite decodes into its local buffer, selects `left` or `right`, and
-returns `media.session.prepare.result` only after its speaker and buffer are
-ready. Tater then sends an individualized `media.session.commit` containing the
-same future start expressed in that satellite's clock:
-
-```json
-{
-  "type": "media.session.prepare",
-  "payload": {
-    "session_id": "bedroom-song",
-    "group_id": "bedroom-stereo",
-    "media": {
-      "url": "https://example.test/song.mp3",
-      "volume_percent": 100,
-      "loop": false
-    },
-    "routing": {
-      "channel": "left"
-    }
-  }
-}
-```
-
-While grouped playback is active, each member emits
-`media.session.playhead` once per second. Tater projects both source positions
-onto its monotonic clock and sends a bounded `media.session.adjust` when phase
-error grows. The satellite distributes each correction over time and resamples
-small source-rate differences into fixed-size hardware output blocks, avoiding
-an abrupt dropped or repeated frame. If a stream underruns, the satellite
-rebuilds its buffer, skips forward to the shared wall-clock timeline, and fades
-back in while reporting rebuffer, underrun, and rejoin telemetry. Corrections
-are deferred during a TTS overlay, so speech mixing and ducking stay intact.
-The two decoders share CPU time fairly, and playhead telemetry separates
-background-media underruns from foreground-overlay underruns.
-Scheduled `audio.overlay.start` commands use the same clock mapping to duck and
-center TTS on grouped members together.
+Voice replies targeted to one satellite, interactive TTS, wake cues, timers,
+and diagnostic tones remain native. Starting one of those clips asks the
+active Sendspin source to release the speaker, plays the native audio, and
+makes the satellite available to Sendspin again afterward. A reply targeted to
+a saved stereo pair, or a Tater Music+TTS announcement that must play on both
+members, is rendered as one stream and sent through Sendspin so both satellites
+follow the same timeline.
 
 ### LEDs, Buttons, And Device UI
 
@@ -546,6 +466,7 @@ main/
   app_main.c                  Shared app startup
   tater_protocol.c            Native WebSocket protocol
   playback.c                  WAV/MP3/FLAC playback and tones
+  sendspin_player.cpp         Sendspin discovery, timing, decode, and I2S bridge
   wake_engine.cc              microWakeWord integration
   native_settings.c           Live settings from Tater
   audio_aec.c                 Firmware-side adaptive AEC

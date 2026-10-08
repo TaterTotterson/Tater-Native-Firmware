@@ -1,14 +1,41 @@
 dependencies:
-  espressif/esp-nn:
-    component_hash: e98a7dd3dfde460b1b4ca982e2ebae0b4831719a8e4659d19c145943deaf682b
-    dependencies:
-    - name: idf
-      require: private
-      version: '>=4.2'
+  bblanchon/arduinojson:
+    component_hash: 5e6aff2bc5bc988b36c8e90c01e637495ee895ad3af93911860c21ec6da79b6a
+    dependencies: []
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.2.3
+    version: 7.4.3
+  esphome/micro-flac:
+    component_hash: d2e75ea77eaa45b83ed4ba968040957b27f53a7344b04d1c27495321b95bd44e
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.2.0
+  esphome/micro-opus:
+    component_hash: c4cec51b6e45b9b660bf8725a10c65f46485ff8b37ff664e4da3fd738301c71e
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.4.1
+  espressif/esp-nn:
+    component_hash: 3b3411b0e4ad1717a72870fde9f9b67cef6f3f97491cc64fcfc1910a8fd8a246
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.4.1
   espressif/esp-tflite-micro:
     component_hash: 22fc501ab0b1bd39377048d608e6fce0e7b55cd07d244cbf41044b24d9b7db2e
     dependencies:
@@ -34,7 +61,7 @@ dependencies:
       type: service
     version: 2.6.0
   espressif/esp_websocket_client:
-    component_hash: 3fb288702517ef4d75bf933a115f1056ee0c2540d964f9e1d856e0bb67e1dfeb
+    component_hash: dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
     dependencies:
     - name: idf
       require: private
@@ -42,7 +69,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.7.0
+    version: 1.8.0
   espressif/led_strip:
     component_hash: 28c6509a727ef74925b372ed404772aeedf11cce10b78c3f69b3c66799095e2d
     dependencies:
@@ -53,15 +80,57 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.5.5
+  espressif/mdns:
+    component_hash: b5b30022c46302eab89c1d2e3b6fb5918a627563a7462f0ee284b22b9a934967
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.14.0
   idf:
     source:
       type: idf
     version: 5.5.4
+  sendspin/sendspin-cpp:
+    component_hash: 3ec929055a8953390c29649d9b3a0a47b60fb6d0a858bd5d6a12e78cfd8c4bb5
+    dependencies:
+    - name: bblanchon/arduinojson
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=7.4.2'
+    - name: esphome/micro-flac
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: $CONFIG{SENDSPIN_ENABLE_PLAYER} == True
+      version: '>=0.1.1'
+    - name: esphome/micro-opus
+      registry_url: https://components.espressif.com
+      require: private
+      rules:
+      - if: $CONFIG{SENDSPIN_ENABLE_PLAYER} == True
+      version: '>=0.3.5'
+    - name: espressif/esp_websocket_client
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=1.0.0'
+    - name: idf
+      require: private
+      version: '>=5.5'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.8.0
 direct_dependencies:
 - espressif/esp-tflite-micro
 - espressif/esp_audio_codec
 - espressif/esp_websocket_client
 - espressif/led_strip
-manifest_hash: e4f42e97979697e1a072b071f35c42ce605305404581688ea3921bda51eba85a
+- espressif/mdns
+- sendspin/sendspin-cpp
+manifest_hash: 95a35d8a17aac1a4fb17524ccf449725462a2dc83764bdb2bb15dc554a7987e4
 target: esp32s3
 version: 2.0.0

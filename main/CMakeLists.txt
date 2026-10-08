@@ -24,10 +24,10 @@ idf_component_register(
         "playback.c"
         "playback_mix.c"
         "playback_recovery.c"
-        "playback_sync.c"
         "playback_wake_policy.c"
         "provisioning.c"
         "server_url.c"
+        "sendspin_player.cpp"
         "tater_config.c"
         "tater_protocol.c"
         "timer_sound_assets.c"
@@ -54,7 +54,9 @@ idf_component_register(
         esp-tflite-micro
         json
         led_strip
+        mdns
         nvs_flash
+        sendspin-cpp
         spiffs
         tflm_microfrontend
 )
@@ -74,17 +76,23 @@ else()
     target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin" BINARY)
     target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin" BINARY)
 endif()
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/blip2.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/message-notification-4.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/notification-ding.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/notification-squeak.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/phone-chime.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/pop-up-sound.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/short-definite-fart.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/star_treck_communications_start_transmission.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/star_treck_computer_work_beep.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/tater_notify_digital_blip.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/turning-off-microphone-percussion-1.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/wake_word_triggered.wav" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "wake_sounds/waterdrop.wav" BINARY)
+if(TATER_NATIVE_BUILD_ENV STREQUAL "respeaker_xvf3800")
+    # The 8 MB ReSpeaker has the same 3 MB OTA slot as the other targets plus
+    # an 868 KiB XMOS payload. Keep its standard cue and omit novelty sounds.
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/wake_word_triggered.wav" BINARY)
+else()
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/blip2.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/message-notification-4.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/notification-ding.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/notification-squeak.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/phone-chime.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/pop-up-sound.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/short-definite-fart.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/star_treck_communications_start_transmission.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/star_treck_computer_work_beep.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/tater_notify_digital_blip.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/turning-off-microphone-percussion-1.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/wake_word_triggered.wav" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "wake_sounds/waterdrop.wav" BINARY)
+endif()
 target_add_binary_data(${COMPONENT_LIB} "timer_sounds/zen_timer_alarm.wav" BINARY)

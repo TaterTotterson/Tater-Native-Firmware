@@ -14,6 +14,7 @@
 #include "ota_update.h"
 #include "playback.h"
 #include "provisioning.h"
+#include "sendspin_player.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include "tater_config.h"
@@ -83,6 +84,7 @@ static void on_tater_play_tone(uint32_t frequency_hz, uint32_t duration_ms, uint
 static void restore_leds_after_ota_failure(esp_err_t error)
 {
     (void)error;
+    tater_sendspin_release_native_audio();
     tater_state_t state = TATER_STATE_IDLE;
     if (!tater_protocol_is_connected()) {
         state = TATER_STATE_DISCONNECTED;
@@ -98,6 +100,9 @@ static void on_tater_ota_url(const char *url)
 {
     ESP_LOGW(TAG, "ota.url received: %s", url ? url : "");
     tater_playback_stop();
+    if (!tater_sendspin_claim_native_audio(3000)) {
+        ESP_LOGW(TAG, "Sendspin did not release the speaker before OTA");
+    }
     tater_leds_set_state(TATER_STATE_OTA);
     esp_err_t err = tater_ota_start_url(url, restore_leds_after_ota_failure);
     if (err != ESP_OK) {
@@ -155,6 +160,7 @@ void app_main(void)
         tater_leds_set_state(TATER_STATE_DISCONNECTED);
     }
     tater_protocol_init(&s_config, on_tater_state, on_tater_play_url, on_tater_play_tone, on_tater_ota_url);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(tater_sendspin_init(&s_config));
     tater_ble_scanner_init(tater_protocol_send_ble_adverts);
     tater_protocol_start();
     ESP_ERROR_CHECK_WITHOUT_ABORT(tater_wake_engine_init());

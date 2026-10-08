@@ -884,7 +884,9 @@ static void audio_glow(rgb_t color)
 static void render_voice_animation(const char *animation, const char *fallback, uint32_t tick, rgb_t color)
 {
     const char *token = animation && animation[0] ? animation : fallback;
-    if (animation_is(token, "directional")) {
+    if (animation_is(token, "off")) {
+        fill(0, 0, 0);
+    } else if (animation_is(token, "directional")) {
         directional_listening(color);
     } else if (animation_is(token, "sparkle")) {
         thinking(tick, color);

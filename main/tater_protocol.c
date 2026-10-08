@@ -32,6 +32,7 @@
 #include "playback.h"
 #include "playback_wake_policy.h"
 #include "server_url.h"
+#include "sendspin_player.h"
 #include "timer_sound_assets.h"
 #include "wake_engine.h"
 
@@ -127,54 +128,6 @@ static uint32_t s_json_send_failure_streak;
 static uint32_t s_json_send_failures_tolerated;
 static char s_last_json_send_type[32];
 
-#define TATER_MEDIA_TX_QUEUE_EVENTS 12
-
-typedef enum {
-    TATER_MEDIA_TX_STARTED = 0,
-    TATER_MEDIA_TX_PLAYHEAD,
-    TATER_MEDIA_TX_FINISHED,
-} tater_media_tx_kind_t;
-
-typedef struct {
-    tater_media_tx_kind_t kind;
-    char session_id[TATER_PLAYBACK_MEDIA_SESSION_ID_MAX];
-    union {
-        struct {
-            char group_id[TATER_PLAYBACK_MEDIA_GROUP_ID_MAX];
-            char channel[8];
-            int64_t scheduled_start_us;
-            int64_t actual_start_us;
-        } started;
-        struct {
-            char group_id[TATER_PLAYBACK_MEDIA_GROUP_ID_MAX];
-            char channel[8];
-            uint64_t source_frames;
-            uint64_t rendered_frames;
-            uint64_t output_frames;
-            uint32_t output_latency_frames;
-            uint32_t buffered_frames;
-            int64_t satellite_time_us;
-            int64_t scheduled_start_us;
-            int32_t correction_frames;
-            bool rebuffering;
-            uint32_t underrun_events;
-            uint32_t overlay_underrun_events;
-            uint32_t background_underrun_events;
-            uint32_t foreground_underrun_events;
-            uint32_t rejoin_count;
-            uint64_t rejoin_frames;
-        } playhead;
-        struct {
-            bool ok;
-        } finished;
-    } payload;
-} tater_media_tx_event_t;
-
-static QueueHandle_t s_media_tx_queue;
-static TaskHandle_t s_media_tx_task;
-static uint32_t s_media_tx_high_water;
-static uint32_t s_media_tx_dropped;
-
 static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 static int send_audio_locked(const int16_t *pcm, size_t sample_count, TickType_t timeout);
 static void audio_tx_clear_queue(void);
@@ -184,8 +137,6 @@ static bool timer_any_ringing(void);
 static void timer_monitor_task(void *arg);
 static void continued_reopen_watchdog_task(void *arg);
 static cJSON *new_envelope(const char *type);
-static esp_err_t media_tx_init(void);
-static void media_tx_start_task(void);
 
 typedef struct {
     bool initialized;
@@ -1507,163 +1458,6 @@ static int send_json(cJSON *root)
     return sent;
 }
 
-static int send_media_tx_event_now(const tater_media_tx_event_t *event)
-{
-    if (!event) {
-        return -1;
-    }
-
-    cJSON *root = NULL;
-    cJSON *payload = NULL;
-    switch (event->kind) {
-    case TATER_MEDIA_TX_STARTED:
-        root = new_envelope("media.session.started");
-        payload = cJSON_GetObjectItem(root, "payload");
-        cJSON_AddStringToObject(payload, "session_id", event->session_id);
-        cJSON_AddStringToObject(payload, "group_id", event->payload.started.group_id);
-        cJSON_AddStringToObject(payload, "channel", event->payload.started.channel);
-        cJSON_AddNumberToObject(payload, "sample_rate_hz", TATER_SPK_SAMPLE_RATE);
-        cJSON_AddNumberToObject(
-            payload,
-            "scheduled_start_us",
-            (double)event->payload.started.scheduled_start_us
-        );
-        cJSON_AddNumberToObject(
-            payload,
-            "actual_start_us",
-            (double)event->payload.started.actual_start_us
-        );
-        cJSON_AddNumberToObject(
-            payload,
-            "late_by_us",
-            (double)(
-                event->payload.started.actual_start_us
-                - event->payload.started.scheduled_start_us
-            )
-        );
-        break;
-    case TATER_MEDIA_TX_PLAYHEAD:
-        root = new_envelope("media.session.playhead");
-        payload = cJSON_GetObjectItem(root, "payload");
-        cJSON_AddStringToObject(payload, "session_id", event->session_id);
-        cJSON_AddStringToObject(payload, "group_id", event->payload.playhead.group_id);
-        cJSON_AddStringToObject(payload, "channel", event->payload.playhead.channel);
-        cJSON_AddNumberToObject(payload, "sample_rate_hz", TATER_SPK_SAMPLE_RATE);
-        cJSON_AddNumberToObject(payload, "source_frames", (double)event->payload.playhead.source_frames);
-        cJSON_AddNumberToObject(payload, "rendered_frames", (double)event->payload.playhead.rendered_frames);
-        cJSON_AddNumberToObject(payload, "output_frames", (double)event->payload.playhead.output_frames);
-        cJSON_AddNumberToObject(payload, "output_latency_frames", event->payload.playhead.output_latency_frames);
-        cJSON_AddNumberToObject(payload, "buffered_frames", event->payload.playhead.buffered_frames);
-        cJSON_AddNumberToObject(payload, "satellite_time_us", (double)event->payload.playhead.satellite_time_us);
-        cJSON_AddNumberToObject(payload, "scheduled_start_us", (double)event->payload.playhead.scheduled_start_us);
-        cJSON_AddNumberToObject(payload, "correction_frames", event->payload.playhead.correction_frames);
-        cJSON_AddBoolToObject(payload, "rebuffering", event->payload.playhead.rebuffering);
-        cJSON_AddNumberToObject(payload, "underrun_events", event->payload.playhead.underrun_events);
-        cJSON_AddNumberToObject(
-            payload,
-            "overlay_underrun_events",
-            event->payload.playhead.overlay_underrun_events
-        );
-        cJSON_AddNumberToObject(
-            payload,
-            "background_underrun_events",
-            event->payload.playhead.background_underrun_events
-        );
-        cJSON_AddNumberToObject(
-            payload,
-            "foreground_underrun_events",
-            event->payload.playhead.foreground_underrun_events
-        );
-        cJSON_AddNumberToObject(payload, "rejoin_count", event->payload.playhead.rejoin_count);
-        cJSON_AddNumberToObject(payload, "rejoin_frames", (double)event->payload.playhead.rejoin_frames);
-        break;
-    case TATER_MEDIA_TX_FINISHED:
-        root = new_envelope("media.session.finished");
-        payload = cJSON_GetObjectItem(root, "payload");
-        cJSON_AddStringToObject(payload, "session_id", event->session_id);
-        cJSON_AddBoolToObject(payload, "ok", event->payload.finished.ok);
-        break;
-    default:
-        return -1;
-    }
-    return send_json(root);
-}
-
-static void media_tx_worker(void *arg)
-{
-    (void)arg;
-    tater_media_tx_event_t event;
-    for (;;) {
-        if (
-            s_media_tx_queue
-            && xQueueReceive(s_media_tx_queue, &event, portMAX_DELAY) == pdTRUE
-        ) {
-            (void)send_media_tx_event_now(&event);
-        }
-    }
-}
-
-static esp_err_t media_tx_init(void)
-{
-    if (s_media_tx_queue) {
-        return ESP_OK;
-    }
-    s_media_tx_queue = xQueueCreate(
-        TATER_MEDIA_TX_QUEUE_EVENTS,
-        sizeof(tater_media_tx_event_t)
-    );
-    return s_media_tx_queue ? ESP_OK : ESP_ERR_NO_MEM;
-}
-
-static void media_tx_start_task(void)
-{
-    if (!s_media_tx_queue || s_media_tx_task) {
-        return;
-    }
-    BaseType_t ok = xTaskCreate(
-        media_tx_worker,
-        "tater_media_tx",
-        6144,
-        NULL,
-        4,
-        &s_media_tx_task
-    );
-    if (ok != pdPASS) {
-        s_media_tx_task = NULL;
-        ESP_LOGE(TAG, "media telemetry task create failed");
-    }
-}
-
-static bool media_tx_enqueue(const tater_media_tx_event_t *event)
-{
-    if (!event) {
-        return false;
-    }
-    if (!s_media_tx_queue || !s_media_tx_task) {
-        return send_media_tx_event_now(event) >= 0;
-    }
-    if (xQueueSend(s_media_tx_queue, event, 0) == pdTRUE) {
-        UBaseType_t depth = uxQueueMessagesWaiting(s_media_tx_queue);
-        if (depth > s_media_tx_high_water) {
-            s_media_tx_high_water = depth;
-        }
-        return true;
-    }
-
-    s_media_tx_dropped++;
-    if (event->kind == TATER_MEDIA_TX_PLAYHEAD) {
-        return false;
-    }
-
-    /*
-     * A stalled connection can fill the queue with expendable playheads.
-     * Preserve lifecycle progress without ever blocking the audio task.
-     */
-    tater_media_tx_event_t dropped;
-    (void)xQueueReceive(s_media_tx_queue, &dropped, 0);
-    return xQueueSend(s_media_tx_queue, event, 0) == pdTRUE;
-}
-
 static cJSON *new_envelope(const char *type)
 {
     char id[24];
@@ -2301,49 +2095,6 @@ static uint16_t json_u16_clamped(const cJSON *item, uint16_t fallback, uint16_t 
     return (uint16_t)item->valuedouble;
 }
 
-static int64_t json_i64(const cJSON *item, int64_t fallback)
-{
-    return cJSON_IsNumber(item) ? (int64_t)item->valuedouble : fallback;
-}
-
-static int32_t json_i32_clamped(
-    const cJSON *item,
-    int32_t fallback,
-    int32_t minimum,
-    int32_t maximum
-)
-{
-    if (!cJSON_IsNumber(item)) {
-        return fallback;
-    }
-    if (item->valuedouble <= minimum) {
-        return minimum;
-    }
-    if (item->valuedouble >= maximum) {
-        return maximum;
-    }
-    return (int32_t)item->valuedouble;
-}
-
-static tater_playback_channel_t media_channel_from_json(const cJSON *item)
-{
-    const char *value =
-        cJSON_IsString(item) && item->valuestring ? item->valuestring : "stereo";
-    if (strcasecmp(value, "left") == 0) {
-        return TATER_PLAYBACK_CHANNEL_LEFT;
-    }
-    if (strcasecmp(value, "right") == 0) {
-        return TATER_PLAYBACK_CHANNEL_RIGHT;
-    }
-    if (
-        strcasecmp(value, "mono") == 0
-        || strcasecmp(value, "center") == 0
-    ) {
-        return TATER_PLAYBACK_CHANNEL_MONO;
-    }
-    return TATER_PLAYBACK_CHANNEL_STEREO;
-}
-
 static void send_simple_result(
     const char *type,
     const char *reply_to,
@@ -2398,26 +2149,16 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "audio_scenes", true);
     cJSON_AddBoolToObject(caps, "audio_ducking", true);
     cJSON_AddBoolToObject(caps, "looping_background_audio", true);
-    cJSON_AddBoolToObject(caps, "persistent_media_sessions", true);
-    cJSON_AddBoolToObject(caps, "tts_overlays", true);
-    cJSON_AddBoolToObject(caps, "synchronized_media_sessions", true);
-    cJSON_AddBoolToObject(caps, "stereo_channel_selection", true);
-    cJSON_AddBoolToObject(caps, "media_playhead_telemetry", true);
-    cJSON_AddBoolToObject(caps, "media_render_clock", true);
-    cJSON_AddBoolToObject(caps, "media_drift_correction", true);
-    cJSON_AddBoolToObject(caps, "media_rate_slew", true);
-    cJSON_AddBoolToObject(caps, "media_underrun_recovery", true);
-    cJSON_AddBoolToObject(caps, "media_session_volume", true);
-    cJSON_AddBoolToObject(caps, "media_session_start_position", true);
-    cJSON_AddBoolToObject(caps, "synchronized_tts_overlays", true);
-    cJSON_AddNumberToObject(caps, "media_sample_rate_hz", TATER_SPK_SAMPLE_RATE);
-    cJSON_AddNumberToObject(
-        caps,
-        "media_output_latency_frames",
-        TATER_MEDIA_RENDER_LATENCY_FRAMES
-    );
+    cJSON_AddBoolToObject(caps, "sendspin_player", true);
+    cJSON_AddNumberToObject(caps, "sendspin_version", 1);
+    cJSON_AddBoolToObject(caps, "sendspin_output_channel_selection", true);
+    cJSON *sendspin_output_channels = cJSON_CreateArray();
+    cJSON_AddItemToArray(sendspin_output_channels, cJSON_CreateString("stereo"));
+    cJSON_AddItemToArray(sendspin_output_channels, cJSON_CreateString("left"));
+    cJSON_AddItemToArray(sendspin_output_channels, cJSON_CreateString("right"));
+    cJSON_AddItemToArray(sendspin_output_channels, cJSON_CreateString("mono"));
+    cJSON_AddItemToObject(caps, "sendspin_output_channel_modes", sendspin_output_channels);
     cJSON_AddNumberToObject(caps, "audio_scene_version", 1);
-    cJSON_AddNumberToObject(caps, "audio_session_version", 4);
     cJSON_AddItemToObject(payload, "capabilities", caps);
     send_json(root);
 }
@@ -2595,242 +2336,17 @@ static void handle_text_message(const char *data, int len)
             s_pending_reopen_conversation_id[0] = '\0';
             emit_state(TATER_STATE_ERROR, "voice error");
         }
-    } else if (strcmp(type, "audio.clock.sync") == 0 && cJSON_IsObject(payload)) {
-        int64_t satellite_receive_us = esp_timer_get_time();
-        const cJSON *server_send_item = cJSON_GetObjectItem(payload, "server_send_us");
-        cJSON *response = new_envelope("audio.clock.sync.result");
-        cJSON *response_payload = cJSON_GetObjectItem(response, "payload");
-        cJSON_AddStringToObject(response_payload, "reply_to", request_id);
-        cJSON_AddBoolToObject(response_payload, "ok", true);
-        cJSON_AddNumberToObject(
-            response_payload,
-            "server_send_us",
-            (double)json_i64(server_send_item, 0)
-        );
-        cJSON_AddNumberToObject(
-            response_payload,
-            "satellite_receive_us",
-            (double)satellite_receive_us
-        );
-        cJSON_AddNumberToObject(
-            response_payload,
-            "satellite_send_us",
-            (double)esp_timer_get_time()
-        );
-        send_json(response);
-    } else if (
-        (
-            strcmp(type, "media.session.start") == 0
-            || strcmp(type, "media.session.prepare") == 0
-        )
-        && cJSON_IsObject(payload)
-    ) {
-        bool prepare = strcmp(type, "media.session.prepare") == 0;
-        const cJSON *session_id_item = cJSON_GetObjectItem(payload, "session_id");
-        const cJSON *group_id_item = cJSON_GetObjectItem(payload, "group_id");
-        const cJSON *media = cJSON_GetObjectItem(payload, "media");
-        const cJSON *routing = cJSON_GetObjectItem(payload, "routing");
-        const cJSON *url_item = cJSON_IsObject(media)
-            ? cJSON_GetObjectItem(media, "url")
-            : cJSON_GetObjectItem(payload, "url");
-        const cJSON *volume_item = cJSON_IsObject(media)
-            ? cJSON_GetObjectItem(media, "volume_percent")
-            : cJSON_GetObjectItem(payload, "volume_percent");
-        const cJSON *start_position_item = cJSON_IsObject(media)
-            ? cJSON_GetObjectItem(media, "start_position_ms")
-            : cJSON_GetObjectItem(payload, "start_position_ms");
-        const cJSON *loop_item = cJSON_IsObject(media)
-            ? cJSON_GetObjectItem(media, "loop")
-            : cJSON_GetObjectItem(payload, "loop");
-        const cJSON *content_type_item = cJSON_IsObject(media)
-            ? cJSON_GetObjectItem(media, "content_type")
-            : cJSON_GetObjectItem(payload, "content_type");
-        const cJSON *channel_item = cJSON_IsObject(routing)
-            ? cJSON_GetObjectItem(routing, "channel")
-            : cJSON_GetObjectItem(payload, "channel");
-        const cJSON *visual_mode_item = cJSON_GetObjectItem(payload, "visual_mode");
-        const cJSON *state_after_item = cJSON_GetObjectItem(payload, "state_after");
-        const char *session_id =
-            cJSON_IsString(session_id_item) && session_id_item->valuestring
-            ? session_id_item->valuestring
-            : request_id;
-        const char *group_id =
-            cJSON_IsString(group_id_item) && group_id_item->valuestring
-            ? group_id_item->valuestring
-            : "";
-        const char *url =
-            cJSON_IsString(url_item) && url_item->valuestring
-            ? url_item->valuestring
-            : "";
-        const char *content_type =
-            cJSON_IsString(content_type_item) && content_type_item->valuestring
-            ? content_type_item->valuestring
-            : "";
-        const char *visual_mode =
-            cJSON_IsString(visual_mode_item) && visual_mode_item->valuestring
-            ? visual_mode_item->valuestring
-            : "";
-        const char *state_after =
-            cJSON_IsString(state_after_item) && state_after_item->valuestring
-            ? state_after_item->valuestring
-            : "";
-        bool loop = cJSON_IsBool(loop_item) ? cJSON_IsTrue(loop_item) : json_truthy(loop_item);
-        bool transient_tts =
-            strcasecmp(content_type, "tts") == 0
-            || strcasecmp(content_type, "speech") == 0
-            || strcasecmp(content_type, "announcement") == 0;
-        bool complete_visual_state =
-            transient_tts
-            || strcasecmp(visual_mode, "speaking") == 0
-            || strcasecmp(visual_mode, "tool_call") == 0;
-        bool tool_playback =
-            strcasecmp(visual_mode, "tool_call") == 0
-            || strcasecmp(state_after, "tool_call") == 0;
-        int64_t raw_start_position_ms = json_i64(start_position_item, 0);
-        uint32_t start_position_ms = raw_start_position_ms <= 0
-            ? 0
-            : (raw_start_position_ms > UINT32_MAX
-                ? UINT32_MAX
-                : (uint32_t)raw_start_position_ms);
-
-        tater_playback_media_session_t media_session = {
-            .session_id = session_id,
-            .group_id = group_id,
-            .prepare_reply_to = prepare ? request_id : "",
-            .url = url,
-            .volume_percent = (uint8_t)json_u16_clamped(volume_item, 100, 100),
-            .start_position_ms = start_position_ms,
-            .channel = media_channel_from_json(channel_item),
-            .loop = loop,
-            .prepare = prepare,
-            .complete_visual_state = complete_visual_state,
-            .tool_visual_state = tool_playback,
-        };
-        esp_err_t media_err = tater_playback_start_media_session(&media_session);
-        if (media_err != ESP_OK) {
-            ESP_LOGE(TAG, "media session start failed: %s", esp_err_to_name(media_err));
-            if (prepare) {
-                tater_protocol_send_media_session_ready(
-                    session_id,
-                    group_id,
-                    request_id,
-                    false,
-                    0
-                );
-            }
-            tater_protocol_send_media_session_finished(
-                session_id,
-                false,
-                complete_visual_state
-            );
-        } else {
-            ESP_LOGI(
-                TAG,
-                "media session queued id=%s group=%s channel=%d loop=%d prepare=%d visual=%d",
-                session_id && session_id[0] ? session_id : "-",
-                group_id && group_id[0] ? group_id : "-",
-                (int)media_session.channel,
-                loop,
-                prepare,
-                complete_visual_state
-            );
-        }
-    } else if (strcmp(type, "media.session.commit") == 0 && cJSON_IsObject(payload)) {
-        const cJSON *session_id_item = cJSON_GetObjectItem(payload, "session_id");
-        const cJSON *start_at_item = cJSON_GetObjectItem(payload, "start_at_us");
-        const char *session_id =
-            cJSON_IsString(session_id_item) && session_id_item->valuestring
-            ? session_id_item->valuestring
-            : "";
-        esp_err_t commit_err = tater_playback_commit_media_session(
-            session_id,
-            json_i64(start_at_item, 0)
-        );
-        send_simple_result(
-            "media.session.commit.result",
-            request_id,
-            commit_err == ESP_OK,
-            commit_err == ESP_OK ? "" : esp_err_to_name(commit_err)
-        );
-    } else if (strcmp(type, "media.session.volume") == 0 && cJSON_IsObject(payload)) {
-        const cJSON *session_id_item = cJSON_GetObjectItem(payload, "session_id");
-        const cJSON *volume_item = cJSON_GetObjectItem(payload, "volume_percent");
-        const char *session_id =
-            cJSON_IsString(session_id_item) && session_id_item->valuestring
-            ? session_id_item->valuestring
-            : "";
-        uint8_t volume_percent =
-            (uint8_t)json_u16_clamped(volume_item, 100, 100);
-        esp_err_t volume_err = tater_playback_set_media_session_volume(
-            session_id,
-            volume_percent
-        );
-        send_simple_result(
-            "media.session.volume.result",
-            request_id,
-            volume_err == ESP_OK,
-            volume_err == ESP_OK ? "" : esp_err_to_name(volume_err)
-        );
-    } else if (strcmp(type, "media.session.adjust") == 0 && cJSON_IsObject(payload)) {
-        const cJSON *session_id_item = cJSON_GetObjectItem(payload, "session_id");
-        const cJSON *correction_item = cJSON_GetObjectItem(payload, "correction_frames");
-        const cJSON *mode_item = cJSON_GetObjectItem(payload, "mode");
-        const cJSON *settle_item = cJSON_GetObjectItem(payload, "settle_ms");
-        const char *session_id =
-            cJSON_IsString(session_id_item) && session_id_item->valuestring
-            ? session_id_item->valuestring
-            : "";
-        const char *mode =
-            cJSON_IsString(mode_item) && mode_item->valuestring
-            ? mode_item->valuestring
-            : "slew";
-        int32_t correction_frames =
-            json_i32_clamped(correction_item, 0, -480, 480);
-        uint32_t settle_ms = json_u16_clamped(settle_item, 1000, 10000);
-        esp_err_t adjust_err = tater_playback_adjust_media_session(
-            session_id,
-            correction_frames,
-            mode,
-            settle_ms
-        );
-        send_simple_result(
-            "media.session.adjust.result",
-            request_id,
-            adjust_err == ESP_OK,
-            adjust_err == ESP_OK ? "" : esp_err_to_name(adjust_err)
-        );
-    } else if (strcmp(type, "media.session.stop") == 0) {
-        ESP_LOGI(TAG, "media.session.stop");
-        tater_playback_stop();
-    } else if (strcmp(type, "audio.overlay.start") == 0 && cJSON_IsObject(payload)) {
-        const cJSON *overlay_id_item = cJSON_GetObjectItem(payload, "overlay_id");
+    }
+    else if (strcmp(type, "audio.overlay.start") == 0 && cJSON_IsObject(payload)) {
         const cJSON *foreground = cJSON_GetObjectItem(payload, "foreground");
-        const cJSON *ducking = cJSON_GetObjectItem(payload, "ducking");
         const cJSON *url_item = cJSON_IsObject(foreground)
             ? cJSON_GetObjectItem(foreground, "url")
             : cJSON_GetObjectItem(payload, "url");
-        const cJSON *volume_item = cJSON_IsObject(foreground)
-            ? cJSON_GetObjectItem(foreground, "volume_percent")
-            : cJSON_GetObjectItem(payload, "volume_percent");
-        const cJSON *duck_target_item = cJSON_IsObject(ducking)
-            ? cJSON_GetObjectItem(ducking, "target_percent")
-            : NULL;
-        const cJSON *duck_attack_item = cJSON_IsObject(ducking)
-            ? cJSON_GetObjectItem(ducking, "attack_ms")
-            : NULL;
-        const cJSON *duck_release_item = cJSON_IsObject(ducking)
-            ? cJSON_GetObjectItem(ducking, "release_ms")
-            : NULL;
         const cJSON *foreground_kind_item = cJSON_IsObject(foreground)
             ? cJSON_GetObjectItem(foreground, "kind")
             : NULL;
         const cJSON *visual_mode_item = cJSON_GetObjectItem(payload, "visual_mode");
         const cJSON *state_after_item = cJSON_GetObjectItem(payload, "state_after");
-        const cJSON *start_at_item = cJSON_GetObjectItem(payload, "start_at_us");
-        const char *overlay_id =
-            cJSON_IsString(overlay_id_item) && overlay_id_item->valuestring
-            ? overlay_id_item->valuestring
-            : request_id;
         const char *url =
             cJSON_IsString(url_item) && url_item->valuestring
             ? url_item->valuestring
@@ -2863,31 +2379,14 @@ static void handle_text_message(const char *data, int len)
             s_playback_return_state = TATER_STATE_IDLE;
         }
 
-        tater_playback_overlay_t overlay = {
-            .overlay_id = overlay_id,
-            .foreground_url = url,
-            .foreground_volume_percent =
-                (uint8_t)json_u16_clamped(volume_item, 100, 100),
-            .ducking_target_percent =
-                (uint8_t)json_u16_clamped(duck_target_item, 20, 100),
-            .ducking_attack_ms = json_u16_clamped(duck_attack_item, 150, 10000),
-            .ducking_release_ms = json_u16_clamped(duck_release_item, 350, 10000),
-            .start_at_us = json_i64(start_at_item, 0),
-        };
         mark_playback_visual_active();
         emit_state(
             tool_playback ? TATER_STATE_TOOL_CALL : TATER_STATE_SPEAKING,
             tool_playback ? "tool audio overlay" : "audio overlay"
         );
-        if (!tater_playback_media_session_active() && s_play_url_cb && url[0]) {
-            ESP_LOGW(TAG, "audio overlay has no active media session; using standalone playback");
+        if (s_play_url_cb && url[0]) {
+            ESP_LOGI(TAG, "audio overlay received after Sendspin cutover; using native playback");
             s_play_url_cb(url, tool_playback ? TATER_STATE_TOOL_CALL : TATER_STATE_SPEAKING);
-        } else {
-            esp_err_t overlay_err = tater_playback_play_overlay(&overlay);
-            if (overlay_err != ESP_OK) {
-                ESP_LOGE(TAG, "audio overlay start failed: %s", esp_err_to_name(overlay_err));
-                tater_protocol_send_audio_overlay_finished(overlay_id, false);
-            }
         }
     } else if (strcmp(type, "audio.scene.start") == 0 && cJSON_IsObject(payload)) {
         const cJSON *scene_id_item = cJSON_GetObjectItem(payload, "scene_id");
@@ -3022,16 +2521,6 @@ static void handle_text_message(const char *data, int len)
         const cJSON *tts_kind_item = cJSON_GetObjectItem(payload, "tts_kind");
         const cJSON *visual_mode_item = cJSON_GetObjectItem(payload, "visual_mode");
         const cJSON *state_after_item = cJSON_GetObjectItem(payload, "state_after");
-        const cJSON *ducking = cJSON_GetObjectItem(payload, "ducking");
-        const cJSON *duck_target_item = cJSON_IsObject(ducking)
-            ? cJSON_GetObjectItem(ducking, "target_percent")
-            : NULL;
-        const cJSON *duck_attack_item = cJSON_IsObject(ducking)
-            ? cJSON_GetObjectItem(ducking, "attack_ms")
-            : NULL;
-        const cJSON *duck_release_item = cJSON_IsObject(ducking)
-            ? cJSON_GetObjectItem(ducking, "release_ms")
-            : NULL;
         const char *tts_kind = cJSON_IsString(tts_kind_item) ? tts_kind_item->valuestring : "";
         const char *visual_mode = cJSON_IsString(visual_mode_item) ? visual_mode_item->valuestring : "";
         const char *state_after = cJSON_IsString(state_after_item) ? state_after_item->valuestring : "";
@@ -3063,37 +2552,7 @@ static void handle_text_message(const char *data, int len)
             }
             mark_playback_visual_active();
             emit_state(visual_state, tool_playback ? "tool playback" : "playback");
-            bool overlay_started = false;
-            bool media_active = tater_playback_media_session_active();
-            if (media_active) {
-                tater_playback_overlay_t overlay = {
-                    .overlay_id = request_id,
-                    .foreground_url = url_item->valuestring,
-                    .foreground_volume_percent = 100,
-                    .ducking_target_percent =
-                        (uint8_t)json_u16_clamped(duck_target_item, 20, 100),
-                    .ducking_attack_ms =
-                        json_u16_clamped(duck_attack_item, 150, 10000),
-                    .ducking_release_ms =
-                        json_u16_clamped(duck_release_item, 350, 10000),
-                };
-                esp_err_t overlay_err = tater_playback_play_overlay(&overlay);
-                if (overlay_err == ESP_OK) {
-                    overlay_started = true;
-                    ESP_LOGI(TAG, "play.url promoted to media overlay id=%s", request_id);
-                } else {
-                    ESP_LOGW(
-                        TAG,
-                        "play.url overlay unavailable (%s); preserving media session",
-                        esp_err_to_name(overlay_err)
-                    );
-                    tater_protocol_send_audio_overlay_finished(request_id, false);
-                    overlay_started = true;
-                }
-            }
-            if (!overlay_started) {
-                s_play_url_cb(url_item->valuestring, visual_state);
-            }
+            s_play_url_cb(url_item->valuestring, visual_state);
         }
     } else if (strcmp(type, "play.tone") == 0 && cJSON_IsObject(payload)) {
         const cJSON *frequency_item = cJSON_GetObjectItem(payload, "frequency_hz");
@@ -3264,10 +2723,6 @@ void tater_protocol_init(
     if (audio_tx_err != ESP_OK) {
         ESP_LOGE(TAG, "audio tx queue init failed: %s", esp_err_to_name(audio_tx_err));
     }
-    esp_err_t media_tx_err = media_tx_init();
-    if (media_tx_err != ESP_OK) {
-        ESP_LOGE(TAG, "media telemetry queue init failed: %s", esp_err_to_name(media_tx_err));
-    }
     build_device_identity();
     build_ws_url();
     if (strlen(s_config.token) > 0) {
@@ -3278,7 +2733,6 @@ void tater_protocol_init(
 void tater_protocol_start(void)
 {
     audio_tx_start_task();
-    media_tx_start_task();
 
     esp_err_t websocket_start_err = ESP_ERR_INVALID_ARG;
     if (s_ws_url[0]) {
@@ -3329,7 +2783,7 @@ bool tater_protocol_audio_busy(void)
         || s_current_state == TATER_STATE_TOOL_CALL
         || s_current_state == TATER_STATE_OTA
         || tater_playback_is_playing()
-        || tater_playback_media_session_active();
+        || tater_sendspin_is_playing();
 }
 
 void tater_protocol_timer_stop_from_device(void)
@@ -3363,9 +2817,10 @@ bool tater_protocol_can_start_local_wake(void)
     if (settings && settings->muted) {
         return false;
     }
+    bool sendspin_playing = tater_sendspin_is_playing();
     if (!tater_playback_wake_allowed(
-            tater_playback_is_playing(),
-            tater_playback_uninterrupted_media_active(),
+            tater_playback_is_playing() || sendspin_playing,
+            sendspin_playing,
             settings && settings->barge_in_enabled,
             TATER_CAP_WAKE_DURING_PLAYBACK != 0)) {
         return false;
@@ -3493,13 +2948,6 @@ void tater_protocol_send_status(const char *state)
         "last_json_send_type",
         s_last_json_send_type[0] ? s_last_json_send_type : ""
     );
-    cJSON_AddNumberToObject(
-        transport,
-        "media_tx_queue_depth",
-        s_media_tx_queue ? uxQueueMessagesWaiting(s_media_tx_queue) : 0
-    );
-    cJSON_AddNumberToObject(transport, "media_tx_high_water", s_media_tx_high_water);
-    cJSON_AddNumberToObject(transport, "media_tx_dropped", s_media_tx_dropped);
     cJSON_AddItemToObject(payload, "transport", transport);
     cJSON_AddItemToObject(payload, "reset", reset_diag_json());
     tater_ble_scanner_stats_t ble_stats = {0};
@@ -4030,24 +3478,6 @@ static void send_playback_completion(bool ok, bool allow_reopen, bool emit_playb
     }
 }
 
-static void finish_media_session_visual(bool ok)
-{
-    bool return_armed = s_playback_return_armed;
-    tater_state_t return_state = s_playback_return_state;
-    s_playback_return_armed = false;
-    s_playback_return_state = TATER_STATE_IDLE;
-    clear_playback_visual_active();
-
-    tater_state_t next_state = return_armed ? return_state : TATER_STATE_IDLE;
-    if (!websocket_ready()) {
-        next_state = TATER_STATE_DISCONNECTED;
-    }
-    emit_state(
-        next_state,
-        return_armed ? "playback return" : (ok ? "playback finished" : "playback stopped")
-    );
-}
-
 void tater_protocol_send_playback_finished_status(bool ok, bool allow_reopen)
 {
     send_playback_completion(ok, allow_reopen, true);
@@ -4066,163 +3496,6 @@ void tater_protocol_send_audio_scene_finished(const char *scene_id, bool ok)
     cJSON_AddBoolToObject(payload, "ok", ok);
     send_json(root);
     tater_protocol_send_playback_finished_status(ok, ok);
-}
-
-void tater_protocol_send_audio_overlay_started(const char *overlay_id)
-{
-    cJSON *root = new_envelope("audio.overlay.started");
-    cJSON *payload = cJSON_GetObjectItem(root, "payload");
-    cJSON_AddStringToObject(payload, "overlay_id", overlay_id ? overlay_id : "");
-    send_json(root);
-}
-
-void tater_protocol_send_audio_overlay_finished(const char *overlay_id, bool ok)
-{
-    cJSON *root = new_envelope("audio.overlay.finished");
-    cJSON *payload = cJSON_GetObjectItem(root, "payload");
-    cJSON_AddStringToObject(payload, "overlay_id", overlay_id ? overlay_id : "");
-    cJSON_AddBoolToObject(payload, "ok", ok);
-    send_json(root);
-    send_playback_completion(ok, ok, false);
-}
-
-void tater_protocol_start_media_session_visual(bool tool_playback)
-{
-    if (tool_playback) {
-        s_playback_return_state = TATER_STATE_TOOL_CALL;
-        s_playback_return_armed = true;
-    } else {
-        s_playback_return_state = TATER_STATE_IDLE;
-        s_playback_return_armed = false;
-        s_tool_visual_hold = false;
-    }
-    mark_playback_visual_active();
-    emit_state(
-        tool_playback ? TATER_STATE_TOOL_CALL : TATER_STATE_SPEAKING,
-        tool_playback ? "tool media session" : "tts media session"
-    );
-}
-
-void tater_protocol_send_media_session_started(
-    const char *session_id,
-    const char *group_id,
-    const char *channel,
-    int64_t scheduled_start_us,
-    int64_t actual_start_us
-)
-{
-    tater_media_tx_event_t event = {
-        .kind = TATER_MEDIA_TX_STARTED,
-        .payload.started.scheduled_start_us = scheduled_start_us,
-        .payload.started.actual_start_us = actual_start_us,
-    };
-    strlcpy(event.session_id, session_id ? session_id : "", sizeof(event.session_id));
-    strlcpy(
-        event.payload.started.group_id,
-        group_id ? group_id : "",
-        sizeof(event.payload.started.group_id)
-    );
-    strlcpy(
-        event.payload.started.channel,
-        channel ? channel : "stereo",
-        sizeof(event.payload.started.channel)
-    );
-    (void)media_tx_enqueue(&event);
-}
-
-void tater_protocol_send_media_session_finished(
-    const char *session_id,
-    bool ok,
-    bool complete_visual_state
-)
-{
-    tater_media_tx_event_t event = {
-        .kind = TATER_MEDIA_TX_FINISHED,
-        .payload.finished.ok = ok,
-    };
-    strlcpy(event.session_id, session_id ? session_id : "", sizeof(event.session_id));
-    (void)media_tx_enqueue(&event);
-    if (complete_visual_state) {
-        finish_media_session_visual(ok);
-    }
-}
-
-void tater_protocol_send_media_session_ready(
-    const char *session_id,
-    const char *group_id,
-    const char *reply_to,
-    bool ok,
-    uint32_t buffered_frames
-)
-{
-    cJSON *root = new_envelope("media.session.prepare.result");
-    cJSON *payload = cJSON_GetObjectItem(root, "payload");
-    cJSON_AddStringToObject(payload, "reply_to", reply_to ? reply_to : "");
-    cJSON_AddBoolToObject(payload, "ok", ok);
-    cJSON_AddStringToObject(payload, "session_id", session_id ? session_id : "");
-    cJSON_AddStringToObject(payload, "group_id", group_id ? group_id : "");
-    cJSON_AddNumberToObject(payload, "buffered_frames", buffered_frames);
-    cJSON_AddNumberToObject(payload, "sample_rate_hz", TATER_SPK_SAMPLE_RATE);
-    cJSON_AddNumberToObject(
-        payload,
-        "output_latency_frames",
-        TATER_MEDIA_RENDER_LATENCY_FRAMES
-    );
-    cJSON_AddNumberToObject(payload, "satellite_time_us", (double)esp_timer_get_time());
-    send_json(root);
-}
-
-void tater_protocol_send_media_session_playhead(
-    const char *session_id,
-    const char *group_id,
-    const char *channel,
-    uint64_t source_frames,
-    uint64_t rendered_frames,
-    uint64_t output_frames,
-    uint32_t output_latency_frames,
-    uint32_t buffered_frames,
-    int64_t satellite_time_us,
-    int64_t scheduled_start_us,
-    int32_t correction_frames,
-    bool rebuffering,
-    uint32_t underrun_events,
-    uint32_t overlay_underrun_events,
-    uint32_t background_underrun_events,
-    uint32_t foreground_underrun_events,
-    uint32_t rejoin_count,
-    uint64_t rejoin_frames
-)
-{
-    tater_media_tx_event_t event = {
-        .kind = TATER_MEDIA_TX_PLAYHEAD,
-        .payload.playhead.source_frames = source_frames,
-        .payload.playhead.rendered_frames = rendered_frames,
-        .payload.playhead.output_frames = output_frames,
-        .payload.playhead.output_latency_frames = output_latency_frames,
-        .payload.playhead.buffered_frames = buffered_frames,
-        .payload.playhead.satellite_time_us = satellite_time_us,
-        .payload.playhead.scheduled_start_us = scheduled_start_us,
-        .payload.playhead.correction_frames = correction_frames,
-        .payload.playhead.rebuffering = rebuffering,
-        .payload.playhead.underrun_events = underrun_events,
-        .payload.playhead.overlay_underrun_events = overlay_underrun_events,
-        .payload.playhead.background_underrun_events = background_underrun_events,
-        .payload.playhead.foreground_underrun_events = foreground_underrun_events,
-        .payload.playhead.rejoin_count = rejoin_count,
-        .payload.playhead.rejoin_frames = rejoin_frames,
-    };
-    strlcpy(event.session_id, session_id ? session_id : "", sizeof(event.session_id));
-    strlcpy(
-        event.payload.playhead.group_id,
-        group_id ? group_id : "",
-        sizeof(event.payload.playhead.group_id)
-    );
-    strlcpy(
-        event.payload.playhead.channel,
-        channel ? channel : "stereo",
-        sizeof(event.payload.playhead.channel)
-    );
-    (void)media_tx_enqueue(&event);
 }
 
 void tater_protocol_send_ota_status(const char *status, int progress, const char *message)

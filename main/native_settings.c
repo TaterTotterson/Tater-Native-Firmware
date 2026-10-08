@@ -8,6 +8,7 @@
 
 #include "board.h"
 #include "audio_i2s.h"
+#include "sendspin_player.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "leds.h"
@@ -207,6 +208,7 @@ void tater_live_settings_set_volume_percent(uint8_t volume_percent)
         volume_percent = 100;
     }
     s_settings.volume_percent = volume_percent;
+    tater_sendspin_set_volume(volume_percent);
 }
 
 uint8_t tater_live_settings_adjust_volume(int delta_percent)
@@ -218,6 +220,7 @@ uint8_t tater_live_settings_adjust_volume(int delta_percent)
         next = 100;
     }
     s_settings.volume_percent = (uint8_t)next;
+    tater_sendspin_set_volume(s_settings.volume_percent);
     return s_settings.volume_percent;
 }
 
@@ -261,6 +264,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *barge_in_enabled = cJSON_GetObjectItem(payload, "barge_in_enabled");
     const cJSON *volume_percent = cJSON_GetObjectItem(payload, "volume_percent");
     const cJSON *muted = cJSON_GetObjectItem(payload, "muted");
+    const cJSON *output_channel_mode = cJSON_GetObjectItem(payload, "output_channel_mode");
     const cJSON *screen_brightness = cJSON_GetObjectItem(payload, "screen_brightness");
     const cJSON *screen_night_mode_enabled = cJSON_GetObjectItem(payload, "screen_night_mode_enabled");
     const cJSON *screen_night_brightness = cJSON_GetObjectItem(payload, "screen_night_brightness");
@@ -348,9 +352,16 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     s_settings.aec_delay_ms = json_u8_range(aec_delay_ms, s_settings.aec_delay_ms, 0, 220);
     s_settings.continued_chat = json_bool(continued_chat, s_settings.continued_chat);
     s_settings.barge_in_enabled = json_bool(barge_in_enabled, s_settings.barge_in_enabled);
-    s_settings.volume_percent = json_u8_range(volume_percent, s_settings.volume_percent, 0, 100);
+    tater_live_settings_set_volume_percent(
+        json_u8_range(volume_percent, s_settings.volume_percent, 0, 100)
+    );
     bool next_muted = json_bool(muted, s_settings.muted);
     tater_live_settings_set_muted(next_muted);
+    if (cJSON_IsString(output_channel_mode) && output_channel_mode->valuestring) {
+        if (!tater_sendspin_set_output_channel_mode(output_channel_mode->valuestring)) {
+            ESP_LOGW(TAG, "ignoring invalid Sendspin output channel mode=%s", output_channel_mode->valuestring);
+        }
+    }
     s_settings.screen_brightness = json_u8_range(
         screen_brightness,
         s_settings.screen_brightness,
@@ -493,6 +504,7 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddBoolToObject(settings, "barge_in_enabled", s_settings.barge_in_enabled);
     cJSON_AddNumberToObject(settings, "volume_percent", s_settings.volume_percent);
     cJSON_AddBoolToObject(settings, "muted", s_settings.muted);
+    cJSON_AddStringToObject(settings, "output_channel_mode", tater_sendspin_output_channel_mode());
     cJSON_AddNumberToObject(settings, "screen_brightness", s_settings.screen_brightness);
     cJSON_AddBoolToObject(settings, "screen_night_mode_enabled", s_settings.screen_night_mode_enabled);
     cJSON_AddNumberToObject(settings, "screen_night_brightness", s_settings.screen_night_brightness);

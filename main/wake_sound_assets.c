@@ -2,6 +2,9 @@
 
 #include <string.h>
 
+#include "board.h"
+
+#if !TATER_BOARD_RESPEAKER_XVF3800
 extern const uint8_t _binary_blip2_wav_start[] asm("_binary_blip2_wav_start");
 extern const uint8_t _binary_blip2_wav_end[] asm("_binary_blip2_wav_end");
 extern const uint8_t _binary_message_notification_4_wav_start[] asm("_binary_message_notification_4_wav_start");
@@ -24,15 +27,19 @@ extern const uint8_t _binary_tater_notify_digital_blip_wav_start[] asm("_binary_
 extern const uint8_t _binary_tater_notify_digital_blip_wav_end[] asm("_binary_tater_notify_digital_blip_wav_end");
 extern const uint8_t _binary_turning_off_microphone_percussion_1_wav_start[] asm("_binary_turning_off_microphone_percussion_1_wav_start");
 extern const uint8_t _binary_turning_off_microphone_percussion_1_wav_end[] asm("_binary_turning_off_microphone_percussion_1_wav_end");
+#endif
 extern const uint8_t _binary_wake_word_triggered_wav_start[] asm("_binary_wake_word_triggered_wav_start");
 extern const uint8_t _binary_wake_word_triggered_wav_end[] asm("_binary_wake_word_triggered_wav_end");
+#if !TATER_BOARD_RESPEAKER_XVF3800
 extern const uint8_t _binary_waterdrop_wav_start[] asm("_binary_waterdrop_wav_start");
 extern const uint8_t _binary_waterdrop_wav_end[] asm("_binary_waterdrop_wav_end");
+#endif
 
 #define WAKE_SOUND_ASSET(asset_id, symbol_name) \
     { asset_id, _binary_##symbol_name##_wav_start, _binary_##symbol_name##_wav_end }
 
 static const tater_wake_sound_asset_t s_assets[] = {
+#if !TATER_BOARD_RESPEAKER_XVF3800
     WAKE_SOUND_ASSET("blip2", blip2),
     WAKE_SOUND_ASSET("message-notification-4", message_notification_4),
     WAKE_SOUND_ASSET("notification-ding", notification_ding),
@@ -44,8 +51,11 @@ static const tater_wake_sound_asset_t s_assets[] = {
     WAKE_SOUND_ASSET("star_treck_computer_work_beep", star_treck_computer_work_beep),
     WAKE_SOUND_ASSET("tater_notify_digital_blip", tater_notify_digital_blip),
     WAKE_SOUND_ASSET("turning-off-microphone-percussion-1", turning_off_microphone_percussion_1),
+#endif
     WAKE_SOUND_ASSET("wake_word_triggered", wake_word_triggered),
+#if !TATER_BOARD_RESPEAKER_XVF3800
     WAKE_SOUND_ASSET("waterdrop", waterdrop),
+#endif
 };
 
 const tater_wake_sound_asset_t *tater_wake_sound_asset_lookup(const char *id)
@@ -61,5 +71,10 @@ const tater_wake_sound_asset_t *tater_wake_sound_asset_lookup(const char *id)
             return &s_assets[i];
         }
     }
+#if TATER_BOARD_RESPEAKER_XVF3800
+    /* Catalog sounds omitted from the constrained image use the standard cue. */
+    return &s_assets[0];
+#else
     return NULL;
+#endif
 }

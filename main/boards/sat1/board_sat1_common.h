@@ -33,7 +33,7 @@
 #define TATER_SPK_BITS 32
 #define TATER_MEDIA_RENDER_LATENCY_FRAMES 960
 /* Keep synchronized slave-clocked I2S playback ahead of wake inference. */
-#define TATER_MEDIA_PLAYBACK_TASK_PRIORITY 7
+#define TATER_FOREGROUND_PLAYBACK_TASK_PRIORITY 7
 
 #define TATER_LED_PIN GPIO_NUM_21
 #define TATER_LED_POWER_EN GPIO_NUM_45

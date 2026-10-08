@@ -67,46 +67,4 @@ void tater_protocol_send_volume_changed(uint8_t volume_percent);
 void tater_protocol_send_playback_finished(void);
 void tater_protocol_send_playback_finished_status(bool ok, bool allow_reopen);
 void tater_protocol_send_audio_scene_finished(const char *scene_id, bool ok);
-void tater_protocol_send_audio_overlay_started(const char *overlay_id);
-void tater_protocol_send_audio_overlay_finished(const char *overlay_id, bool ok);
-void tater_protocol_start_media_session_visual(bool tool_playback);
-void tater_protocol_send_media_session_started(
-    const char *session_id,
-    const char *group_id,
-    const char *channel,
-    int64_t scheduled_start_us,
-    int64_t actual_start_us
-);
-void tater_protocol_send_media_session_finished(
-    const char *session_id,
-    bool ok,
-    bool complete_visual_state
-);
-void tater_protocol_send_media_session_ready(
-    const char *session_id,
-    const char *group_id,
-    const char *reply_to,
-    bool ok,
-    uint32_t buffered_frames
-);
-void tater_protocol_send_media_session_playhead(
-    const char *session_id,
-    const char *group_id,
-    const char *channel,
-    uint64_t source_frames,
-    uint64_t rendered_frames,
-    uint64_t output_frames,
-    uint32_t output_latency_frames,
-    uint32_t buffered_frames,
-    int64_t satellite_time_us,
-    int64_t scheduled_start_us,
-    int32_t correction_frames,
-    bool rebuffering,
-    uint32_t underrun_events,
-    uint32_t overlay_underrun_events,
-    uint32_t background_underrun_events,
-    uint32_t foreground_underrun_events,
-    uint32_t rejoin_count,
-    uint64_t rejoin_frames
-);
 void tater_protocol_send_ota_status(const char *status, int progress, const char *message);
