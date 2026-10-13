@@ -689,7 +689,36 @@ static void audio_tx_start_task(void)
     if (!s_audio_tx_queue || s_audio_tx_task) {
         return;
     }
-    BaseType_t ok = xTaskCreatePinnedToCore(audio_tx_task, "tater_audio_tx", 8192, NULL, 7, &s_audio_tx_task, 0);
+    BaseType_t ok = pdFAIL;
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    ok = xTaskCreatePinnedToCoreWithCaps(
+        audio_tx_task,
+        "tater_audio_tx",
+        8192,
+        NULL,
+        7,
+        &s_audio_tx_task,
+        0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (ok == pdPASS) {
+        ESP_LOGI(TAG, "audio tx task started core=0 stack=psram");
+    }
+#endif
+    if (ok != pdPASS) {
+        ok = xTaskCreatePinnedToCore(
+            audio_tx_task,
+            "tater_audio_tx",
+            8192,
+            NULL,
+            7,
+            &s_audio_tx_task,
+            0
+        );
+        if (ok == pdPASS) {
+            ESP_LOGW(TAG, "audio tx task using internal stack");
+        }
+    }
     if (ok != pdPASS) {
         s_audio_tx_task = NULL;
         ESP_LOGE(TAG, "audio tx task create failed");
@@ -2151,6 +2180,8 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "looping_background_audio", true);
     cJSON_AddBoolToObject(caps, "sendspin_player", true);
     cJSON_AddNumberToObject(caps, "sendspin_version", 1);
+    cJSON_AddBoolToObject(caps, "sendspin_music_visualizer", !TATER_BOARD_S3_BOX);
+    cJSON_AddBoolToObject(caps, "sendspin_color", !TATER_BOARD_S3_BOX);
     cJSON_AddBoolToObject(caps, "sendspin_output_channel_selection", true);
     cJSON_AddBoolToObject(
         caps,
@@ -2752,7 +2783,34 @@ void tater_protocol_start(void)
     }
 
     if (!s_timer_monitor_task) {
-        BaseType_t timer_task_ok = xTaskCreate(timer_monitor_task, "tater_timer", 5120, NULL, 4, &s_timer_monitor_task);
+        BaseType_t timer_task_ok = pdFAIL;
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+        timer_task_ok = xTaskCreateWithCaps(
+            timer_monitor_task,
+            "tater_timer",
+            5120,
+            NULL,
+            4,
+            &s_timer_monitor_task,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        );
+        if (timer_task_ok == pdPASS) {
+            ESP_LOGI(TAG, "timer monitor task started stack=psram");
+        }
+#endif
+        if (timer_task_ok != pdPASS) {
+            timer_task_ok = xTaskCreate(
+                timer_monitor_task,
+                "tater_timer",
+                5120,
+                NULL,
+                4,
+                &s_timer_monitor_task
+            );
+            if (timer_task_ok == pdPASS) {
+                ESP_LOGW(TAG, "timer monitor task using internal stack");
+            }
+        }
         if (timer_task_ok != pdPASS) {
             s_timer_monitor_task = NULL;
             ESP_LOGE(TAG, "timer monitor task create failed");

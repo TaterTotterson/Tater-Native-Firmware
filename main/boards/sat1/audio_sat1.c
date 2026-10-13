@@ -1904,9 +1904,36 @@ void tater_audio_i2s_start_task(void)
         s_speaker_mutex = xSemaphoreCreateMutex();
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_output_mutex_ensure());
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    bool audio_psram = true;
+    BaseType_t audio_created = xTaskCreatePinnedToCoreWithCaps(
+        audio_task,
+        "tater_audio",
+        8192,
+        NULL,
+        6,
+        NULL,
+        1,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (audio_created != pdPASS) {
+        ESP_LOGW(TAG, "sat1 audio PSRAM task create failed; retrying internal stack");
+        audio_psram = false;
+        audio_created = xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
+    }
+#else
     BaseType_t audio_created = xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
+#endif
     if (audio_created != pdPASS) {
         ESP_LOGE(TAG, "sat1 audio task create failed");
+    } else {
+        ESP_LOGI(TAG, "sat1 audio task started stack=%s",
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+            audio_psram ? "psram" : "internal"
+#else
+            "internal"
+#endif
+        );
     }
 
 #if (configSUPPORT_STATIC_ALLOCATION == 1)

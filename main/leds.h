@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -15,3 +16,8 @@ void tater_leds_show_setup_reset_success(void);
 void tater_leds_clear_setup_reset_feedback(void);
 void tater_leds_show_volume(uint8_t volume_percent);
 void tater_leds_show_mute(bool muted);
+void tater_leds_set_music_active(bool active);
+void tater_leds_set_music_color(bool valid, uint8_t red, uint8_t green, uint8_t blue);
+void tater_leds_set_music_loudness(uint16_t loudness, bool transient);
+void tater_leds_set_music_spectrum(const uint16_t *bins, size_t count);
+void tater_leds_clear_music_visualizer(void);

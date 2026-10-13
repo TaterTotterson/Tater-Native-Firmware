@@ -917,8 +917,45 @@ void tater_audio_i2s_start_task(void)
     if (!s_speaker_mutex) {
         s_speaker_mutex = xSemaphoreCreateMutex();
     }
-    xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
-    xTaskCreatePinnedToCore(doa_task, "tater_doa", 4096, NULL, 4, NULL, 0);
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    BaseType_t audio_created = xTaskCreatePinnedToCoreWithCaps(
+        audio_task,
+        "tater_audio",
+        8192,
+        NULL,
+        6,
+        NULL,
+        1,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (audio_created != pdPASS) {
+        ESP_LOGW(TAG, "respeaker audio PSRAM task create failed; retrying internal stack");
+        audio_created = xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
+    }
+    BaseType_t doa_created = xTaskCreatePinnedToCoreWithCaps(
+        doa_task,
+        "tater_doa",
+        4096,
+        NULL,
+        4,
+        NULL,
+        0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (doa_created != pdPASS) {
+        ESP_LOGW(TAG, "respeaker doa PSRAM task create failed; retrying internal stack");
+        doa_created = xTaskCreatePinnedToCore(doa_task, "tater_doa", 4096, NULL, 4, NULL, 0);
+    }
+#else
+    BaseType_t audio_created = xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
+    BaseType_t doa_created = xTaskCreatePinnedToCore(doa_task, "tater_doa", 4096, NULL, 4, NULL, 0);
+#endif
+    if (audio_created != pdPASS) {
+        ESP_LOGE(TAG, "respeaker audio task create failed");
+    }
+    if (doa_created != pdPASS) {
+        ESP_LOGE(TAG, "respeaker doa task create failed");
+    }
 }
 
 esp_err_t tater_audio_speaker_begin(void)

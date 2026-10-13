@@ -7,12 +7,21 @@
 #include "audio_i2s.h"
 #include "driver/i2s_std.h"
 #include "esp_attr.h"
+#include "esp_timer.h"
 
 typedef struct {
     uint32_t submitted_frames;
     uint32_t completed_frames;
+    int64_t completed_at_us;
+    uint32_t completion_sequence;
     uint8_t bytes_per_frame;
 } tater_audio_render_clock_state_t;
+
+/*
+ * Wake the Sendspin render-feedback task from the I2S completion callback.
+ * The implementation is a no-op until Sendspin has created that task.
+ */
+bool IRAM_ATTR tater_sendspin_notify_render_from_isr(void);
 
 static inline void tater_audio_render_clock_reset(
     tater_audio_render_clock_state_t *state
@@ -21,8 +30,11 @@ static inline void tater_audio_render_clock_reset(
     if (!state) {
         return;
     }
+    __atomic_fetch_add(&state->completion_sequence, 1, __ATOMIC_ACQ_REL);
     __atomic_store_n(&state->submitted_frames, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&state->completed_frames, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&state->completed_at_us, 0, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&state->completion_sequence, 1, __ATOMIC_RELEASE);
 }
 
 static IRAM_ATTR bool tater_audio_render_clock_on_sent(
@@ -44,7 +56,14 @@ static IRAM_ATTR bool tater_audio_render_clock_on_sent(
         event_frames = pending;
     }
     if (event_frames > 0) {
+        // Capture the DMA completion instant in the ISR.  Using the later polling-task time can
+        // move the reported playhead by several milliseconds when that task is briefly delayed,
+        // which makes Sendspin perform an audible correction even though I2S stayed healthy.
+        __atomic_fetch_add(&state->completion_sequence, 1, __ATOMIC_ACQ_REL);
+        state->completed_at_us = esp_timer_get_time();
         __atomic_fetch_add(&state->completed_frames, event_frames, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&state->completion_sequence, 1, __ATOMIC_RELEASE);
+        return tater_sendspin_notify_render_from_isr();
     }
     return false;
 }
@@ -141,13 +160,17 @@ static inline bool tater_audio_render_clock_snapshot(
     if (!state || !out || state->bytes_per_frame == 0) {
         return false;
     }
-    out->submitted_frames = __atomic_load_n(
-        &state->submitted_frames,
-        __ATOMIC_RELAXED
-    );
-    out->completed_frames = __atomic_load_n(
-        &state->completed_frames,
-        __ATOMIC_RELAXED
-    );
+    out->submitted_frames = __atomic_load_n(&state->submitted_frames, __ATOMIC_RELAXED);
+    uint32_t sequence_before = 0;
+    uint32_t sequence_after = 0;
+    do {
+        sequence_before = __atomic_load_n(&state->completion_sequence, __ATOMIC_ACQUIRE);
+        if ((sequence_before & 1U) != 0U) {
+            continue;
+        }
+        out->completed_frames = __atomic_load_n(&state->completed_frames, __ATOMIC_RELAXED);
+        out->completed_at_us = state->completed_at_us;
+        sequence_after = __atomic_load_n(&state->completion_sequence, __ATOMIC_ACQUIRE);
+    } while (sequence_before != sequence_after || (sequence_after & 1U) != 0U);
     return true;
 }

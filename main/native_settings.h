@@ -46,6 +46,7 @@ typedef struct {
     char led_thinking_animation[32];
     char led_tool_call_animation[32];
     char led_replying_animation[32];
+    char led_music_animation[32];
     char logging_level[16];
 } tater_live_settings_t;
 

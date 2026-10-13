@@ -160,8 +160,11 @@ void app_main(void)
         tater_leds_set_state(TATER_STATE_DISCONNECTED);
     }
     tater_protocol_init(&s_config, on_tater_state, on_tater_play_url, on_tater_play_tone, on_tater_ota_url);
-    ESP_ERROR_CHECK_WITHOUT_ABORT(tater_sendspin_init(&s_config));
+    // Reserve the Bluetooth controller's required internal memory before the
+    // encrypted Sendspin protocol starts its worker tasks and buffers.
     tater_ble_scanner_init(tater_protocol_send_ble_adverts);
+    tater_ble_scanner_poll(false);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(tater_sendspin_init(&s_config));
     tater_protocol_start();
     ESP_ERROR_CHECK_WITHOUT_ABORT(tater_wake_engine_init());
 

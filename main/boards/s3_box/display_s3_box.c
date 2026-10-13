@@ -2373,4 +2373,33 @@ void tater_leds_show_mute(bool muted)
     s_feedback_mode = 5;
 }
 
+void tater_leds_set_music_active(bool active)
+{
+    (void)active;
+}
+
+void tater_leds_set_music_color(bool valid, uint8_t red, uint8_t green, uint8_t blue)
+{
+    (void)valid;
+    (void)red;
+    (void)green;
+    (void)blue;
+}
+
+void tater_leds_set_music_loudness(uint16_t loudness, bool transient)
+{
+    (void)loudness;
+    (void)transient;
+}
+
+void tater_leds_set_music_spectrum(const uint16_t *bins, size_t count)
+{
+    (void)bins;
+    (void)count;
+}
+
+void tater_leds_clear_music_visualizer(void)
+{
+}
+
 #endif

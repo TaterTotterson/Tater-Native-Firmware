@@ -76,6 +76,7 @@ typedef struct {
 typedef struct {
     uint32_t submitted_frames;
     uint32_t completed_frames;
+    int64_t completed_at_us;
 } tater_audio_render_clock_t;
 
 typedef struct {

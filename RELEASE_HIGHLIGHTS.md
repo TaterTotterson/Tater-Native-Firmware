@@ -1,3 +1,5 @@
-- Releases native firmware `0.5.1` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Fixes Sendspin music stuttering, repeated hard resynchronization, and playback disconnects seen with Music Assistant by using stable 48 kHz stereo PCM on native satellites.
-- Keeps each board's fixed hardware timing compensation while temporarily disabling the optional adjustable-delay control that triggered the regression.
+- Releases native firmware `0.5.2` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Upgrades to Sendspin C++ `0.9.4` with FLAC-first playback, PCM fallback, current Sendspin support, and compatibility with Music Assistant's existing aiosendspin 9.x wire format.
+- Improves long-running synchronized playback with accurate I2S completion timestamps, event-driven render feedback, additional buffering, and tuned Wi-Fi, TCP, and PSRAM resource use to reduce skips, pops, stalls, and disconnects.
+- Adds Sendspin color and audio-reactive music animations—Bars, Pulse, Orbit, Wave, Audio Glow, or Off—to the LED-ring satellites, controlled from Tater's satellite settings.
+- Fixes Voice PE restarts when its volume wheel is turned during Sendspin playback while keeping local volume changes immediate and efficiently publishing the final volume state.

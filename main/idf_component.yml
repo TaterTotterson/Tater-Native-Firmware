@@ -1,5 +1,5 @@
 dependencies:
-  sendspin/sendspin-cpp: "^0.8.0"
+  sendspin/sendspin-cpp: "^0.9.4"
   espressif/mdns: "^1.8.2"
   espressif/esp_websocket_client: "^1.5.0"
   espressif/esp-tflite-micro: "^1.3.3"

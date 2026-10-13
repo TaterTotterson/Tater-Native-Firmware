@@ -190,6 +190,7 @@ void tater_live_settings_init_defaults(void)
 #else
     strlcpy_or_empty(s_settings.led_replying_animation, "audio_glow", sizeof(s_settings.led_replying_animation));
 #endif
+    strlcpy_or_empty(s_settings.led_music_animation, "music_bars", sizeof(s_settings.led_music_animation));
     strlcpy_or_empty(s_settings.logging_level, "info", sizeof(s_settings.logging_level));
 #if TATER_BOARD_S3_BOX
     tater_leds_set_brightness(s_settings.screen_brightness);
@@ -279,6 +280,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     const cJSON *led_thinking_animation = cJSON_GetObjectItem(payload, "led_thinking_animation");
     const cJSON *led_tool_call_animation = cJSON_GetObjectItem(payload, "led_tool_call_animation");
     const cJSON *led_replying_animation = cJSON_GetObjectItem(payload, "led_replying_animation");
+    const cJSON *led_music_animation = cJSON_GetObjectItem(payload, "led_music_animation");
     const cJSON *logging_level = cJSON_GetObjectItem(payload, "logging_level");
 
     char previous_wake_word[sizeof(s_settings.wake_word)];
@@ -432,6 +434,9 @@ bool tater_live_settings_apply_json(const cJSON *payload)
     if (cJSON_IsString(led_replying_animation) && led_replying_animation->valuestring && led_replying_animation->valuestring[0]) {
         strlcpy_or_empty(s_settings.led_replying_animation, led_replying_animation->valuestring, sizeof(s_settings.led_replying_animation));
     }
+    if (cJSON_IsString(led_music_animation) && led_music_animation->valuestring && led_music_animation->valuestring[0]) {
+        strlcpy_or_empty(s_settings.led_music_animation, led_music_animation->valuestring, sizeof(s_settings.led_music_animation));
+    }
 #if TATER_BOARD_S3_BOX
     tater_leds_set_brightness(s_settings.screen_brightness);
 #else
@@ -452,7 +457,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
 
     ESP_LOGI(
         TAG,
-        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s wake_gen=%u sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f verifier=%s/%ums/%ums wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d output=%s screen=%u night=%d/%u/%u-%u led=%u color=%s animations=%s/%s/%s/%s logging=%s",
+        "live settings applied wake_engine=%s wake_word=%s wake_word_url=%s wake_gen=%u sensitivity=%s environment=%s threshold=%.2f window=%u capture_wake=%d capture_close=%d close_threshold=%.2f verifier=%s/%ums/%ums wake_sound=%d/%s aec=%d/%u/%ums continued_chat=%d barge_in=%d volume=%u muted=%d output=%s screen=%u night=%d/%u/%u-%u led=%u color=%s animations=%s/%s/%s/%s/%s logging=%s",
         s_settings.wake_engine,
         s_settings.wake_word,
         s_settings.wake_word_url,
@@ -488,6 +493,7 @@ bool tater_live_settings_apply_json(const cJSON *payload)
         s_settings.led_thinking_animation,
         s_settings.led_tool_call_animation,
         s_settings.led_replying_animation,
+        s_settings.led_music_animation,
         s_settings.logging_level
     );
     return true;
@@ -541,6 +547,7 @@ void tater_live_settings_add_status(cJSON *payload)
     cJSON_AddStringToObject(settings, "led_thinking_animation", s_settings.led_thinking_animation);
     cJSON_AddStringToObject(settings, "led_tool_call_animation", s_settings.led_tool_call_animation);
     cJSON_AddStringToObject(settings, "led_replying_animation", s_settings.led_replying_animation);
+    cJSON_AddStringToObject(settings, "led_music_animation", s_settings.led_music_animation);
     cJSON_AddStringToObject(settings, "logging_level", s_settings.logging_level);
     cJSON_AddItemToObject(payload, "live_settings", settings);
 }

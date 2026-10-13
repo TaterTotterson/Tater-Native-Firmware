@@ -1,0 +1,1011 @@
+diff --git a/src/client.cpp b/src/client.cpp
+index 04c8545..5d4937e 100644
+--- a/src/client.cpp
++++ b/src/client.cpp
+@@ -1397,7 +1397,7 @@ void SendspinClient::cleanup_connection_state(uint16_t teardown_roles) {
+ #endif
+ }
+
+-std::string SendspinClient::build_hello_message() {
++std::string SendspinClient::build_hello_message(bool legacy_wire) {
+     // Reached only from ConnectionManager::send_hello_message(), so only for a connection, so
+     // only after a successful start(): record_store_ exists and is dereferenced unguarded below.
+     ClientHelloMessage msg;
+@@ -1473,6 +1473,11 @@ std::string SendspinClient::build_hello_message() {
+ #ifdef SENDSPIN_ENABLE_VISUALIZER
+     if (this->visualizer_) {
+         this->visualizer_->impl_->build_hello_fields(msg);
++        if (legacy_wire) {
++            ClientStateMessage legacy_state;
++            this->visualizer_->impl_->build_state_fields(legacy_state);
++            msg.legacy_visualizer_support = std::move(legacy_state.visualizer);
++        }
+     }
+ #endif
+ #ifdef SENDSPIN_ENABLE_SOURCE
+@@ -1481,7 +1486,7 @@ std::string SendspinClient::build_hello_message() {
+     }
+ #endif
+
+-    return format_client_hello_message(&msg, *this->json_arena_);
++    return format_client_hello_message(&msg, *this->json_arena_, legacy_wire);
+ }
+
+ // ============================================================================
+@@ -1522,7 +1522,8 @@ void SendspinClient::publish_client_state(SendspinConnection* conn) {
+     // after a server/activate carries them all.
+     const ClientStateMessage state_msg =
+         client_state_for_roles(snapshot, entry->owned_roles & conn->get_active_role_mask());
+-    conn->send_app_json(format_client_state_message(&state_msg, *this->json_arena_));
++    conn->send_app_json(
++        format_client_state_message(&state_msg, *this->json_arena_, conn->uses_legacy_wire()));
+ }
+
+ void SendspinClient::adopt_client_state(ClientStateMessage&& snapshot) {
+diff --git a/src/client_dispatch.cpp b/src/client_dispatch.cpp
+index dd54e2d..7a55ce8 100644
+--- a/src/client_dispatch.cpp
++++ b/src/client_dispatch.cpp
+@@ -860,7 +860,7 @@ SS_HOT void SendspinClient::process_binary_message(SendspinConnection& connectio
+                     // client/state it sends.
+                     SS_LOGV(TAG, "Discarding audio chunk while unavailable");
+                 } else {
+-                    this->player_->impl_->handle_binary(message);
++                    this->player_->impl_->handle_binary(message, conn->uses_legacy_wire());
+                 }
+             }
+ #endif
+diff --git a/src/connection.cpp b/src/connection.cpp
+index 02c75eb..27d73b2 100644
+--- a/src/connection.cpp
++++ b/src/connection.cpp
+@@ -258,7 +258,7 @@ void SendspinConnection::handle_noise_handshake_text(std::string_view text) {
+         // Record the server's identity (public key) and the PSK category/psk_id that admitted
+         // the connection, resolved by the handshake.
+         this->set_noise_handshake_result(outcome->server_id, outcome->resolved_psk.category,
+-                                         outcome->resolved_psk.psk_id);
++                                         outcome->resolved_psk.psk_id, outcome->legacy_wire);
+         // pairing.md "Pairing index": a fresh handshake starts a fresh count for the
+         // pairing_index / CPace-sid counter.
+         this->reset_pairing_index();
+@@ -333,6 +333,7 @@ bool SendspinConnection::handle_noise_rehandshake(const std::vector<uint8_t>& ms
+     // Update PSK metadata from the re-handshake result. server_id is unchanged (same server).
+     this->psk_category_ = result->resolved_psk.category;
+     this->psk_id_ = result->resolved_psk.psk_id;
++    this->legacy_wire_ = result->legacy_wire;
+
+     // pairing.md "Pairing index": a re-handshake starts a fresh count for the pairing_index /
+     // CPace-sid counter, same as an initial handshake.
+diff --git a/src/connection.h b/src/connection.h
+index c69d3b8..d109946 100644
+--- a/src/connection.h
++++ b/src/connection.h
+@@ -185,6 +185,11 @@ public:
+         return this->noise_handshake_complete_;
+     }
+
++    /// @brief Whether this peer uses the pre-RC1 Sendspin wire format.
++    bool uses_legacy_wire() const {
++        return this->legacy_wire_;
++    }
++
+     /// @brief Return true if a Noise handshake driver has been installed on this connection.
+     bool has_noise_handshake() const {
+         return this->noise_handshake_ != nullptr;
+@@ -719,10 +724,11 @@ public:
+     /// @brief Sets the server_id and PSK metadata from the Noise handshake result.
+     /// Called at COMPLETE in connection.cpp.
+     void set_noise_handshake_result(const std::string& server_id, PskCategory psk_category,
+-                                    const std::string& psk_id) {
++                                    const std::string& psk_id, bool legacy_wire = false) {
+         this->server_information_.server_id = server_id;
+         this->psk_category_ = psk_category;
+         this->psk_id_ = psk_id;
++        this->legacy_wire_ = legacy_wire;
+     }
+
+     /// @brief Returns whether server/hello has arrived on this connection.
+@@ -1204,6 +1210,9 @@ protected:
+     /// True once the Noise transport handshake has completed. Protocol task only.
+     bool noise_handshake_complete_{false};
+
++    /// Per-connection compatibility mode for aiosendspin 9.x peers.
++    bool legacy_wire_{false};
++
+     /// true once the transport delivered the connected event (WebSocket upgrade completed).
+     /// Written from the transport connected callback (transport thread), read by the manager on
+     /// the protocol task, hence atomic. See mark_ws_upgraded().
+diff --git a/src/connection_manager.cpp b/src/connection_manager.cpp
+index bf55034..bb2741c 100644
+--- a/src/connection_manager.cpp
++++ b/src/connection_manager.cpp
+@@ -1540,7 +1540,7 @@ bool ConnectionManager::send_hello_message(SendspinConnection* conn) {
+         return true;
+     }
+
+-    std::string hello_message = this->client_->build_hello_message();
++    std::string hello_message = this->client_->build_hello_message(conn->uses_legacy_wire());
+
+     // send_app_json (not send_text_message): client/hello is encrypted like every other
+     // post-handshake message. The hello is only sent once server/hello arrives, so
+diff --git a/src/noise_handshake.cpp b/src/noise_handshake.cpp
+index b5230f8..0366e53 100644
+--- a/src/noise_handshake.cpp
++++ b/src/noise_handshake.cpp
+@@ -88,6 +88,8 @@ struct Msg1CoreResult {
+     NoiseSession session;
+     /// The PSK record that admitted the connection.
+     ResolvedPsk resolved_psk;
++    /// True when msg1 omitted psk_category, as aiosendspin 9.x did.
++    bool legacy_wire{false};
+     /// Serialized noise/handshake msg2 bytes (not yet wrapped in a JSON envelope).
+     std::vector<uint8_t> msg2_bytes;
+ };
+@@ -174,11 +176,34 @@ std::optional<Msg1CoreResult> run_msg1_core(HandshakeKind kind, const Identity&
+         return std::nullopt;
+     }
+
+-    // messaging.md "noise/handshake": the payload declares which category the server is using the
+-    // referenced PSK as. A missing or unknown code is a malformed payload, which connection.md
+-    // "Failure Handling" makes a silent failure.
++    // aiosendspin 9.x predates psk_category. For that legacy wire format, infer the category by
++    // resolving the psk_id across the three disjoint stores. This retains normal Noise
++    // authentication; it only restores the category information omitted by the older envelope.
++    const bool legacy_wire = psk_category_code.empty();
+     auto psk_category = psk_category_from_string(psk_category_code);
+-    if (!psk_category.has_value()) {
++    std::optional<ResolvedPsk> resolved;
++    if (legacy_wire) {
++        static constexpr PskCategory LEGACY_LOOKUP_ORDER[] = {
++            PskCategory::LONG_TERM,
++            PskCategory::PAIRING,
++            PskCategory::SENTINEL,
++        };
++        for (PskCategory candidate : LEGACY_LOOKUP_ORDER) {
++            resolved = record_store.resolve_by_psk_id(psk_id, candidate);
++            if (resolved.has_value()) {
++                psk_category = candidate;
++                break;
++            }
++        }
++        // Preserve the regular initial-handshake Sentinel fallback when the supplied id is
++        // unknown. The chosen category matters only for the failed lookup's diagnostic.
++        if (!psk_category.has_value()) {
++            psk_category = PskCategory::LONG_TERM;
++        }
++        SS_LOGI(TAG, "%s: legacy msg1 without psk_category; inferred category=%d", log_prefix,
++                static_cast<int>(psk_category.value()));
++    } else if (!psk_category.has_value()) {
++        // A present but unknown category is malformed in both current and legacy protocols.
+         SS_LOGE(TAG, "%s: msg1 payload psk_category missing or unknown ('%s')", log_prefix,
+                 psk_category_code.c_str());
+         return std::nullopt;
+@@ -187,7 +212,9 @@ std::optional<Msg1CoreResult> run_msg1_core(HandshakeKind kind, const Identity&
+     SS_LOGD(TAG, "%s: psk_id='%s' psk_category='%s'", log_prefix, psk_id.c_str(),
+             psk_category_code.c_str());
+
+-    auto resolved = record_store.resolve_by_psk_id(psk_id, psk_category.value());
++    if (!resolved.has_value()) {
++        resolved = record_store.resolve_by_psk_id(psk_id, psk_category.value());
++    }
+     if (resolved.has_value()) {
+         // Post-match check (connection.md "Pre-Shared Key"): every long-term PSK is persisted
+         // with the server_id it was minted for. The Pairing and Sentinel PSKs are bound to no
+@@ -234,7 +261,7 @@ std::optional<Msg1CoreResult> run_msg1_core(HandshakeKind kind, const Identity&
+         return std::nullopt;
+     }
+
+-    return Msg1CoreResult{std::move(session.value()), std::move(resolved.value()),
++    return Msg1CoreResult{std::move(session.value()), std::move(resolved.value()), legacy_wire,
+                           std::move(msg2_bytes)};
+ }
+
+@@ -249,6 +276,7 @@ NoiseHandshakeResult make_handshake_result(Msg1CoreResult&& core, std::string se
+     result.session = std::make_unique<NoiseSession>(std::move(core.session));
+     result.server_id = std::move(server_id);
+     result.resolved_psk = std::move(core.resolved_psk);
++    result.legacy_wire = core.legacy_wire;
+     return result;
+ }
+
+diff --git a/src/noise_handshake.h b/src/noise_handshake.h
+index e7beb2a..cecc4b8 100644
+--- a/src/noise_handshake.h
++++ b/src/noise_handshake.h
+@@ -66,6 +66,8 @@ struct NoiseHandshakeResult {
+     std::string server_id;
+     /// The PSK record that admitted the connection.
+     ResolvedPsk resolved_psk;
++    /// True when the peer used the pre-RC1 wire format (no psk_category in msg1).
++    bool legacy_wire{false};
+     /// Serialized noise/handshake msg2 JSON to send to the peer.
+     /// Non-empty only for re-handshake results (initial handshake sends msg2 inline).
+     std::string msg2_text;
+diff --git a/src/noise_transport.cpp b/src/noise_transport.cpp
+index 6842038..a0938ce 100644
+--- a/src/noise_transport.cpp
++++ b/src/noise_transport.cpp
+@@ -26,6 +26,11 @@ namespace sendspin {
+
+ static const char* const TAG = "sendspin.noise_transport";
+
++// aiosendspin 9.x uses type 2 for every non-final fragment and type 3 for the final fragment.
++// Those values are reserved by the current protocol, so accepting both dialects is unambiguous.
++static constexpr uint8_t LEGACY_FRAGMENT_MORE = 2;
++static constexpr uint8_t LEGACY_FRAGMENT_END = 3;
++
+ // ============================================================================
+ // Session lifecycle
+ // ============================================================================
+@@ -269,7 +274,11 @@ NoiseTransport::CompleteMessage NoiseTransport::accept_plaintext(uint8_t* plaint
+         return {};
+     }
+
+-    if (plaintext[0] != MSG_TYPE_FRAGMENT) {
++    const uint8_t frame_type = plaintext[0];
++    const bool legacy_more = frame_type == LEGACY_FRAGMENT_MORE;
++    const bool legacy_end = frame_type == LEGACY_FRAGMENT_END;
++
++    if (frame_type != MSG_TYPE_FRAGMENT && !legacy_more && !legacy_end) {
+         // messaging.md "Malformed sequences": a non-fragment binary message received while a
+         // fragmented message is in flight is a protocol error; the caller must close.
+         if (this->reasm_in_progress_) {
+@@ -283,77 +292,111 @@ NoiseTransport::CompleteMessage NoiseTransport::accept_plaintext(uint8_t* plaint
+         return {plaintext, len};
+     }
+
+-    // A fragment frame with no flags byte carries no place in the sequence at all, so it cannot
+-    // be tracked; treat it like the enumerated malformed sequences and close.
+-    if (len < FRAGMENT_CONT_HEADER_SIZE) {
+-        SS_LOGW(TAG, "fragment frame missing its flags byte; malformed sequence");
+-        this->reasm_reset();
+-        return {nullptr, 0, true};
+-    }
+-
+-    const uint8_t flags = plaintext[1];
+-    if ((flags & FRAGMENT_FLAGS_RESERVED) != 0) {
+-        // messaging.md "Malformed sequences": a nonzero reserved flag bit.
+-        SS_LOGW(TAG, "fragment flags 0x%02x set a reserved bit; malformed sequence",
+-                static_cast<unsigned>(flags));
+-        this->reasm_reset();
+-        return {nullptr, 0, true};
+-    }
+-
+     // Every path below that reports a malformed sequence clears the reassembly state first, so
+     // the connection the caller is about to close cannot be left holding one.
+     const uint8_t* data = nullptr;
+     size_t data_len = 0;
+-
+-    if ((flags & FRAGMENT_FLAG_FIRST) != 0) {
+-        // messaging.md "Malformed sequences": a first fragment received while a fragmented
+-        // message is in flight.
+-        if (this->reasm_in_progress_) {
+-            SS_LOGW(TAG, "first fragment while a fragmented message is in flight; "
+-                         "malformed sequence");
+-            this->reasm_reset();
+-            return {nullptr, 0, true};
++    bool last = false;
++
++    if (legacy_more || legacy_end) {
++        if (legacy_end) {
++            if (!this->reasm_in_progress_) {
++                SS_LOGW(TAG, "legacy final fragment with no fragmented message in flight; "
++                             "malformed sequence");
++                this->reasm_reset();
++                return {nullptr, 0, true};
++            }
++            data = plaintext + 1;
++            data_len = len - 1;
++            last = true;
++        } else if (!this->reasm_in_progress_) {
++            if (len < 2) {
++                SS_LOGW(TAG, "legacy first fragment missing its orig_type; malformed sequence");
++                this->reasm_reset();
++                return {nullptr, 0, true};
++            }
++            const uint8_t orig_type = plaintext[1];
++            if (orig_type == MSG_TYPE_FRAGMENT) {
++                SS_LOGW(TAG, "legacy first fragment declares orig_type 1; malformed sequence");
++                this->reasm_reset();
++                return {nullptr, 0, true};
++            }
++            this->reasm_in_progress_ = true;
++            this->reasm_discarding_ =
++                (orig_type >= MSG_TYPE_RESERVED_FIRST && orig_type <= MSG_TYPE_RESERVED_LAST);
++            this->reasm_len_ = 0;
++            if (!this->reasm_discarding_) {
++                if (this->reasm_reserve(1, admitted)) {
++                    this->reasm_buf_.data()[0] = orig_type;
++                    this->reasm_len_ = 1;
++                } else {
++                    this->reasm_discarding_ = true;
++                }
++            }
++            data = plaintext + 2;
++            data_len = len - 2;
++        } else {
++            data = plaintext + 1;
++            data_len = len - 1;
+         }
+-        if (len < FRAGMENT_FIRST_HEADER_SIZE) {
+-            SS_LOGW(TAG, "first fragment missing its orig_type; malformed sequence");
++    } else {
++        // A current fragment frame with no flags byte carries no place in the sequence at all.
++        if (len < FRAGMENT_CONT_HEADER_SIZE) {
++            SS_LOGW(TAG, "fragment frame missing its flags byte; malformed sequence");
+             this->reasm_reset();
+             return {nullptr, 0, true};
+         }
+-        const uint8_t orig_type = plaintext[FRAGMENT_CONT_HEADER_SIZE];
+-        // messaging.md "Malformed sequences": an orig_type of 1. Fragments do not nest.
+-        if (orig_type == MSG_TYPE_FRAGMENT) {
+-            SS_LOGW(TAG, "first fragment declares orig_type 1; malformed sequence");
++        const uint8_t flags = plaintext[1];
++        if ((flags & FRAGMENT_FLAGS_RESERVED) != 0) {
++            SS_LOGW(TAG, "fragment flags 0x%02x set a reserved bit; malformed sequence",
++                    static_cast<unsigned>(flags));
+             this->reasm_reset();
+             return {nullptr, 0, true};
+         }
+-        // The ignore rules let a receiver discard the data of a message whose orig_type it does
+-        // not implement instead of allocating for it, as long as it keeps tracking the sequence.
+-        this->reasm_in_progress_ = true;
+-        this->reasm_discarding_ =
+-            (orig_type >= MSG_TYPE_RESERVED_FIRST && orig_type <= MSG_TYPE_RESERVED_LAST);
+-        this->reasm_len_ = 0;
+-        if (!this->reasm_discarding_) {
+-            // reasm_buf_ accumulates the final message shape directly ([orig_type][data...]),
+-            // so completion needs no staging copy.
+-            if (this->reasm_reserve(1, admitted)) {
+-                this->reasm_buf_.data()[0] = orig_type;
+-                this->reasm_len_ = 1;
+-            } else {
+-                this->reasm_discarding_ = true;
++        last = (flags & FRAGMENT_FLAG_LAST) != 0;
++
++        if ((flags & FRAGMENT_FLAG_FIRST) != 0) {
++            if (this->reasm_in_progress_) {
++                SS_LOGW(TAG, "first fragment while a fragmented message is in flight; "
++                             "malformed sequence");
++                this->reasm_reset();
++                return {nullptr, 0, true};
+             }
++            if (len < FRAGMENT_FIRST_HEADER_SIZE) {
++                SS_LOGW(TAG, "first fragment missing its orig_type; malformed sequence");
++                this->reasm_reset();
++                return {nullptr, 0, true};
++            }
++            const uint8_t orig_type = plaintext[FRAGMENT_CONT_HEADER_SIZE];
++            if (orig_type == MSG_TYPE_FRAGMENT) {
++                SS_LOGW(TAG, "first fragment declares orig_type 1; malformed sequence");
++                this->reasm_reset();
++                return {nullptr, 0, true};
++            }
++            this->reasm_in_progress_ = true;
++            this->reasm_discarding_ =
++                (orig_type >= MSG_TYPE_RESERVED_FIRST && orig_type <= MSG_TYPE_RESERVED_LAST);
++            this->reasm_len_ = 0;
++            if (!this->reasm_discarding_) {
++                if (this->reasm_reserve(1, admitted)) {
++                    this->reasm_buf_.data()[0] = orig_type;
++                    this->reasm_len_ = 1;
++                } else {
++                    this->reasm_discarding_ = true;
++                }
++            }
++            data = plaintext + FRAGMENT_FIRST_HEADER_SIZE;
++            data_len = len - FRAGMENT_FIRST_HEADER_SIZE;
++        } else {
++            if (!this->reasm_in_progress_) {
++                SS_LOGW(TAG, "continuation fragment with no fragmented message in flight; "
++                             "malformed sequence");
++                this->reasm_reset();
++                return {nullptr, 0, true};
++            }
++            data = plaintext + FRAGMENT_CONT_HEADER_SIZE;
++            data_len = len - FRAGMENT_CONT_HEADER_SIZE;
+         }
+-        data = plaintext + FRAGMENT_FIRST_HEADER_SIZE;
+-        data_len = len - FRAGMENT_FIRST_HEADER_SIZE;
+-    } else {
+-        // messaging.md "Malformed sequences": a non-first fragment received with none in flight.
+-        if (!this->reasm_in_progress_) {
+-            SS_LOGW(TAG, "continuation fragment with no fragmented message in flight; "
+-                         "malformed sequence");
+-            this->reasm_reset();
+-            return {nullptr, 0, true};
+-        }
+-        data = plaintext + FRAGMENT_CONT_HEADER_SIZE;
+-        data_len = len - FRAGMENT_CONT_HEADER_SIZE;
+     }
+
+     if (!this->reasm_discarding_) {
+@@ -378,7 +421,7 @@ NoiseTransport::CompleteMessage NoiseTransport::accept_plaintext(uint8_t* plaint
+         }
+     }
+
+-    if ((flags & FRAGMENT_FLAG_LAST) == 0) {
++    if (!last) {
+         return {};
+     }
+
+diff --git a/src/noise_transport.h b/src/noise_transport.h
+index 2786564..7c0a159 100644
+--- a/src/noise_transport.h
++++ b/src/noise_transport.h
+@@ -171,8 +171,8 @@ public:
+
+     /// @brief Routes one decrypted plaintext frame through the fragment state machine.
+     /// Non-fragment frames are returned directly (the same pointer, so the caller can tell the
+-    /// message is still where it decrypted it); type-1 fragment frames are buffered until one
+-    /// carrying FRAGMENT_FLAG_LAST produces the reassembled message.
++    /// message is still where it decrypted it); current type-1 fragments and legacy aiosendspin
++    /// 9.x type-2/type-3 fragments are buffered until their final frame produces the message.
+     /// @param admitted Whether the owning connection holds the admitted slot
+     ///        (InboundGate::is_admitted()), which selects the reassembly cap:
+     ///        MAX_PRE_ADMISSION_REASSEMBLED_MESSAGE_BYTES until it does.
+diff --git a/src/player_role.cpp b/src/player_role.cpp
+index 9663c90..ae7e163 100644
+--- a/src/player_role.cpp
++++ b/src/player_role.cpp
+@@ -45,6 +45,8 @@ static constexpr size_t BINARY_SEND_AHEAD_SIZE = 4;
+ /// @brief Bytes an audio chunk spends on its header, after the message type byte.
+ static constexpr size_t AUDIO_CHUNK_HEADER_SIZE =
+     sendspin::BINARY_TIMESTAMP_SIZE + BINARY_SEND_AHEAD_SIZE;
++/// @brief Legacy aiosendspin 9.x carried only the timestamp after the message type byte.
++static constexpr size_t LEGACY_AUDIO_CHUNK_HEADER_SIZE = sendspin::BINARY_TIMESTAMP_SIZE;
+ /// @brief Upper bound on the output delay, per roles/player/v1.md "Output delay": clients MUST
+ /// clamp output_delay_ms to the range 0-5000.
+ static constexpr uint16_t MAX_OUTPUT_DELAY_MS = 5000U;
+@@ -313,16 +315,19 @@ void PlayerRole::Impl::build_state_fields(ClientStateMessage& msg) const {
+     msg.player = std::move(player_state);
+ }
+
+-std::optional<AudioChunk> PlayerRole::Impl::parse_audio_chunk(const uint8_t* data, size_t len) {
+-    if (len < AUDIO_CHUNK_HEADER_SIZE) {
++std::optional<AudioChunk> PlayerRole::Impl::parse_audio_chunk(const uint8_t* data, size_t len,
++                                                              bool legacy_wire) {
++    const size_t header_size =
++        legacy_wire ? LEGACY_AUDIO_CHUNK_HEADER_SIZE : AUDIO_CHUNK_HEADER_SIZE;
++    if (len < header_size) {
+         return std::nullopt;
+     }
+     return AudioChunk{.timestamp_us = be64_to_host(data),
+-                      .audio = data + AUDIO_CHUNK_HEADER_SIZE,
+-                      .audio_len = len - AUDIO_CHUNK_HEADER_SIZE};
++                      .audio = data + header_size,
++                      .audio_len = len - header_size};
+ }
+
+-SS_HOT void PlayerRole::Impl::handle_binary(InboundMessage& message) {
++SS_HOT void PlayerRole::Impl::handle_binary(InboundMessage& message, bool legacy_wire) {
+     const uint32_t generation = this->cleanup_generation.load(std::memory_order_acquire);
+     InboundConsumer& inbound = this->sync_task->inbound();
+     if (inbound.ring() == nullptr) {
+@@ -330,7 +335,7 @@ SS_HOT void PlayerRole::Impl::handle_binary(InboundMessage& message) {
+         SS_LOGV(TAG, "Discarding audio chunk: the sync task is not running");
+         return;
+     }
+-    auto chunk = parse_audio_chunk(message.data + 1, message.len - 1);
++    auto chunk = parse_audio_chunk(message.data + 1, message.len - 1, legacy_wire);
+     if (!chunk.has_value()) {
+         inbound.note_drop(InboundConsumer::DropReason::TOO_SHORT);
+         return;
+@@ -343,11 +348,13 @@ SS_HOT void PlayerRole::Impl::handle_binary(InboundMessage& message) {
+     }
+     // roles/player/v1.md "client/hello player@v1 support object": the server keeps the
+     // advertised buffer_capacity, which the quota covers at the smallest chunk size.
++    const size_t audio_frame_offset =
++        1 + (legacy_wire ? LEGACY_AUDIO_CHUNK_HEADER_SIZE : AUDIO_CHUNK_HEADER_SIZE);
+     (void)inbound.hand_message(message,
+                                {.data_len = static_cast<uint32_t>(chunk->audio_len),
+                                 .serial = 0,
+                                 .type = CHUNK_TYPE_ENCODED_AUDIO,
+-                                .data_offset = AUDIO_FRAME_OFFSET},
++                                .data_offset = static_cast<uint8_t>(audio_frame_offset)},
+                                generation);
+ }
+
+diff --git a/src/player_role_impl.h b/src/player_role_impl.h
+index b97f066..9825b80 100644
+--- a/src/player_role_impl.h
++++ b/src/player_role_impl.h
+@@ -67,7 +67,8 @@ struct PlayerRole::Impl : RoleTeardown {
+     /// it carries no scheduling meaning, so the chunk is parsed past it.
+     /// @param data Chunk bytes with the message type byte already stripped.
+     /// @return The split chunk, or nullopt when @p len is too short to hold the header.
+-    static std::optional<AudioChunk> parse_audio_chunk(const uint8_t* data, size_t len);
++    static std::optional<AudioChunk> parse_audio_chunk(const uint8_t* data, size_t len,
++                                                       bool legacy_wire = false);
+
+     // ========================================
+     // Event state
+@@ -108,7 +109,7 @@ struct PlayerRole::Impl : RoleTeardown {
+     /// @brief Hands an audio chunk to the sync task: by its ring item when it has one (clearing
+     /// `message.item`), otherwise copied into an item the protocol task acquires.
+     /// @param message The decrypted chunk; `data` points at its message type byte.
+-    void handle_binary(InboundMessage& message);
++    void handle_binary(InboundMessage& message, bool legacy_wire = false);
+     void handle_stream_start(ServerPlayerStreamObject player_obj);
+     void handle_stream_end() const;
+     void handle_stream_clear();
+diff --git a/src/protocol.cpp b/src/protocol.cpp
+index b436621..791c817 100644
+--- a/src/protocol.cpp
++++ b/src/protocol.cpp
+@@ -209,6 +209,9 @@ static bool process_server_player_command_object(const JsonObject player_object,
+
+     if (auto v = read_uint_field<uint16_t>(player_object["output_delay_ms"], "output_delay_ms")) {
+         player_cmd->output_delay_ms = v;
++    } else if (auto v =
++                   read_uint_field<uint16_t>(player_object["static_delay_ms"], "static_delay_ms")) {
++        player_cmd->output_delay_ms = v;
+     }
+
+     return true;
+@@ -843,12 +846,16 @@ bool process_stream_clear_message(JsonObject root, StreamClearMessage* clear_msg
+ // Message formatting
+
+ std::string format_client_hello_message(const ClientHelloMessage* msg,
+-                                        SendspinArenaAllocator& arena) {
++                                        SendspinArenaAllocator& arena, bool legacy_wire) {
+     JsonDocument doc = make_json_document(arena);
+     JsonObject root = doc.to<JsonObject>();
+
+     root["type"] = "client/hello";
+     // Under encryption: client_id and version are carried in client/init, not repeated here.
++    if (legacy_wire) {
++        // aiosendspin 9.x still expects the protocol version in the encrypted hello.
++        root["payload"]["version"] = 1;
++    }
+     root["payload"]["name"] = msg->name;
+     if (msg->device_info.has_value()) {
+         const auto& info = msg->device_info.value();
+@@ -870,9 +877,25 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
+     // client implements at least pairing_psk, messaging.md "client/hello"), so the object is
+     // emitted even for an empty list.
+     {
+-        JsonObject methods_obj = root["payload"]["supported_pair_methods"].to<JsonObject>();
++        JsonObject methods_obj;
++        JsonArray methods_list;
++        if (legacy_wire) {
++            methods_list = root["payload"]["supported_pair_methods"].to<JsonArray>();
++        } else {
++            methods_obj = root["payload"]["supported_pair_methods"].to<JsonObject>();
++        }
+         for (const auto& desc : msg->supported_pair_methods) {
+-            JsonObject method_obj = methods_obj[to_cstr(desc.method)].to<JsonObject>();
++            // The newer dynamic/static pairing-code names are not valid in aiosendspin 9.x.
++            if (legacy_wire && desc.method != SendspinPairMethod::PAIRING_PSK) {
++                continue;
++            }
++            JsonObject method_obj;
++            if (legacy_wire) {
++                method_obj = methods_list.add<JsonObject>();
++                method_obj["method"] = to_cstr(desc.method);
++            } else {
++                method_obj = methods_obj[to_cstr(desc.method)].to<JsonObject>();
++            }
+             const auto& out_channels = desc.out_channels;
+             if (out_channels.has_value() && !out_channels->empty()) {
+                 JsonArray ch_arr = method_obj["out_channels"].to<JsonArray>();
+@@ -914,6 +937,13 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
+         }
+         root["payload"]["player@v1_support"]["buffer_capacity"] =
+             msg->player_v1_support.value().buffer_capacity;
++        if (legacy_wire) {
++            // aiosendspin 9.x declares volume and mute support in client/hello.
++            JsonArray commands =
++                root["payload"]["player@v1_support"]["supported_commands"].to<JsonArray>();
++            commands.add("volume");
++            commands.add("mute");
++        }
+     }
+
+     if (msg->visualizer_support.has_value()) {
+@@ -922,6 +952,22 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
+         // dynamic and reported in the client/state visualizer object.
+         root["payload"]["visualizer@v1_support"]["buffer_capacity"] =
+             msg->visualizer_support.value().buffer_capacity;
++        if (legacy_wire && msg->legacy_visualizer_support.has_value()) {
++            const auto& vis = msg->legacy_visualizer_support.value();
++            JsonObject vis_json = root["payload"]["visualizer@v1_support"].as<JsonObject>();
++            JsonArray types_list = vis_json["types"].to<JsonArray>();
++            for (const auto& type : vis.types) {
++                types_list.add(to_cstr(type));
++            }
++            vis_json["rate_max"] = vis.rate_max;
++            if (vis.spectrum.has_value()) {
++                const VisualizerSpectrumConfig& spec = vis.spectrum.value();
++                vis_json["spectrum"]["n_disp_bins"] = spec.n_disp_bins;
++                vis_json["spectrum"]["scale"] = to_cstr(spec.scale);
++                vis_json["spectrum"]["f_min"] = spec.f_min;
++                vis_json["spectrum"]["f_max"] = spec.f_max;
++            }
++        }
+     }
+
+     // messaging.md "client/hello" requires the object whenever source@v1 is listed; line_sense is
+@@ -939,11 +985,14 @@ std::string format_client_hello_message(const ClientHelloMessage* msg,
+ }
+
+ std::string format_client_state_message(const ClientStateMessage* msg,
+-                                        SendspinArenaAllocator& arena) {
++                                        SendspinArenaAllocator& arena, bool legacy_wire) {
+     JsonDocument doc = make_json_document(arena);
+     JsonObject root = doc.to<JsonObject>();
+
+     root["type"] = "client/state";
++    if (legacy_wire) {
++        root["payload"]["state"] = "synchronized";
++    }
+     // messaging.md "External Source Handling": false means the client will not yield to Sendspin.
+     root["payload"]["available"] = msg->available;
+
+@@ -951,14 +1000,25 @@ std::string format_client_state_message(const ClientStateMessage* msg,
+         const ClientPlayerStateObject& player_state = msg->player.value();
+         root["payload"]["player"]["volume"] = player_state.volume;
+         root["payload"]["player"]["muted"] = player_state.muted;
+-        root["payload"]["player"]["output_delay_ms"] = player_state.output_delay_ms;
++        if (legacy_wire) {
++            root["payload"]["player"]["static_delay_ms"] = player_state.output_delay_ms;
++        } else {
++            root["payload"]["player"]["output_delay_ms"] = player_state.output_delay_ms;
++        }
+         root["payload"]["player"]["required_lead_time_ms"] = player_state.required_lead_time_ms;
+         root["payload"]["player"]["min_buffer_ms"] = player_state.min_buffer_ms;
+         // roles/player/v1.md "client/state player object": supported_commands is a required key
+         // that is empty when the player accepts no commands, so the array is emitted even then.
+         JsonArray commands_list = root["payload"]["player"]["supported_commands"].to<JsonArray>();
+         for (const auto& cmd : player_state.supported_commands) {
+-            commands_list.add(to_cstr(cmd));
++            if (legacy_wire) {
++                // 9.x carries volume/mute in hello and names adjustable delay differently.
++                if (cmd == SendspinPlayerCommand::SET_OUTPUT_DELAY) {
++                    commands_list.add("set_static_delay");
++                }
++            } else {
++                commands_list.add(to_cstr(cmd));
++            }
+         }
+     }
+
+@@ -977,7 +1037,7 @@ std::string format_client_state_message(const ClientStateMessage* msg,
+         }
+     }
+
+-    if (msg->visualizer.has_value()) {
++    if (msg->visualizer.has_value() && !legacy_wire) {
+         const auto& vis = msg->visualizer.value();
+         JsonObject vis_json = root["payload"]["visualizer"].to<JsonObject>();
+         // roles/visualizer/v1.md "client/state visualizer object": types and rate_max are always
+
+diff --git a/src/protocol_messages.h b/src/protocol_messages.h
+index 52f45bd..fecf379 100644
+--- a/src/protocol_messages.h
++++ b/src/protocol_messages.h
+@@ -478,7 +478,7 @@ inline std::optional<SendspinPlayerCommand> player_command_from_string(std::stri
+     if (str == "mute") {
+         return SendspinPlayerCommand::MUTE;
+     }
+-    if (str == "set_output_delay") {
++    if (str == "set_output_delay" || str == "set_static_delay") {
+         return SendspinPlayerCommand::SET_OUTPUT_DELAY;
+     }
+     return std::nullopt;
+@@ -847,6 +847,9 @@ struct ClientHelloMessage {
+     std::vector<SendspinRole> supported_roles{};
+     std::optional<PlayerSupportObject> player_v1_support{};
+     std::optional<VisualizerSupportObject> visualizer_support{};
++    // aiosendspin 9.x carries the requested visualizer stream configuration in
++    // visualizer@v1_support. Current Sendspin carries it in client/state instead.
++    std::optional<ClientVisualizerStateObject> legacy_visualizer_support{};
+     std::optional<SourceSupportObject> source_v1_support{};
+     bool unpaired_access_enabled{false};
+     std::vector<PairMethodDescriptor> supported_pair_methods{};
+@@ -1071,11 +1074,11 @@ bool process_stream_clear_message(JsonObject root, StreamClearMessage* clear_msg
+
+ /// @brief Formats a client/hello message as a JSON string
+ std::string format_client_hello_message(const ClientHelloMessage* msg,
+-                                        SendspinArenaAllocator& arena);
++                                        SendspinArenaAllocator& arena, bool legacy_wire = false);
+
+ /// @brief Formats a client/state message as a JSON string
+ std::string format_client_state_message(const ClientStateMessage* msg,
+-                                        SendspinArenaAllocator& arena);
++                                        SendspinArenaAllocator& arena, bool legacy_wire = false);
+
+ /// @brief Formats a client-stream/start message as a JSON string
+ std::string format_client_stream_start_message(const ClientStreamStartMessage* msg,
+diff --git a/include/sendspin/client.h b/include/sendspin/client.h
+index 06a6f9c..1917dc3 100644
+--- a/include/sendspin/client.h
++++ b/include/sendspin/client.h
+@@ -851,7 +851,8 @@ private:
+     void process_inbound(SendspinConnection& conn, InboundMessage& message);
+
+     /// @brief Builds the formatted client hello message from config. Protocol task.
+-    std::string build_hello_message();
++    /// @param legacy_wire Emit the aiosendspin 9.x application schema for this connection.
++    std::string build_hello_message(bool legacy_wire = false);
+
+     /// @brief Builds the client/state snapshot publish_state() hands the protocol task: the
+     /// availability and every role's state object. Main loop only, where that state lives.
+diff --git a/tests/test_noise_transport.cpp b/tests/test_noise_transport.cpp
+index d236c79..6299cb1 100644
+--- a/tests/test_noise_transport.cpp
++++ b/tests/test_noise_transport.cpp
+@@ -366,11 +366,9 @@ TEST(NoiseHandshakeDriver, UnknownPskIdFallsBackToTheSentinelPsk) {
+     }
+ }
+
+-// messaging.md "noise/handshake": the payload declares which category the referenced PSK is used
+-// as. The code is not optional, and a code outside the three defined ones makes the payload
+-// malformed, which connection.md "Failure Handling" makes a silent failure: ABORT is how the
+-// driver reports one, and SendspinConnection then closes the socket without sending anything.
+-// Guessing a category instead would defeat the lookup scoping above.
++// Current messaging.md requires a category and an explicit unknown value remains malformed.
++// aiosendspin 9.x omitted the field, so that shape is accepted by looking up the authenticated
++// psk_id across the disjoint stores; this does not weaken the Noise credential check.
+ TEST(NoiseHandshakeDriver, Msg1PayloadPskCategoryIsValidated) {
+     struct Row {
+         const char* name;
+@@ -379,7 +377,7 @@ TEST(NoiseHandshakeDriver, Msg1PayloadPskCategoryIsValidated) {
+     };
+     const Row rows[] = {
+         {"code outside the defined set", R"(,"psk_category":"xx")", HandshakeFrameResult::ABORT},
+-        {"no psk_category at all", "", HandshakeFrameResult::ABORT},
++        {"legacy payload with no psk_category", "", HandshakeFrameResult::COMPLETE},
+         // Control: the category the client actually holds the psk_id in resolves to the record,
+         // and the peer that sent message 1 can read the message 2 that comes back.
+         {"category matching the stored record", R"(,"psk_category":"lt")",
+@@ -541,6 +539,15 @@ public:
+         this->inject(pt);
+     }
+
++    /// Injects an aiosendspin 9.x fragment frame: type 2 means more, type 3 means end.
++    void inject_legacy_fragment(uint8_t type, const std::vector<uint8_t>& tail) {
++        std::vector<uint8_t> pt;
++        pt.reserve(1 + tail.size());
++        pt.push_back(type);
++        pt.insert(pt.end(), tail.begin(), tail.end());
++        this->inject(pt);
++    }
++
+     bool closed() const {
+         return this->conn_.close_transport_now_calls_ > 0;
+     }
+@@ -596,6 +603,35 @@ TEST(FragmentSequence, MultiFragmentMessageDispatchesOnTheLastFragment) {
+     EXPECT_FALSE(rx.closed());
+ }
+
++TEST(FragmentSequence, LegacyAiSendspinFragmentsDispatchOnTypeThree) {
++    auto r = run_loopback_handshake(std::string(NOISE_SUITE_CHACHAPOLY));
++    ASSERT_TRUE(r.has_value());
++    FragmentReceiver rx(*r);
++
++    rx.inject_legacy_fragment(2, {SENDSPIN_BINARY_PLAYER_AUDIO, 0x01});
++    rx.inject_legacy_fragment(2, {0x02});
++    EXPECT_EQ(rx.binary_dispatched_, 0);
++    EXPECT_FALSE(rx.closed());
++
++    rx.inject_legacy_fragment(3, {0x03});
++    EXPECT_EQ(rx.binary_dispatched_, 1);
++    EXPECT_EQ(rx.last_message_,
++              (std::vector<uint8_t>{SENDSPIN_BINARY_PLAYER_AUDIO, 0x01, 0x02, 0x03}));
++    EXPECT_FALSE(rx.closed());
++}
++
++TEST(FragmentSequence, LegacyAiSendspinEndWithoutStartCloses) {
++    auto r = run_loopback_handshake(std::string(NOISE_SUITE_CHACHAPOLY));
++    ASSERT_TRUE(r.has_value());
++    FragmentReceiver rx(*r);
++
++    rx.inject_legacy_fragment(3, {0x03});
++
++    EXPECT_TRUE(rx.closed());
++    EXPECT_EQ(rx.binary_dispatched_, 0);
++    EXPECT_EQ(rx.json_dispatched_, 0);
++}
++
+ // Which of `message` and `complete` holds the received ring item after process_inbound_message().
+ // The item is a sentinel no ring sees; only its owner is under test.
+ TEST(FragmentSequence, CompleteMessageCarriesTheRingItemOnlyWhenItIsTheReceivedFrame) {
+diff --git a/tests/test_protocol.cpp b/tests/test_protocol.cpp
+index 512e820..4a99909 100644
+--- a/tests/test_protocol.cpp
++++ b/tests/test_protocol.cpp
+@@ -1101,6 +1101,56 @@ TEST(Protocol, FormatClientHelloPlayerSupportOmitsSupportedCommands) {
+     EXPECT_STREQ(doc["payload"]["player@v1_support"]["supported_formats"][0]["codec"], "flac");
+ }
+
++TEST(Protocol, FormatLegacyClientHelloMatchesAiSendspinNine) {
++    ClientHelloMessage msg;
++    msg.name = "Speaker";
++    msg.supported_roles.push_back(SendspinRole::PLAYER);
++    msg.supported_pair_methods.push_back({.method = SendspinPairMethod::PAIRING_PSK});
++    msg.supported_pair_methods.push_back({.method = SendspinPairMethod::DYNAMIC_PAIRING_CODE});
++    PlayerSupportObject support{};
++    support.supported_formats = {{SendspinCodecFormat::FLAC, 2, 48000, 16}};
++    support.buffer_capacity = 4096;
++    msg.player_v1_support = support;
++    VisualizerSupportObject visualizer_support{};
++    visualizer_support.buffer_capacity = 2048;
++    msg.visualizer_support = visualizer_support;
++    ClientVisualizerStateObject visualizer_stream{};
++    visualizer_stream.types = {VisualizerDataType::LOUDNESS, VisualizerDataType::BEAT,
++                               VisualizerDataType::SPECTRUM, VisualizerDataType::PEAK};
++    visualizer_stream.rate_max = 10;
++    visualizer_stream.spectrum = VisualizerSpectrumConfig{
++        .n_disp_bins = 12,
++        .scale = VisualizerSpectrumScale::MEL,
++        .f_min = 60,
++        .f_max = 16000,
++    };
++    msg.legacy_visualizer_support = visualizer_stream;
++
++    JsonDocument doc;
++    ASSERT_FALSE(deserializeJson(doc, format_client_hello_message(&msg, TestArena(), true)));
++    EXPECT_EQ(doc["payload"]["version"].as<int>(), 1);
++    ASSERT_TRUE(doc["payload"]["supported_pair_methods"].is<JsonArrayConst>());
++    JsonArrayConst methods = doc["payload"]["supported_pair_methods"].as<JsonArrayConst>();
++    ASSERT_EQ(methods.size(), 1u);
++    EXPECT_STREQ(methods[0]["method"], "pairing_psk");
++    JsonArrayConst commands =
++        doc["payload"]["player@v1_support"]["supported_commands"].as<JsonArrayConst>();
++    ASSERT_EQ(commands.size(), 2u);
++    EXPECT_STREQ(commands[0], "volume");
++    EXPECT_STREQ(commands[1], "mute");
++    JsonObjectConst visualizer = doc["payload"]["visualizer@v1_support"];
++    EXPECT_EQ(visualizer["buffer_capacity"].as<int>(), 2048);
++    EXPECT_EQ(visualizer["rate_max"].as<int>(), 10);
++    EXPECT_STREQ(visualizer["types"][0], "loudness");
++    EXPECT_STREQ(visualizer["types"][1], "beat");
++    EXPECT_STREQ(visualizer["types"][2], "spectrum");
++    EXPECT_STREQ(visualizer["types"][3], "peak");
++    EXPECT_EQ(visualizer["spectrum"]["n_disp_bins"].as<int>(), 12);
++    EXPECT_STREQ(visualizer["spectrum"]["scale"], "mel");
++    EXPECT_EQ(visualizer["spectrum"]["f_min"].as<int>(), 60);
++    EXPECT_EQ(visualizer["spectrum"]["f_max"].as<int>(), 16000);
++}
++
+ // roles/player/v1.md "client/state player object": supported_commands is a required key whose
+ // value is the (possibly empty) list of commands the player accepts.
+ TEST(Protocol, FormatClientStatePlayerCarriesSupportedCommands) {
+@@ -1119,6 +1169,31 @@ TEST(Protocol, FormatClientStatePlayerCarriesSupportedCommands) {
+     EXPECT_STREQ(commands[2], "set_output_delay");
+ }
+
++TEST(Protocol, FormatLegacyClientStateMatchesAiSendspinNine) {
++    ClientStateMessage msg;
++    msg.available = true;
++    ClientPlayerStateObject player{};
++    player.output_delay_ms = 120;
++    player.supported_commands = {SendspinPlayerCommand::VOLUME, SendspinPlayerCommand::MUTE,
++                                 SendspinPlayerCommand::SET_OUTPUT_DELAY};
++    msg.player = player;
++    ClientVisualizerStateObject visualizer{};
++    visualizer.types = {VisualizerDataType::LOUDNESS};
++    visualizer.rate_max = 10;
++    msg.visualizer = visualizer;
++
++    JsonDocument doc;
++    ASSERT_FALSE(deserializeJson(doc, format_client_state_message(&msg, TestArena(), true)));
++    EXPECT_STREQ(doc["payload"]["state"], "synchronized");
++    EXPECT_TRUE(doc["payload"]["available"].as<bool>());
++    EXPECT_EQ(doc["payload"]["player"]["static_delay_ms"].as<uint16_t>(), 120);
++    EXPECT_TRUE(doc["payload"]["player"]["output_delay_ms"].isUnbound());
++    JsonArrayConst commands = doc["payload"]["player"]["supported_commands"].as<JsonArrayConst>();
++    ASSERT_EQ(commands.size(), 1u);
++    EXPECT_STREQ(commands[0], "set_static_delay");
++    EXPECT_TRUE(doc["payload"]["visualizer"].isUnbound());
++}
++
+ // Control: a player that accepts no command reports the key as an empty array rather than
+ // dropping it, which a server reads as a player whose state it must not try to set.
+ TEST(Protocol, FormatClientStatePlayerEmptySupportedCommandsIsStillEmitted) {
+diff --git a/src/sync_task.cpp b/src/sync_task.cpp
+--- a/src/sync_task.cpp
++++ b/src/sync_task.cpp
+@@ -634,13 +634,6 @@ DecodeResult SyncTask::decode_chunk(SyncContext& sync_context) {
+             static_cast<int64_t>(this->player_impl_->get_effective_output_delay_ms()) * US_PER_MS -
+             this->player_impl_->config.fixed_delay_us;
+
+-        if (client_timestamp < sync_context.new_audio_client_playtime - HARD_SYNC_THRESHOLD_US) {
+-            // This chunk will arrive too late to be played, skip it!
+-            this->inbound_.return_item(sync_context.encoded_item);
+-            sync_context.encoded_item = nullptr;
+-            return DecodeResult::SKIPPED;
+-        }
+-
+         const DecodeResult decoded = decode_whole_chunk(sync_context);
+         if (decoded != DecodeResult::SUCCESS) {
+             this->inbound_.return_item(sync_context.encoded_item);
+diff --git a/src/sync_task.cpp b/src/sync_task.cpp
+--- a/src/sync_task.cpp
++++ b/src/sync_task.cpp
+@@ -38,6 +38,8 @@ static constexpr int64_t HARD_SYNC_THRESHOLD_US = 5000;
+ static constexpr int64_t HARD_SYNC_SETTLE_THRESHOLD_US =
+     500;  // Tighter threshold used while settling after a hard sync
+ static constexpr int64_t SOFT_SYNC_THRESHOLD_US = 100;
++static constexpr uint32_t SOFT_SYNC_MIN_FRAMES = 2;
++static constexpr uint32_t SOFT_SYNC_MAX_FRAMES = 8;
+
+ static constexpr size_t SYNC_TASK_STACK_SIZE = 6192;  // Opus uses more stack than FLAC
+
+@@ -356,14 +358,29 @@ SyncTaskState SyncTask::handle_synchronize_audio(SyncContext& sync_context) {
+         }
+
+         if (raw_error > SOFT_SYNC_THRESHOLD_US) {
+-            // Slightly behind: add one interpolated frame between the last two decoded frames
+-            // Playtime estimate is advanced by transfer_audio() when the extra frame is sent
+-            this->soft_sync_insert_frame(sync_context);
++            // Slightly behind: add a small number of interpolated frames. Some hardware clocks
++            // differ by more than one frame per encoded chunk, so correcting only one frame lets
++            // error accumulate until a much larger, audible hard sync is required.
++            const uint32_t correction_frames = std::min<uint32_t>(
++                SOFT_SYNC_MAX_FRAMES,
++                SOFT_SYNC_MIN_FRAMES + static_cast<uint32_t>(raw_error / US_PER_MS));
++            for (uint32_t frame = 0; frame < correction_frames; ++frame) {
++                if (this->soft_sync_insert_frame(sync_context) == 0) {
++                    break;
++                }
++            }
+         } else if (raw_error < -SOFT_SYNC_THRESHOLD_US) {
+-            // Slightly ahead: remove first frame, blend into second
+-            // Playtime estimate naturally reflects the removed frame: transfer_audio() sends
+-            // fewer bytes
+-            this->soft_sync_drop_frame(sync_context);
++            // Slightly ahead: remove a few frames, blending each boundary. This tracks modest
++            // oscillator drift continuously instead of dropping a millisecond-scale prefix every
++            // few tens of seconds.
++            const uint32_t correction_frames = std::min<uint32_t>(
++                SOFT_SYNC_MAX_FRAMES,
++                SOFT_SYNC_MIN_FRAMES + static_cast<uint32_t>((-raw_error) / US_PER_MS));
++            for (uint32_t frame = 0; frame < correction_frames; ++frame) {
++                if (this->soft_sync_drop_frame(sync_context) == 0) {
++                    break;
++                }
++            }
+         }
+         // else: Dead zone - pass decoded audio through directly
+         sync_context.release_chunk = true;
+@@ -600,10 +617,11 @@ DecodeResult SyncTask::decode_chunk(SyncContext& sync_context) {
+             }
+
+-            // Create or resize the decode buffer using the decoder's current required size
+-            // estimate; some codecs (for example, Opus) may require this to grow later. One extra
+-            // frame is reserved past the decoded data for soft-sync frame insertion.
+-            size_t needed =
+-                sync_context.decoder->get_decode_buffer_size() + sync_context.bytes_per_frame;
++            // Create or resize the decode buffer using the decoder's current required size
++            // estimate; some codecs (for example, Opus) may require this to grow later. Reserve
++            // enough frames for the bounded soft-sync insertion pass.
++            const size_t soft_sync_reserve =
++                sync_context.bytes_per_frame * SOFT_SYNC_MAX_FRAMES;
++            size_t needed = sync_context.decoder->get_decode_buffer_size() + soft_sync_reserve;
+             if (sync_context.decode_buffer == nullptr) {
+                 sync_context.decode_buffer = TransferBuffer::create(
+                     needed, this->player_impl_->config.decode_buffer_location);
+@@ -662,8 +680,10 @@ DecodeResult SyncTask::decode_whole_chunk(SyncContext& sync_context) {
+     const size_t max_produced = sync_context.current_stream_info.ms_to_bytes(MAX_AUDIO_CHUNK_MS);
+     while (remaining > 0 && produced <= max_produced) {
+-        // Room for the decoder's next unit, plus the spare frame soft sync inserts into.
++        // Room for the decoder's next unit, plus the spare frames soft sync inserts into.
+         const size_t unit_size = sync_context.decoder->get_decode_buffer_size();
+-        const size_t needed_free = unit_size + sync_context.bytes_per_frame;
++        const size_t soft_sync_reserve =
++            sync_context.bytes_per_frame * SOFT_SYNC_MAX_FRAMES;
++        const size_t needed_free = unit_size + soft_sync_reserve;
+         if (sync_context.decode_buffer->free() < needed_free &&
+             !sync_context.decode_buffer->reallocate(sync_context.decode_buffer->available() +
+                                                     needed_free)) {
+@@ -675,7 +695,7 @@ DecodeResult SyncTask::decode_whole_chunk(SyncContext& sync_context) {
+         size_t decoded_size = 0;
+         if (!sync_context.decoder->decode_audio_chunk(
+                 input, remaining, sync_context.decode_buffer->get_buffer_end(),
+-                sync_context.decode_buffer->free() - sync_context.bytes_per_frame, &consumed,
++                sync_context.decode_buffer->free() - soft_sync_reserve, &consumed,
+                 &decoded_size)) {
+             break;
+         }

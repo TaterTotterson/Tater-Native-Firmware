@@ -105,7 +105,10 @@ static void voicepe_apply_volume_delta(int delta_percent)
         volume,
         settings ? settings->muted : false
     );
-    voicepe_send_setting_feedback(message);
+    // settings.changed already carries the new volume. Building and sending the complete status
+    // document for every detent adds a second ~5.8 KB JSON transaction and can overlap the audio
+    // render path several times during one quick turn.
+    tater_protocol_send_log("info", message);
 }
 
 static void voicepe_apply_mute_state(bool muted)

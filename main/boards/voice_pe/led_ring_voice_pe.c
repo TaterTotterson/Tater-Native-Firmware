@@ -38,6 +38,17 @@ typedef struct {
     uint8_t b;
 } rgb_t;
 
+static portMUX_TYPE s_music_visual_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_music_active;
+static bool s_music_color_valid;
+static rgb_t s_music_color;
+static float s_music_visual_level;
+static int64_t s_music_visual_updated_us;
+static int64_t s_music_transient_us;
+static float s_music_spectrum[TATER_LED_COUNT];
+static size_t s_music_spectrum_count;
+static int64_t s_music_spectrum_updated_us;
+
 static const rgb_t TATER_ORANGE = {227, 36, 0};
 static const rgb_t TATER_BLUE = {30, 90, 255};
 static const rgb_t TATER_WARM_WHITE = {255, 227, 181};
@@ -56,6 +67,8 @@ static volatile int64_t s_button_feedback_until_us;
 static float s_thinking_levels[TATER_LED_COUNT];
 static float s_speaking_radius = 1.25f;
 static float s_audio_glow_envelope;
+static float s_music_envelope;
+static float s_music_bars[TATER_LED_COUNT];
 static bool s_tool_forward = true;
 static uint8_t s_tool_index;
 static float s_listening_position = 6.0f;
@@ -277,6 +290,26 @@ static rgb_t configured_voice_color(const tater_live_settings_t *settings)
     if (settings) {
         parse_hex_color(settings->led_color, &color);
     }
+    return color;
+}
+
+static bool music_active(void)
+{
+    bool active;
+    portENTER_CRITICAL(&s_music_visual_lock);
+    active = s_music_active;
+    portEXIT_CRITICAL(&s_music_visual_lock);
+    return active;
+}
+
+static rgb_t configured_music_color(const tater_live_settings_t *settings)
+{
+    rgb_t color = configured_voice_color(settings);
+    portENTER_CRITICAL(&s_music_visual_lock);
+    if (s_music_color_valid) {
+        color = s_music_color;
+    }
+    portEXIT_CRITICAL(&s_music_visual_lock);
     return color;
 }
 
@@ -864,9 +897,9 @@ static void replying(uint32_t tick, rgb_t color)
 // that is actually being rendered by the speaker. A fast attack preserves
 // consonants while the slower release prevents distracting frame-to-frame
 // flicker between audio blocks.
-static void audio_glow(rgb_t color)
+static void audio_glow_level(rgb_t color, float audio_level)
 {
-    float target = clamp01(tater_audio_speaker_level() / 0.22f);
+    float target = clamp01(audio_level / 0.22f);
     target = powf(target, 0.70f);
     float alpha = target > s_audio_glow_envelope ? 0.60f : 0.30f;
     s_audio_glow_envelope += (target - s_audio_glow_envelope) * alpha;
@@ -878,6 +911,148 @@ static void audio_glow(rgb_t color)
     }
     for (int i = 0; i < TATER_LED_COUNT; i++) {
         set_color_level(i, color, duty);
+    }
+}
+
+static void audio_glow(rgb_t color)
+{
+    audio_glow_level(color, tater_audio_speaker_level());
+}
+
+static float music_audio_level(void)
+{
+    int64_t now_us = esp_timer_get_time();
+    float level = 0.0f;
+    int64_t updated_us = 0;
+    int64_t transient_us = 0;
+    portENTER_CRITICAL(&s_music_visual_lock);
+    level = s_music_visual_level;
+    updated_us = s_music_visual_updated_us;
+    transient_us = s_music_transient_us;
+    portEXIT_CRITICAL(&s_music_visual_lock);
+
+    if (updated_us <= 0 || now_us - updated_us > 350000) {
+        level = tater_audio_speaker_level();
+    }
+    if (transient_us > 0 && now_us - transient_us < 140000 && level < 0.24f) {
+        level = 0.24f;
+    }
+    return clamp01(level);
+}
+
+static bool music_spectrum_snapshot(float *bins, size_t count)
+{
+    if (!bins || count == 0) {
+        return false;
+    }
+    int64_t now_us = esp_timer_get_time();
+    bool available = false;
+    portENTER_CRITICAL(&s_music_visual_lock);
+    if (s_music_spectrum_count > 0 &&
+        s_music_spectrum_updated_us > 0 &&
+        now_us - s_music_spectrum_updated_us <= 350000) {
+        size_t copy_count = s_music_spectrum_count < count ? s_music_spectrum_count : count;
+        memcpy(bins, s_music_spectrum, copy_count * sizeof(float));
+        for (size_t index = copy_count; index < count; index++) {
+            bins[index] = 0.0f;
+        }
+        available = true;
+    }
+    portEXIT_CRITICAL(&s_music_visual_lock);
+    return available;
+}
+
+static float update_music_envelope(float audio_level)
+{
+    float target = powf(clamp01(audio_level / 0.22f), 0.70f);
+    float alpha = target > s_music_envelope ? 0.64f : 0.24f;
+    s_music_envelope += (target - s_music_envelope) * alpha;
+    if (s_music_envelope < 0.001f && target == 0.0f) {
+        s_music_envelope = 0.0f;
+    }
+    return clamp01(s_music_envelope);
+}
+
+static void music_pulse(rgb_t color, float audio_level)
+{
+    float level = 0.015f + (update_music_envelope(audio_level) * 0.985f);
+    for (int index = 0; index < TATER_LED_COUNT; index++) {
+        set_color_level(index, color, level);
+    }
+}
+
+static void music_bars(rgb_t color, float audio_level)
+{
+    float spectrum[TATER_LED_COUNT] = {0};
+    if (music_spectrum_snapshot(spectrum, TATER_LED_COUNT)) {
+        for (int index = 0; index < TATER_LED_COUNT; index++) {
+            float target = 0.012f + (clamp01(spectrum[index]) * 0.988f);
+            float alpha = target > s_music_bars[index] ? 0.64f : 0.28f;
+            s_music_bars[index] += (target - s_music_bars[index]) * alpha;
+            set_color_level(index, color, s_music_bars[index]);
+        }
+        return;
+    }
+
+    float envelope = update_music_envelope(audio_level);
+    int pairs = (TATER_LED_COUNT + 1) / 2;
+    float height = envelope * (float)pairs;
+    fill(0, 0, 0);
+    for (int pair = 0; pair < pairs; pair++) {
+        float level = 0.012f + (clamp01(height - (float)pair) * 0.988f);
+        set_color_level(pair, color, level);
+        set_color_level(TATER_LED_COUNT - 1 - pair, color, level);
+    }
+}
+
+static void music_orbit(uint32_t tick, rgb_t color, float audio_level)
+{
+    float envelope = update_music_envelope(audio_level);
+    int head = (int)(tick / 2U) % TATER_LED_COUNT;
+    int tail_length = 2 + (int)roundf(envelope * ((float)TATER_LED_COUNT / 4.0f));
+    int origins[2] = {head, (head + (TATER_LED_COUNT / 2)) % TATER_LED_COUNT};
+    fill(0, 0, 0);
+    for (int origin_index = 0; origin_index < 2; origin_index++) {
+        int origin = origins[origin_index];
+        for (int trail = 0; trail < tail_length; trail++) {
+            int pixel = (origin - trail + TATER_LED_COUNT) % TATER_LED_COUNT;
+            float level = (0.04f + (envelope * 0.96f)) * powf(0.58f, (float)trail);
+            set_color_level(pixel, color, level);
+        }
+    }
+}
+
+static void music_wave(uint32_t tick, rgb_t color, float audio_level)
+{
+    float envelope = update_music_envelope(audio_level);
+    float phase = (float)tick * 0.42f;
+    for (int index = 0; index < TATER_LED_COUNT; index++) {
+        float angle = ((float)index * 4.0f * (float)M_PI / (float)TATER_LED_COUNT) - phase;
+        float wave_level = (sinf(angle) + 1.0f) * 0.5f;
+        float level = 0.012f + (envelope * (0.12f + (wave_level * 0.868f)));
+        set_color_level(index, color, level);
+    }
+}
+
+static void render_music_animation(const tater_live_settings_t *settings, uint32_t tick)
+{
+    const char *animation = settings && settings->led_music_animation[0]
+        ? settings->led_music_animation
+        : "music_bars";
+    rgb_t color = configured_music_color(settings);
+    float audio_level = music_audio_level();
+    if (animation_is(animation, "off")) {
+        fill(0, 0, 0);
+    } else if (animation_is(animation, "audio_glow")) {
+        audio_glow_level(color, audio_level);
+    } else if (animation_is(animation, "music_pulse")) {
+        music_pulse(color, audio_level);
+    } else if (animation_is(animation, "music_orbit")) {
+        music_orbit(tick, color, audio_level);
+    } else if (animation_is(animation, "music_wave")) {
+        music_wave(tick, color, audio_level);
+    } else {
+        music_bars(color, audio_level);
     }
 }
 
@@ -1135,6 +1310,8 @@ static void render(void)
         s_animation_tick = 0;
         s_speaking_radius = 1.25f;
         s_audio_glow_envelope = 0.0f;
+        s_music_envelope = 0.0f;
+        memset(s_music_bars, 0, sizeof(s_music_bars));
         s_tool_forward = true;
         s_tool_index = 0;
         s_listening_position = (float)TATER_LED_COUNT / 2.0f;
@@ -1184,6 +1361,13 @@ static void render(void)
 
     const tater_live_settings_t *settings = tater_live_settings_get();
     rgb_t voice_color = configured_voice_color(settings);
+
+    if (music_active() && s_state == TATER_STATE_IDLE) {
+        render_music_animation(settings, s_animation_tick);
+        refresh_leds();
+        s_animation_tick++;
+        return;
+    }
 
     if (render_idle_mute_indicator(settings)) {
         refresh_leds();
@@ -1240,7 +1424,7 @@ static void led_task(void *arg)
         uint32_t delay_ms = 100;
 #else
         uint32_t delay_ms = 80;
-        if (s_state == TATER_STATE_SPEAKING) {
+        if ((music_active() && s_state == TATER_STATE_IDLE) || s_state == TATER_STATE_SPEAKING) {
             delay_ms = 40;
         } else if (s_state == TATER_STATE_LISTENING) {
 #if TATER_BOARD_SAT1
@@ -1367,6 +1551,92 @@ void tater_leds_show_mute(bool muted)
     s_button_feedback_value = muted ? 1 : 0;
     s_button_feedback_until_us = esp_timer_get_time() + 1600000;
     s_button_feedback_mode = 2;
+}
+
+void tater_leds_set_music_active(bool active)
+{
+    bool changed;
+    portENTER_CRITICAL(&s_music_visual_lock);
+    changed = s_music_active != active;
+    s_music_active = active;
+    if (!active) {
+        s_music_color_valid = false;
+        s_music_visual_updated_us = 0;
+        s_music_transient_us = 0;
+        s_music_spectrum_count = 0;
+        s_music_spectrum_updated_us = 0;
+    }
+    portEXIT_CRITICAL(&s_music_visual_lock);
+    if (changed) {
+        s_state_epoch++;
+    }
+}
+
+void tater_leds_set_music_color(bool valid, uint8_t red, uint8_t green, uint8_t blue)
+{
+    uint8_t peak = red;
+    if (green > peak) {
+        peak = green;
+    }
+    if (blue > peak) {
+        peak = blue;
+    }
+    valid = valid && peak > 0;
+    if (valid && peak < 255) {
+        float scale = 255.0f / (float)peak;
+        red = clamp_u8((float)red * scale);
+        green = clamp_u8((float)green * scale);
+        blue = clamp_u8((float)blue * scale);
+    }
+    portENTER_CRITICAL(&s_music_visual_lock);
+    s_music_color_valid = valid;
+    s_music_color = (rgb_t){red, green, blue};
+    portEXIT_CRITICAL(&s_music_visual_lock);
+}
+
+void tater_leds_set_music_loudness(uint16_t loudness, bool transient)
+{
+    float encoded = (float)loudness / 65535.0f;
+    float db = (encoded * 60.0f) - 60.0f;
+    float linear = powf(10.0f, db / 20.0f);
+    int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_music_visual_lock);
+    s_music_visual_level = clamp01(linear);
+    s_music_visual_updated_us = now_us;
+    if (transient) {
+        s_music_transient_us = now_us;
+    }
+    portEXIT_CRITICAL(&s_music_visual_lock);
+}
+
+void tater_leds_set_music_spectrum(const uint16_t *bins, size_t count)
+{
+    if (!bins || count == 0) {
+        return;
+    }
+    float normalized[TATER_LED_COUNT] = {0};
+    for (size_t index = 0; index < TATER_LED_COUNT; index++) {
+        size_t source = (index * count) / TATER_LED_COUNT;
+        if (source >= count) {
+            source = count - 1;
+        }
+        normalized[index] = (float)bins[source] / 65535.0f;
+    }
+    portENTER_CRITICAL(&s_music_visual_lock);
+    memcpy(s_music_spectrum, normalized, sizeof(normalized));
+    s_music_spectrum_count = TATER_LED_COUNT;
+    s_music_spectrum_updated_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_music_visual_lock);
+}
+
+void tater_leds_clear_music_visualizer(void)
+{
+    portENTER_CRITICAL(&s_music_visual_lock);
+    s_music_visual_updated_us = 0;
+    s_music_transient_us = 0;
+    s_music_spectrum_count = 0;
+    s_music_spectrum_updated_us = 0;
+    portEXIT_CRITICAL(&s_music_visual_lock);
 }
 
 #endif

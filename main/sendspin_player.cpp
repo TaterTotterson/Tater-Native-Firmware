@@ -15,18 +15,21 @@
 #include "board.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_pthread.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "mdns.h"
 #include "nvs.h"
 #include "sendspin/client.h"
+#include "sendspin/color_role.h"
 #include "sendspin/player_role.h"
+#include "sendspin/visualizer_role.h"
 
 extern "C" {
 #include "audio_i2s.h"
+#include "leds.h"
 #include "native_settings.h"
 #include "playback_mix.h"
 #include "tater_protocol.h"
@@ -36,38 +39,50 @@ extern "C" {
 namespace {
 
 using sendspin::MemoryLocation;
+using sendspin::ColorRoleListener;
 using sendspin::PlayerRole;
 using sendspin::PlayerRoleConfig;
 using sendspin::PlayerRoleListener;
 using sendspin::SendspinClient;
 using sendspin::SendspinClientConfig;
 using sendspin::SendspinClientListener;
-using sendspin::SendspinClientState;
 using sendspin::SendspinCodecFormat;
 using sendspin::SendspinGoodbyeReason;
 using sendspin::SendspinNetworkProvider;
 using sendspin::SendspinPersistenceProvider;
+using sendspin::ServerColorStateObject;
+using sendspin::ServerVisualizerStreamObject;
+using sendspin::VisualizerDataType;
+using sendspin::VisualizerRoleConfig;
+using sendspin::VisualizerRoleListener;
+using sendspin::VisualizerSpectrumConfig;
+using sendspin::VisualizerSpectrumScale;
 
 constexpr uint16_t SENDSPIN_PORT = 8928;
-constexpr size_t SENDSPIN_AUDIO_BUFFER_BYTES = 512 * 1024;
-constexpr size_t SENDSPIN_SYNC_STACK_BYTES = 8192;
+constexpr size_t SENDSPIN_AUDIO_BUFFER_BYTES = 1024 * 1024;
+constexpr uint16_t SENDSPIN_MIN_BUFFER_MS = 1500;
 constexpr uint16_t SENDSPIN_STARTUP_HEADROOM_MS = 120;
-constexpr unsigned SENDSPIN_SYNC_TASK_PRIORITY = 7;
+constexpr unsigned SENDSPIN_PROTOCOL_TASK_PRIORITY = 9;
+constexpr unsigned SENDSPIN_SYNC_TASK_PRIORITY = 10;
+constexpr unsigned SENDSPIN_HTTPD_TASK_PRIORITY = 9;
+constexpr unsigned SENDSPIN_RENDER_TASK_PRIORITY = 11;
+constexpr size_t SENDSPIN_RENDER_TASK_STACK_BYTES = 4096;
+constexpr TickType_t SENDSPIN_VOLUME_PUBLISH_SETTLE_TICKS = pdMS_TO_TICKS(75);
 constexpr int64_t SENDSPIN_STARVATION_MIN_US = 10000;
 constexpr TickType_t SENDSPIN_LOOP_TICKS = pdMS_TO_TICKS(5);
 constexpr const char *SENDSPIN_NVS_NAMESPACE = "sendspin";
-constexpr const char *SENDSPIN_NVS_LAST_SERVER = "last_server";
-constexpr const char *SENDSPIN_NVS_OUTPUT_DELAY = "out_delay";
 constexpr const char *SENDSPIN_NVS_OUTPUT_CHANNEL = "channel_mode";
 
 const char *TAG = "tater_sendspin";
 
 std::atomic<bool> s_initialized{false};
+std::atomic<bool> s_sendspin_task_stack_psram{false};
 std::atomic<uint32_t> s_native_audio_claim_count{0};
 std::atomic<bool> s_stream_active{false};
 std::atomic<bool> s_speaker_owned{false};
 std::atomic<bool> s_disconnect_requested{false};
 std::atomic<bool> s_volume_dirty{false};
+std::atomic<TickType_t> s_volume_changed_tick{0};
 std::atomic<bool> s_applying_server_volume{false};
 std::atomic<bool> s_muted{false};
 std::atomic<uint8_t> s_output_volume{80};
@@ -88,37 +103,10 @@ std::atomic<uint32_t> s_max_clock_error_us{0};
 std::atomic<uint16_t> s_output_delay_ms{0};
 std::atomic<int64_t> s_output_empty_since_us{0};
 std::atomic<bool> s_received_stream_audio{false};
+TaskHandle_t s_render_feedback_task_handle = nullptr;
 
 char s_friendly_name[TATER_CFG_DEVICE_NAME_LEN] = {};
 char s_client_id[48] = {};
-
-bool configure_sendspin_sync_stack(unsigned priority) {
-    esp_pthread_cfg_t config = esp_pthread_get_default_config();
-    config.stack_size = SENDSPIN_SYNC_STACK_BYTES;
-    config.prio = priority;
-    config.thread_name = "Sendspin";
-    config.stack_alloc_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-
-    esp_err_t err = esp_pthread_set_cfg(&config);
-    if (err != ESP_OK) {
-        ESP_LOGW(
-            TAG,
-            "could not configure Sendspin PSRAM stack: %s; using internal stack",
-            esp_err_to_name(err)
-        );
-        return false;
-    }
-
-    // sendspin-cpp 0.8.0 asks ESP-IDF for MALLOC_CAP_SPIRAM without the
-    // required MALLOC_CAP_8BIT flag. ESP-IDF rejects that later request and
-    // retains this valid per-task configuration for the sync/decode pthread.
-    ESP_LOGI(
-        TAG,
-        "Sendspin sync stack configured bytes=%u memory=psram",
-        static_cast<unsigned>(SENDSPIN_SYNC_STACK_BYTES)
-    );
-    return true;
-}
 
 bool native_audio_claimed() {
     return s_native_audio_claim_count.load(std::memory_order_acquire) != 0;
@@ -234,58 +222,36 @@ public:
 
 class TaterPersistenceProvider final : public SendspinPersistenceProvider {
 public:
-    bool save_last_server_hash(uint32_t hash) override {
-        return save_u32(SENDSPIN_NVS_LAST_SERVER, hash);
-    }
-
-    std::optional<uint32_t> load_last_server_hash() override {
+    std::optional<std::vector<uint8_t>> load_blob(const std::string &key) override {
         nvs_handle_t handle = 0;
         if (nvs_open(SENDSPIN_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
             return std::nullopt;
         }
-        uint32_t value = 0;
-        esp_err_t err = nvs_get_u32(handle, SENDSPIN_NVS_LAST_SERVER, &value);
+        size_t length = 0;
+        esp_err_t err = nvs_get_blob(handle, key.c_str(), nullptr, &length);
+        if (err != ESP_OK) {
+            nvs_close(handle);
+            return std::nullopt;
+        }
+        std::vector<uint8_t> value(length);
+        err = nvs_get_blob(handle, key.c_str(), value.data(), &length);
         nvs_close(handle);
         if (err != ESP_OK) {
             return std::nullopt;
         }
+        value.resize(length);
         return value;
     }
 
-    bool save_static_delay(uint16_t delay_ms) override {
+    bool save_blob(const std::string &key, const uint8_t *data, size_t length) override {
+        if (!data && length != 0) {
+            return false;
+        }
         nvs_handle_t handle = 0;
         if (nvs_open(SENDSPIN_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
             return false;
         }
-        esp_err_t err = nvs_set_u16(handle, SENDSPIN_NVS_OUTPUT_DELAY, delay_ms);
-        if (err == ESP_OK) {
-            err = nvs_commit(handle);
-        }
-        nvs_close(handle);
-        return err == ESP_OK;
-    }
-
-    std::optional<uint16_t> load_static_delay() override {
-        nvs_handle_t handle = 0;
-        if (nvs_open(SENDSPIN_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
-            return std::nullopt;
-        }
-        uint16_t value = 0;
-        esp_err_t err = nvs_get_u16(handle, SENDSPIN_NVS_OUTPUT_DELAY, &value);
-        nvs_close(handle);
-        if (err != ESP_OK) {
-            return std::nullopt;
-        }
-        return value;
-    }
-
-private:
-    static bool save_u32(const char *key, uint32_t value) {
-        nvs_handle_t handle = 0;
-        if (nvs_open(SENDSPIN_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) {
-            return false;
-        }
-        esp_err_t err = nvs_set_u32(handle, key, value);
+        esp_err_t err = nvs_set_blob(handle, key.c_str(), data, length);
         if (err == ESP_OK) {
             err = nvs_commit(handle);
         }
@@ -315,6 +281,87 @@ public:
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
     }
 };
+
+#if !TATER_BOARD_S3_BOX
+class TaterColorListener final : public ColorRoleListener {
+public:
+    void on_color(const ServerColorStateObject &palette) override {
+        const auto *selected = palette.primary ? &*palette.primary : nullptr;
+        if (palette.accent) {
+            const auto &accent = *palette.accent;
+            auto luminance = [](const auto &color) {
+                return static_cast<uint32_t>(color[0]) * 299U
+                    + static_cast<uint32_t>(color[1]) * 587U
+                    + static_cast<uint32_t>(color[2]) * 114U;
+            };
+            if (!selected || luminance(accent) > luminance(*selected)) {
+                selected = &accent;
+            }
+        }
+        if (!selected) {
+            tater_leds_set_music_color(false, 0, 0, 0);
+            return;
+        }
+        tater_leds_set_music_color(true, (*selected)[0], (*selected)[1], (*selected)[2]);
+    }
+
+    void on_color_clear() override {
+        tater_leds_set_music_color(false, 0, 0, 0);
+    }
+};
+
+class TaterVisualizerListener final : public VisualizerRoleListener {
+public:
+    void on_loudness(int64_t client_timestamp, uint16_t loudness) override {
+        (void)client_timestamp;
+        latest_loudness_.store(loudness, std::memory_order_release);
+        tater_leds_set_music_loudness(loudness, false);
+    }
+
+    void on_beat(int64_t client_timestamp, bool downbeat) override {
+        (void)client_timestamp;
+        (void)downbeat;
+        tater_leds_set_music_loudness(
+            latest_loudness_.load(std::memory_order_acquire),
+            true
+        );
+    }
+
+    void on_peak(int64_t client_timestamp, uint8_t strength) override {
+        (void)client_timestamp;
+        if (strength > 0) {
+            tater_leds_set_music_loudness(
+                latest_loudness_.load(std::memory_order_acquire),
+                true
+            );
+        }
+    }
+
+    void on_spectrum(int64_t client_timestamp, const std::vector<uint16_t> &bins) override {
+        (void)client_timestamp;
+        tater_leds_set_music_spectrum(bins.data(), bins.size());
+    }
+
+    void on_visualizer_stream_start(const ServerVisualizerStreamObject &stream) override {
+        (void)stream;
+        latest_loudness_.store(0, std::memory_order_release);
+        tater_leds_clear_music_visualizer();
+    }
+
+    void on_visualizer_stream_end() override {
+        latest_loudness_.store(0, std::memory_order_release);
+        tater_leds_clear_music_visualizer();
+    }
+
+    void on_visualizer_stream_clear() override {
+        latest_loudness_.store(0, std::memory_order_release);
+        tater_leds_clear_music_visualizer();
+    }
+
+private:
+    std::atomic<uint16_t> latest_loudness_{0};
+};
+#endif
 
 class TaterPlayerListener final : public PlayerRoleListener {
 public:
@@ -348,13 +395,12 @@ public:
             }
         }
 
-        esp_err_t err = tater_audio_write_speaker_frames(samples, frames);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Sendspin I2S write failed: %s", esp_err_to_name(err));
-            s_audio_write_failures.fetch_add(1, std::memory_order_relaxed);
-            s_disconnect_requested.store(true, std::memory_order_release);
-            return 0;
-        }
+        // Reserve the frames before entering the board writer.  A decoded FLAC block is usually
+        // about 96 ms long, while the board writer feeds it to the much smaller I2S DMA queue in
+        // several blocking writes.  The render-feedback task runs concurrently and can observe
+        // completed DMA frames before this call returns.  Publishing the submission only after
+        // the call used to make those completions look unrelated to Sendspin audio, so they were
+        // discarded and the sync task later made a large, audible correction.
         uint64_t written = s_written_frames.fetch_add(
             static_cast<uint64_t>(frames),
             std::memory_order_acq_rel
@@ -365,6 +411,18 @@ public:
             s_max_queued_frames,
             static_cast<uint32_t>(std::min<uint64_t>(queued, UINT32_MAX))
         );
+
+        esp_err_t err = tater_audio_write_speaker_frames(samples, frames);
+        if (err != ESP_OK) {
+            // The board writers report an error for a short write and Sendspin disconnects the
+            // stream immediately.  Undo the reservation so the final render snapshot cannot
+            // report frames that were never accepted by the output path.
+            s_written_frames.fetch_sub(static_cast<uint64_t>(frames), std::memory_order_acq_rel);
+            ESP_LOGE(TAG, "Sendspin I2S write failed: %s", esp_err_to_name(err));
+            s_audio_write_failures.fetch_add(1, std::memory_order_relaxed);
+            s_disconnect_requested.store(true, std::memory_order_release);
+            return 0;
+        }
         s_received_stream_audio.store(true, std::memory_order_release);
         return length;
     }
@@ -385,7 +443,7 @@ public:
             || *params.sample_rate != TATER_SPK_SAMPLE_RATE
             || *params.channels != TATER_SPK_CHANNELS
             || *params.bit_depth != 16) {
-            ESP_LOGE(TAG, "unsupported negotiated Sendspin PCM format");
+            ESP_LOGE(TAG, "unsupported negotiated Sendspin audio format");
             s_disconnect_requested.store(true, std::memory_order_release);
             return;
         }
@@ -410,6 +468,7 @@ public:
         notified_frames_.store(0, std::memory_order_release);
         s_written_frames.store(0, std::memory_order_release);
         s_speaker_owned.store(true, std::memory_order_release);
+        tater_leds_set_music_active(true);
         ESP_LOGI(
             TAG,
             "Sendspin stream started codec=%d rate=%u channels=%u prefix_frames=%u",
@@ -421,6 +480,7 @@ public:
     }
 
     void on_stream_end() override {
+        tater_leds_set_music_active(false);
         s_stream_active.store(false, std::memory_order_release);
         s_streams_completed.fetch_add(1, std::memory_order_relaxed);
         s_output_empty_since_us.store(0, std::memory_order_release);
@@ -447,7 +507,7 @@ public:
         s_muted.store(muted, std::memory_order_release);
     }
 
-    void on_static_delay_changed(uint16_t delay_ms) override {
+    void on_output_delay_changed(uint16_t delay_ms) override {
         s_output_delay_ms.store(delay_ms, std::memory_order_release);
         ESP_LOGI(
             TAG,
@@ -494,7 +554,9 @@ public:
             return;
         }
         notified_frames_.fetch_add(played_audio_frames, std::memory_order_acq_rel);
-        player_->notify_audio_played(played_audio_frames, esp_timer_get_time());
+        const int64_t completed_at_us =
+            clock.completed_at_us > 0 ? clock.completed_at_us : esp_timer_get_time();
+        player_->notify_audio_played(played_audio_frames, completed_at_us);
     }
 
 private:
@@ -503,6 +565,65 @@ private:
     uint32_t pending_prefix_frames_{0};
     std::atomic<uint64_t> notified_frames_{0};
 };
+
+void render_feedback_task(void *arg) {
+    auto *listener = static_cast<TaterPlayerListener *>(arg);
+    while (true) {
+        // I2S completion callbacks wake this task only when the DMA playhead advances. This keeps
+        // render timing just as prompt as the previous 1 ms poll, without continuously inserting
+        // a priority task into FreeRTOS's delayed list while other cores allocate and publish
+        // settings state.
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        listener->poll_render_clock();
+    }
+}
+
+bool start_render_feedback_task(TaterPlayerListener *listener) {
+    if (!listener) {
+        return false;
+    }
+    s_render_feedback_task_handle = nullptr;
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+        render_feedback_task,
+        "sendspin_render",
+        SENDSPIN_RENDER_TASK_STACK_BYTES,
+        listener,
+        SENDSPIN_RENDER_TASK_PRIORITY,
+        &s_render_feedback_task_handle,
+        1,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (created == pdPASS) {
+        ESP_LOGI(
+            TAG,
+            "Sendspin render feedback task started priority=%u core=1 stack=psram",
+            SENDSPIN_RENDER_TASK_PRIORITY
+        );
+        return true;
+    }
+    ESP_LOGW(TAG, "Sendspin render feedback PSRAM task create failed; retrying internal stack");
+#endif
+    BaseType_t fallback_created = xTaskCreatePinnedToCore(
+        render_feedback_task,
+        "sendspin_render",
+        SENDSPIN_RENDER_TASK_STACK_BYTES,
+        listener,
+        SENDSPIN_RENDER_TASK_PRIORITY,
+        &s_render_feedback_task_handle,
+        1
+    );
+    if (fallback_created != pdPASS) {
+        ESP_LOGE(TAG, "Sendspin render feedback task create failed");
+        return false;
+    }
+    ESP_LOGI(
+        TAG,
+        "Sendspin render feedback task started priority=%u core=1 stack=internal",
+        SENDSPIN_RENDER_TASK_PRIORITY
+    );
+    return true;
+}
 
 bool start_mdns_advertisement() {
     esp_err_t err = mdns_init();
@@ -536,33 +657,47 @@ void sendspin_task(void *arg) {
     (void)arg;
 
     SendspinClientConfig client_config;
-    client_config.client_id = s_client_id;
     client_config.name = s_friendly_name;
     client_config.product_name = TATER_BOARD_DISPLAY_NAME;
     client_config.manufacturer = "Tater";
     client_config.software_version = TATER_FIRMWARE_VERSION;
     client_config.server_port = SENDSPIN_PORT;
-    client_config.httpd_psram_stack = true;
-    client_config.websocket_payload_location = MemoryLocation::PREFER_EXTERNAL;
+    // The HTTPD task is the hot receive path for PCM WebSocket frames. Keeping
+    // its small stack internal prevents multi-second TCP backpressure stalls;
+    // the larger protocol, player, and application task stacks remain in PSRAM.
+    client_config.httpd_psram_stack = false;
+    // Keep the websocket receiver ahead of the sync/decode worker so incoming
+    // PCM cannot sit in the TCP queue while lower-priority work is running.
+    client_config.httpd_priority = SENDSPIN_HTTPD_TASK_PRIORITY;
+    // Noise decryption and inbound routing also run for every PCM frame. Keep
+    // this hot stack internal; larger non-hot application stacks are in PSRAM.
+    client_config.protocol_task_psram_stack = false;
+    client_config.protocol_task_priority = SENDSPIN_PROTOCOL_TASK_PRIORITY;
+    client_config.inbound_ring_location = MemoryLocation::PREFER_EXTERNAL;
+    client_config.noise_buffer_location = MemoryLocation::PREFER_EXTERNAL;
 
     SendspinClient client(std::move(client_config));
     TaterNetworkProvider network_provider;
     TaterPersistenceProvider persistence_provider;
     TaterClientListener client_listener;
-    // sendspin-cpp 0.8 captures the persistence provider when a role is
-    // created, so providers must be attached before add_player().
     client.set_listener(&client_listener);
     client.set_network_provider(&network_provider);
     client.set_persistence_provider(&persistence_provider);
+    // Tater and third-party servers can start playback without an interactive
+    // pairing step, matching the LAN behavior of the previous Sendspin client.
+    client.set_unpaired_access_enabled(true);
 
     PlayerRoleConfig player_config;
-    // Music Assistant's FLAC delivery currently reaches ESP clients in bursts
-    // that force audible hard resyncs. PCM is stable and is also the format
-    // used by the Tater HA bridge.
+    // Prefer lossless compression for sustained music playback. Raw 48 kHz
+    // stereo PCM can saturate the ESP32 receive path during normal radio/CPU
+    // contention; FLAC cuts that traffic substantially. Keep PCM as a fallback
+    // for Tater replies and servers without a FLAC encoder.
     player_config.audio_formats = {
+        {SendspinCodecFormat::FLAC, TATER_SPK_CHANNELS, TATER_SPK_SAMPLE_RATE, 16},
         {SendspinCodecFormat::PCM, TATER_SPK_CHANNELS, TATER_SPK_SAMPLE_RATE, 16},
     };
     player_config.audio_buffer_capacity = SENDSPIN_AUDIO_BUFFER_BYTES;
+    player_config.min_buffer_ms = SENDSPIN_MIN_BUFFER_MS;
     const int32_t fixed_output_delay_us = static_cast<int32_t>(
         (static_cast<int64_t>(TATER_MEDIA_RENDER_LATENCY_FRAMES) * 1000000LL)
         / TATER_SPK_SAMPLE_RATE
@@ -570,45 +705,78 @@ void sendspin_task(void *arg) {
     player_config.fixed_delay_us = fixed_output_delay_us;
     player_config.extra_startup_silence_ms = SENDSPIN_STARTUP_HEADROOM_MS;
     player_config.priority = SENDSPIN_SYNC_TASK_PRIORITY;
-    player_config.psram_stack = configure_sendspin_sync_stack(player_config.priority);
+    player_config.psram_stack = true;
     player_config.decode_buffer_location = MemoryLocation::PREFER_EXTERNAL;
 
     PlayerRole &player = client.add_player(std::move(player_config));
     // Every native board has its own fixed hardware-pipeline compensation.
     // Keep the optional server-adjustable delay disabled until the native
     // clients can advertise it without destabilizing Music Assistant streams.
-    player.set_static_delay_adjustable(TATER_SENDSPIN_OUTPUT_DELAY_ADJUSTABLE);
+    player.set_output_delay_adjustable(TATER_SENDSPIN_OUTPUT_DELAY_ADJUSTABLE);
     TaterPlayerListener player_listener(&player);
     player.set_listener(&player_listener);
+
+#if !TATER_BOARD_S3_BOX
+    TaterColorListener color_listener;
+    client.add_color().set_listener(&color_listener);
+
+    VisualizerRoleConfig visualizer_config;
+    visualizer_config.support.buffer_capacity = 16 * 1024;
+    visualizer_config.stream.types = {
+        VisualizerDataType::LOUDNESS,
+        VisualizerDataType::BEAT,
+        VisualizerDataType::PEAK,
+        VisualizerDataType::SPECTRUM,
+    };
+    // Ten synchronized updates per second matches the Echo ring client and is
+    // plenty for the LED envelope while keeping spectrum traffic and parsing
+    // out of the ESP audio hot path.
+    visualizer_config.stream.rate_max = 10;
+    visualizer_config.stream.spectrum = VisualizerSpectrumConfig{
+        .n_disp_bins = TATER_LED_COUNT,
+        .scale = VisualizerSpectrumScale::LOG,
+        .f_min = 40,
+        .f_max = 16000,
+    };
+    visualizer_config.psram_stack = true;
+    TaterVisualizerListener visualizer_listener;
+    client.add_visualizer(std::move(visualizer_config)).set_listener(&visualizer_listener);
+#endif
 
     if (!client.start()) {
         ESP_LOGE(TAG, "Sendspin client failed to start");
         s_initialized.store(false, std::memory_order_release);
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+        if (s_sendspin_task_stack_psram.load(std::memory_order_acquire)) {
+            vTaskDeleteWithCaps(nullptr);
+            return;
+        }
+#endif
         vTaskDelete(nullptr);
         return;
     }
-    s_output_delay_ms.store(player.get_static_delay_ms(), std::memory_order_release);
+    s_output_delay_ms.store(player.get_output_delay_ms(), std::memory_order_release);
     ESP_LOGI(
         TAG,
-        "Sendspin output timing fixed=%ld us adjustable=%u ms",
+        "Sendspin v0.9 client=%s timing fixed=%ld us adjustable=%u ms",
+        client.client_id().c_str(),
         static_cast<long>(fixed_output_delay_us),
-        static_cast<unsigned>(player.get_static_delay_ms())
+        static_cast<unsigned>(player.get_output_delay_ms())
     );
     player.update_volume(s_desired_volume.load(std::memory_order_acquire));
+    bool render_feedback_started = start_render_feedback_task(&player_listener);
 
     bool mdns_started = false;
     bool native_state_reported = false;
     while (true) {
         client.loop();
-        player_listener.poll_render_clock();
+        if (!render_feedback_started) {
+            player_listener.poll_render_clock();
+        }
 
         bool native_claimed = native_audio_claimed();
         if (native_claimed != native_state_reported) {
-            client.update_state(
-                native_claimed
-                    ? SendspinClientState::EXTERNAL_SOURCE
-                    : SendspinClientState::SYNCHRONIZED
-            );
+            client.set_available(!native_claimed);
             native_state_reported = native_claimed;
         }
         if (native_claimed && s_stream_active.load(std::memory_order_acquire)) {
@@ -618,8 +786,15 @@ void sendspin_task(void *arg) {
             && client.is_connected()) {
             client.disconnect(SendspinGoodbyeReason::USER_REQUEST);
         }
-        if (s_volume_dirty.exchange(false, std::memory_order_acq_rel)) {
-            player.update_volume(s_desired_volume.load(std::memory_order_acquire));
+        if (s_volume_dirty.load(std::memory_order_acquire)) {
+            TickType_t now = xTaskGetTickCount();
+            TickType_t changed = s_volume_changed_tick.load(std::memory_order_acquire);
+            if ((now - changed) >= SENDSPIN_VOLUME_PUBLISH_SETTLE_TICKS
+                && s_volume_dirty.exchange(false, std::memory_order_acq_rel)) {
+                // Audio gain follows s_output_volume immediately. Only coalesce the network state
+                // publication so a fast wheel spin sends one final Sendspin volume snapshot.
+                player.update_volume(s_desired_volume.load(std::memory_order_acquire));
+            }
         }
         if (!mdns_started && tater_wifi_is_connected()) {
             mdns_started = start_mdns_advertisement();
@@ -629,6 +804,16 @@ void sendspin_task(void *arg) {
 }
 
 }  // namespace
+
+extern "C" bool IRAM_ATTR tater_sendspin_notify_render_from_isr(void) {
+    TaskHandle_t task = s_render_feedback_task_handle;
+    if (!task) {
+        return false;
+    }
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    vTaskNotifyGiveFromISR(task, &higher_priority_task_woken);
+    return higher_priority_task_woken == pdTRUE;
+}
 
 extern "C" esp_err_t tater_sendspin_init(const tater_config_t *config) {
     if (!config) {
@@ -652,19 +837,41 @@ extern "C" esp_err_t tater_sendspin_init(const tater_config_t *config) {
     s_output_channel.store(static_cast<uint8_t>(output_channel), std::memory_order_release);
     ESP_LOGI(TAG, "Sendspin output channel mode=%s", output_channel_name(output_channel));
 
-    BaseType_t created = xTaskCreatePinnedToCore(
+    BaseType_t created = pdFAIL;
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    s_sendspin_task_stack_psram.store(true, std::memory_order_release);
+    created = xTaskCreatePinnedToCoreWithCaps(
         sendspin_task,
         "tater_sendspin",
         8192,
         nullptr,
         5,
         nullptr,
-        0
+        0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
     );
+#endif
+    if (created != pdPASS) {
+        s_sendspin_task_stack_psram.store(false, std::memory_order_release);
+        created = xTaskCreatePinnedToCore(
+            sendspin_task,
+            "tater_sendspin",
+            8192,
+            nullptr,
+            5,
+            nullptr,
+            0
+        );
+    }
     if (created != pdPASS) {
         s_initialized.store(false, std::memory_order_release);
         return ESP_ERR_NO_MEM;
     }
+    ESP_LOGI(
+        TAG,
+        "Sendspin main task started core=0 stack=%s",
+        s_sendspin_task_stack_psram.load(std::memory_order_acquire) ? "psram" : "internal"
+    );
     return ESP_OK;
 }
 
@@ -705,6 +912,7 @@ extern "C" void tater_sendspin_set_volume(uint8_t volume_percent) {
     s_output_volume.store(volume_percent, std::memory_order_release);
     s_desired_volume.store(volume_percent, std::memory_order_release);
     if (!s_applying_server_volume.load(std::memory_order_acquire)) {
+        s_volume_changed_tick.store(xTaskGetTickCount(), std::memory_order_release);
         s_volume_dirty.store(true, std::memory_order_release);
     }
 }

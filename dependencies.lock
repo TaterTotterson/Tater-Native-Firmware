@@ -6,8 +6,15 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 7.4.3
+  esphome/libsodium:
+    component_hash: 39bee6f58d2d7fb8f2d30e04133afe60d0b642792196d36cde3a6dd07738fb08
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.10021.12
   esphome/micro-flac:
-    component_hash: d2e75ea77eaa45b83ed4ba968040957b27f53a7344b04d1c27495321b95bd44e
+    component_hash: a06a472806f8bd7c77bf0329119806bdabfa0101686971f3553b8d90b1002444
     dependencies:
     - name: idf
       require: private
@@ -15,17 +22,18 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 0.2.0
-  esphome/micro-opus:
-    component_hash: c4cec51b6e45b9b660bf8725a10c65f46485ff8b37ff664e4da3fd738301c71e
+    version: 0.3.0
+  esphome/noise-c:
+    component_hash: 12dcc72a8ca1ba82f703aaba07dcddeab6037135a7fa7e73e99af80efd6e565f
     dependencies:
-    - name: idf
+    - name: esphome/libsodium
+      registry_url: https://components.espressif.com
       require: private
-      version: '>=4.4'
+      version: 1.10021.12
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 0.4.1
+    version: 0.1.31
   espressif/esp-nn:
     component_hash: 3b3411b0e4ad1717a72870fde9f9b67cef6f3f97491cc64fcfc1910a8fd8a246
     dependencies:
@@ -37,21 +45,21 @@ dependencies:
       type: service
     version: 1.4.1
   espressif/esp-tflite-micro:
-    component_hash: 22fc501ab0b1bd39377048d608e6fce0e7b55cd07d244cbf41044b24d9b7db2e
+    component_hash: bdb2625ed976d5b861177cdc295abc6738724f84f4c7c60fc58c721d2b30bed6
     dependencies:
     - name: espressif/esp-nn
       registry_url: https://components.espressif.com
       require: private
-      version: '>=1.1.1'
+      version: '>=1.3.0'
     - name: idf
       require: private
-      version: '>=5.0'
+      version: '>=5.1'
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 1.3.7
+    version: 1.4.1
   espressif/esp_audio_codec:
-    component_hash: ef72edb6b70f593fb18ec6621dfbd5356abcaf6703cec75602d8b39e534c0382
+    component_hash: a5b9275af74247e3ce536d16a7080e4d77207a185b63e1bea368eb4d57176c2b
     dependencies:
     - name: idf
       require: private
@@ -59,7 +67,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 2.6.0
+    version: 2.6.2
   espressif/esp_websocket_client:
     component_hash: dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
     dependencies:
@@ -95,7 +103,7 @@ dependencies:
       type: idf
     version: 5.5.4
   sendspin/sendspin-cpp:
-    component_hash: 3ec929055a8953390c29649d9b3a0a47b60fb6d0a858bd5d6a12e78cfd8c4bb5
+    component_hash: 258f8c0a9a80ae0c84729019c6bf8648a405026e9a12a15f97d064f7ccd7dcea
     dependencies:
     - name: bblanchon/arduinojson
       registry_url: https://components.espressif.com
@@ -111,19 +119,23 @@ dependencies:
       registry_url: https://components.espressif.com
       require: private
       rules:
-      - if: $CONFIG{SENDSPIN_ENABLE_PLAYER} == True
+      - if: ($CONFIG{SENDSPIN_ENABLE_PLAYER} == True || $CONFIG{SENDSPIN_ENABLE_SOURCE} == True) && $CONFIG{SENDSPIN_ENABLE_OPUS} == True
       version: '>=0.3.5'
+    - name: esphome/noise-c
+      registry_url: https://components.espressif.com
+      require: private
+      version: '>=0.1.13'
     - name: espressif/esp_websocket_client
       registry_url: https://components.espressif.com
       require: private
-      version: '>=1.0.0'
+      version: '>=1.6.1'
     - name: idf
       require: private
-      version: '>=5.5'
+      version: '>=5.5.2'
     source:
       registry_url: https://components.espressif.com/
       type: service
-    version: 0.8.0
+    version: 0.9.4
 direct_dependencies:
 - espressif/esp-tflite-micro
 - espressif/esp_audio_codec
@@ -131,6 +143,6 @@ direct_dependencies:
 - espressif/led_strip
 - espressif/mdns
 - sendspin/sendspin-cpp
-manifest_hash: 95a35d8a17aac1a4fb17524ccf449725462a2dc83764bdb2bb15dc554a7987e4
+manifest_hash: 1684811cf73bdccc1e5f31d7ab88df807c297a977fcacab3959b5f497802eb24
 target: esp32s3
 version: 2.0.0
