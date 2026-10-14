@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -70,6 +71,11 @@ constexpr size_t SENDSPIN_RENDER_TASK_STACK_BYTES = 4096;
 constexpr TickType_t SENDSPIN_VOLUME_PUBLISH_SETTLE_TICKS = pdMS_TO_TICKS(75);
 constexpr int64_t SENDSPIN_STARVATION_MIN_US = 10000;
 constexpr TickType_t SENDSPIN_LOOP_TICKS = pdMS_TO_TICKS(5);
+constexpr uint8_t SENDSPIN_DUCK_TARGET_PERCENT = 20;
+constexpr uint16_t SENDSPIN_DUCK_ATTACK_MS = 150;
+constexpr uint16_t SENDSPIN_DUCK_RELEASE_MS = 350;
+constexpr size_t SENDSPIN_OVERLAY_CAPACITY_FRAMES = TATER_SPK_SAMPLE_RATE / 4;
+constexpr size_t SENDSPIN_OVERLAY_MIX_FRAMES = 256;
 constexpr const char *SENDSPIN_NVS_NAMESPACE = "sendspin";
 constexpr const char *SENDSPIN_NVS_OUTPUT_CHANNEL = "channel_mode";
 
@@ -103,6 +109,12 @@ std::atomic<uint32_t> s_max_clock_error_us{0};
 std::atomic<uint16_t> s_output_delay_ms{0};
 std::atomic<int64_t> s_output_empty_since_us{0};
 std::atomic<bool> s_received_stream_audio{false};
+std::atomic<bool> s_voice_duck_active{false};
+std::atomic<bool> s_overlay_active{false};
+std::atomic<uint32_t> s_overlay_read_frame{0};
+std::atomic<uint32_t> s_overlay_write_frame{0};
+std::atomic<uint32_t> s_duck_revision{0};
+int16_t *s_overlay_samples = nullptr;
 TaskHandle_t s_render_feedback_task_handle = nullptr;
 
 char s_friendly_name[TATER_CFG_DEVICE_NAME_LEN] = {};
@@ -110,6 +122,65 @@ char s_client_id[48] = {};
 
 bool native_audio_claimed() {
     return s_native_audio_claim_count.load(std::memory_order_acquire) != 0;
+}
+
+bool duck_requested() {
+    return s_voice_duck_active.load(std::memory_order_acquire)
+        || s_overlay_active.load(std::memory_order_acquire);
+}
+
+void publish_duck_change() {
+    s_duck_revision.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void reset_overlay_ring() {
+    s_overlay_read_frame.store(0, std::memory_order_release);
+    s_overlay_write_frame.store(0, std::memory_order_release);
+}
+
+void stop_overlay_immediately() {
+    bool was_active = s_overlay_active.exchange(false, std::memory_order_acq_rel);
+    reset_overlay_ring();
+    if (was_active) {
+        publish_duck_change();
+    }
+}
+
+size_t read_overlay_frames(int16_t *out, size_t frame_count) {
+    if (!out || frame_count == 0
+        || !s_overlay_active.load(std::memory_order_acquire)
+        || !s_overlay_samples) {
+        return 0;
+    }
+
+    uint32_t read_frame = s_overlay_read_frame.load(std::memory_order_relaxed);
+    uint32_t write_frame = s_overlay_write_frame.load(std::memory_order_acquire);
+    size_t available = static_cast<size_t>(write_frame - read_frame);
+    size_t wanted = std::min(frame_count, available);
+    size_t copied = 0;
+    while (copied < wanted) {
+        size_t ring_frame = static_cast<size_t>(read_frame) % SENDSPIN_OVERLAY_CAPACITY_FRAMES;
+        size_t contiguous = std::min(wanted - copied, SENDSPIN_OVERLAY_CAPACITY_FRAMES - ring_frame);
+        std::memcpy(
+            out + (copied * TATER_SPK_CHANNELS),
+            s_overlay_samples + (ring_frame * TATER_SPK_CHANNELS),
+            contiguous * TATER_SPK_CHANNELS * sizeof(int16_t)
+        );
+        read_frame += static_cast<uint32_t>(contiguous);
+        copied += contiguous;
+    }
+    s_overlay_read_frame.store(read_frame, std::memory_order_release);
+    return copied;
+}
+
+int16_t saturate_sample(int32_t sample) {
+    if (sample > INT16_MAX) {
+        return INT16_MAX;
+    }
+    if (sample < INT16_MIN) {
+        return INT16_MIN;
+    }
+    return static_cast<int16_t>(sample);
 }
 
 void update_atomic_max(std::atomic<uint32_t> &target, uint32_t value) {
@@ -365,7 +436,9 @@ private:
 
 class TaterPlayerListener final : public PlayerRoleListener {
 public:
-    explicit TaterPlayerListener(PlayerRole *player) : player_(player) {}
+    explicit TaterPlayerListener(PlayerRole *player) : player_(player) {
+        tater_playback_mix_init(&duck_mix_, 100);
+    }
 
     size_t on_audio_write(uint8_t *data, size_t length, uint32_t timeout_ms) override {
         (void)timeout_ms;
@@ -393,6 +466,46 @@ public:
                     (static_cast<int32_t>(samples[index]) * volume) / 100
                 );
             }
+        }
+
+        refresh_duck_target();
+        int16_t overlay[SENDSPIN_OVERLAY_MIX_FRAMES * TATER_SPK_CHANNELS];
+        size_t mixed_frames = 0;
+        while (mixed_frames < frames) {
+            size_t chunk_frames = std::min(
+                frames - mixed_frames,
+                SENDSPIN_OVERLAY_MIX_FRAMES
+            );
+            int16_t *music = samples + (mixed_frames * TATER_SPK_CHANNELS);
+            size_t overlay_frames = read_overlay_frames(overlay, chunk_frames);
+            if (overlay_frames > 0) {
+                tater_playback_mix_frames(
+                    &duck_mix_,
+                    nullptr,
+                    music,
+                    music,
+                    overlay_frames
+                );
+                for (size_t sample = 0;
+                    sample < overlay_frames * TATER_SPK_CHANNELS;
+                    sample++) {
+                    music[sample] = saturate_sample(
+                        static_cast<int32_t>(music[sample])
+                        + static_cast<int32_t>(overlay[sample])
+                    );
+                }
+            }
+            if (overlay_frames < chunk_frames) {
+                int16_t *music_only = music + (overlay_frames * TATER_SPK_CHANNELS);
+                tater_playback_mix_frames(
+                    &duck_mix_,
+                    nullptr,
+                    music_only,
+                    music_only,
+                    chunk_frames - overlay_frames
+                );
+            }
+            mixed_frames += chunk_frames;
         }
 
         // Reserve the frames before entering the board writer.  A decoded FLAC block is usually
@@ -480,6 +593,7 @@ public:
     }
 
     void on_stream_end() override {
+        stop_overlay_immediately();
         tater_leds_set_music_active(false);
         s_stream_active.store(false, std::memory_order_release);
         s_streams_completed.fetch_add(1, std::memory_order_relaxed);
@@ -560,10 +674,38 @@ public:
     }
 
 private:
+    void refresh_duck_target() {
+        uint32_t revision = s_duck_revision.load(std::memory_order_acquire);
+        if (revision == duck_revision_) {
+            return;
+        }
+        bool active = duck_requested();
+        uint32_t ramp_frames = static_cast<uint32_t>(
+            (static_cast<uint64_t>(TATER_SPK_SAMPLE_RATE)
+                * (active ? SENDSPIN_DUCK_ATTACK_MS : SENDSPIN_DUCK_RELEASE_MS))
+            / 1000
+        );
+        tater_playback_mix_set_background(
+            &duck_mix_,
+            active ? SENDSPIN_DUCK_TARGET_PERCENT : 100,
+            ramp_frames
+        );
+        duck_revision_ = revision;
+        ESP_LOGI(
+            TAG,
+            "Sendspin music duck=%s target=%u%% ramp_ms=%u",
+            active ? "on" : "off",
+            active ? SENDSPIN_DUCK_TARGET_PERCENT : 100,
+            active ? SENDSPIN_DUCK_ATTACK_MS : SENDSPIN_DUCK_RELEASE_MS
+        );
+    }
+
     PlayerRole *player_;
     uint32_t last_completed_frames_{0};
     uint32_t pending_prefix_frames_{0};
     std::atomic<uint64_t> notified_frames_{0};
+    tater_playback_mix_state_t duck_mix_{};
+    uint32_t duck_revision_{UINT32_MAX};
 };
 
 void render_feedback_task(void *arg) {
@@ -833,6 +975,35 @@ extern "C" esp_err_t tater_sendspin_init(const tater_config_t *config) {
     uint8_t volume = settings ? settings->volume_percent : 80;
     s_output_volume.store(volume, std::memory_order_release);
     s_desired_volume.store(volume, std::memory_order_release);
+    s_voice_duck_active.store(false, std::memory_order_release);
+    s_overlay_active.store(false, std::memory_order_release);
+    reset_overlay_ring();
+    if (!s_overlay_samples) {
+        size_t overlay_bytes = SENDSPIN_OVERLAY_CAPACITY_FRAMES
+            * TATER_SPK_CHANNELS * sizeof(int16_t);
+        s_overlay_samples = static_cast<int16_t *>(heap_caps_calloc(
+            1,
+            overlay_bytes,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        ));
+        if (!s_overlay_samples) {
+            s_overlay_samples = static_cast<int16_t *>(heap_caps_calloc(
+                1,
+                overlay_bytes,
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+            ));
+        }
+        if (s_overlay_samples) {
+            ESP_LOGI(
+                TAG,
+                "Sendspin native overlay buffer ready frames=%u bytes=%u",
+                static_cast<unsigned>(SENDSPIN_OVERLAY_CAPACITY_FRAMES),
+                static_cast<unsigned>(overlay_bytes)
+            );
+        } else {
+            ESP_LOGW(TAG, "Sendspin native overlay buffer unavailable");
+        }
+    }
     tater_sendspin_output_channel_t output_channel = load_output_channel();
     s_output_channel.store(static_cast<uint8_t>(output_channel), std::memory_order_release);
     ESP_LOGI(TAG, "Sendspin output channel mode=%s", output_channel_name(output_channel));
@@ -904,6 +1075,120 @@ extern "C" void tater_sendspin_release_native_audio(void) {
             )) {
             return;
         }
+    }
+}
+
+extern "C" bool tater_sendspin_begin_native_overlay(void) {
+    if (!s_initialized.load(std::memory_order_acquire)
+        || !s_overlay_samples
+        || !s_stream_active.load(std::memory_order_acquire)
+        || !s_speaker_owned.load(std::memory_order_acquire)
+        || native_audio_claimed()
+        || s_overlay_active.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    reset_overlay_ring();
+    s_overlay_active.store(true, std::memory_order_release);
+    publish_duck_change();
+    ESP_LOGI(TAG, "Sendspin native overlay started");
+    return true;
+}
+
+extern "C" esp_err_t tater_sendspin_write_native_overlay(
+    const int16_t *stereo_frames,
+    size_t frame_count,
+    uint32_t timeout_ms
+) {
+    if (!stereo_frames || frame_count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_overlay_active.load(std::memory_order_acquire) || !s_overlay_samples) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    size_t written_frames = 0;
+    while (written_frames < frame_count) {
+        if (!s_overlay_active.load(std::memory_order_acquire)
+            || !s_stream_active.load(std::memory_order_acquire)
+            || !s_speaker_owned.load(std::memory_order_acquire)) {
+            return ESP_ERR_INVALID_STATE;
+        }
+
+        uint32_t read_frame = s_overlay_read_frame.load(std::memory_order_acquire);
+        uint32_t write_frame = s_overlay_write_frame.load(std::memory_order_relaxed);
+        size_t used = static_cast<size_t>(write_frame - read_frame);
+        size_t space = used < SENDSPIN_OVERLAY_CAPACITY_FRAMES
+            ? SENDSPIN_OVERLAY_CAPACITY_FRAMES - used
+            : 0;
+        if (space == 0) {
+            if (timeout_ticks == 0 || (xTaskGetTickCount() - started) >= timeout_ticks) {
+                return ESP_ERR_TIMEOUT;
+            }
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
+        }
+
+        size_t ring_frame = static_cast<size_t>(write_frame)
+            % SENDSPIN_OVERLAY_CAPACITY_FRAMES;
+        size_t contiguous = std::min(
+            frame_count - written_frames,
+            std::min(space, SENDSPIN_OVERLAY_CAPACITY_FRAMES - ring_frame)
+        );
+        std::memcpy(
+            s_overlay_samples + (ring_frame * TATER_SPK_CHANNELS),
+            stereo_frames + (written_frames * TATER_SPK_CHANNELS),
+            contiguous * TATER_SPK_CHANNELS * sizeof(int16_t)
+        );
+        write_frame += static_cast<uint32_t>(contiguous);
+        s_overlay_write_frame.store(write_frame, std::memory_order_release);
+        written_frames += contiguous;
+    }
+    return ESP_OK;
+}
+
+extern "C" esp_err_t tater_sendspin_end_native_overlay(uint32_t timeout_ms) {
+    if (!s_overlay_active.load(std::memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    while (s_overlay_active.load(std::memory_order_acquire)
+        && s_stream_active.load(std::memory_order_acquire)
+        && s_overlay_read_frame.load(std::memory_order_acquire)
+            != s_overlay_write_frame.load(std::memory_order_acquire)) {
+        if (timeout_ticks == 0 || (xTaskGetTickCount() - started) >= timeout_ticks) {
+            ESP_LOGW(TAG, "Sendspin native overlay drain timed out");
+            stop_overlay_immediately();
+            return ESP_ERR_TIMEOUT;
+        }
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+
+    if (!s_overlay_active.load(std::memory_order_acquire)
+        || !s_stream_active.load(std::memory_order_acquire)) {
+        stop_overlay_immediately();
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_overlay_active.store(false, std::memory_order_release);
+    reset_overlay_ring();
+    publish_duck_change();
+    ESP_LOGI(TAG, "Sendspin native overlay finished");
+    return ESP_OK;
+}
+
+extern "C" void tater_sendspin_abort_native_overlay(void) {
+    stop_overlay_immediately();
+}
+
+extern "C" void tater_sendspin_set_voice_duck(bool active) {
+    bool previous = s_voice_duck_active.exchange(active, std::memory_order_acq_rel);
+    if (previous != active) {
+        publish_duck_change();
     }
 }
 

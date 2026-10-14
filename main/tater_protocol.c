@@ -522,6 +522,7 @@ static void mark_link_down(const char *detail)
     s_voice_generation++;
     s_voice_started_us = 0;
     s_voice_source[0] = '\0';
+    tater_sendspin_set_voice_duck(false);
     s_audio_preroll_start = 0;
     s_audio_preroll_count = 0;
     clear_playback_visual_active();
@@ -2311,6 +2312,7 @@ static void handle_text_message(const char *data, int len)
         const cJSON *ok = cJSON_GetObjectItem(payload, "ok");
         if (cJSON_IsBool(ok) && !cJSON_IsTrue(ok)) {
             clear_voice_capture_state();
+            tater_sendspin_set_voice_duck(false);
             emit_state(TATER_STATE_ERROR, "voice.start rejected");
         } else {
             xSemaphoreTake(s_send_lock, portMAX_DELAY);
@@ -2357,6 +2359,7 @@ static void handle_text_message(const char *data, int len)
             }
         } else if (strcmp(event, "RUN_END") == 0) {
             clear_voice_capture_state();
+            tater_sendspin_set_voice_duck(false);
             bool playback_active = playback_turn_in_progress();
             if (s_pending_reopen && !playback_active) {
                 ESP_LOGI(TAG, "continued chat reopen cleared; run ended without active playback");
@@ -2368,6 +2371,7 @@ static void handle_text_message(const char *data, int len)
             }
         } else if (strcmp(event, "ERROR") == 0) {
             clear_voice_capture_state();
+            tater_sendspin_set_voice_duck(false);
             s_pending_reopen = false;
             s_pending_reopen_conversation_id[0] = '\0';
             emit_state(TATER_STATE_ERROR, "voice error");
@@ -2631,6 +2635,7 @@ static void handle_text_message(const char *data, int len)
         tater_live_settings_apply_json(payload);
     } else if (strcmp(type, "error") == 0) {
         clear_voice_capture_state();
+        tater_sendspin_set_voice_duck(false);
         emit_state(TATER_STATE_ERROR, "server error");
     }
 
@@ -2668,6 +2673,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
         s_hello_acked = false;
         s_json_send_failure_streak = 0;
         clear_voice_capture_state();
+        tater_sendspin_set_voice_duck(false);
         s_rx_text_logs = 0;
         ESP_LOGI(TAG, "connected %s", s_ws_url);
         send_hello();
@@ -3240,6 +3246,7 @@ void tater_protocol_start_voice_with_conversation(const char *wake_word, const c
     s_last_audio_send_result = 0;
     s_last_audio_send_samples = 0;
     xSemaphoreGive(s_send_lock);
+    tater_sendspin_set_voice_duck(true);
     emit_state(TATER_STATE_LISTENING, "local voice.start");
 
     cJSON *root = new_envelope("voice.start");
@@ -3255,7 +3262,12 @@ void tater_protocol_start_voice_with_conversation(const char *wake_word, const c
     cJSON_AddNumberToObject(format, "width", 2);
     cJSON_AddNumberToObject(format, "channels", 1);
     cJSON_AddItemToObject(payload, "audio_format", format);
-    send_json(root);
+    if (send_json(root) < 0) {
+        clear_voice_capture_state();
+        tater_sendspin_set_voice_duck(false);
+        emit_state(TATER_STATE_ERROR, "voice.start send failed");
+        return;
+    }
 
     if (continued_reopen) {
         tater_voice_watchdog_args_t *request = (tater_voice_watchdog_args_t *)calloc(1, sizeof(tater_voice_watchdog_args_t));
@@ -3287,6 +3299,9 @@ void tater_protocol_stop_voice(bool abort)
 {
     if (!websocket_ready()) {
         clear_voice_capture_state();
+        if (abort) {
+            tater_sendspin_set_voice_duck(false);
+        }
         emit_state(TATER_STATE_IDLE, "local voice.stop offline");
         return;
     }
@@ -3301,6 +3316,9 @@ void tater_protocol_stop_voice(bool abort)
     cJSON_AddBoolToObject(payload, "abort", abort);
     send_json(root);
     clear_voice_capture_state();
+    if (abort) {
+        tater_sendspin_set_voice_duck(false);
+    }
     emit_state(TATER_STATE_IDLE, "local voice.stop");
 }
 

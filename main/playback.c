@@ -236,8 +236,15 @@ typedef struct {
     bool task_with_caps;
 } scene_args_t;
 
+typedef enum {
+    PLAYBACK_OUTPUT_NONE = 0,
+    PLAYBACK_OUTPUT_NATIVE,
+    PLAYBACK_OUTPUT_SENDSPIN_OVERLAY,
+} playback_output_mode_t;
+
 static volatile bool s_abort;
 static volatile bool s_playing;
+static volatile playback_output_mode_t s_output_mode;
 static TaskHandle_t s_task;
 static SemaphoreHandle_t s_lifecycle_lock;
 static TaskHandle_t s_recovery_task;
@@ -314,6 +321,9 @@ static bool playback_recovery_watch_rebuffer(
 
 static esp_err_t playback_speaker_begin(void)
 {
+    if (s_output_mode == PLAYBACK_OUTPUT_SENDSPIN_OVERLAY) {
+        return ESP_OK;
+    }
     return tater_audio_speaker_begin();
 }
 
@@ -322,7 +332,9 @@ static esp_err_t playback_speaker_write(
     size_t frame_count
 )
 {
-    esp_err_t err = tater_audio_write_speaker_frames(stereo_frames, frame_count);
+    esp_err_t err = s_output_mode == PLAYBACK_OUTPUT_SENDSPIN_OVERLAY
+        ? tater_sendspin_write_native_overlay(stereo_frames, frame_count, 3000)
+        : tater_audio_write_speaker_frames(stereo_frames, frame_count);
     if (err == ESP_OK) {
         playback_recovery_note_output();
     }
@@ -332,7 +344,29 @@ static esp_err_t playback_speaker_write(
 static esp_err_t playback_speaker_end(void)
 {
     playback_recovery_stop_output();
+    if (s_output_mode == PLAYBACK_OUTPUT_SENDSPIN_OVERLAY) {
+        esp_err_t err = ESP_OK;
+        if (s_abort) {
+            tater_sendspin_abort_native_overlay();
+            err = ESP_FAIL;
+        } else {
+            err = tater_sendspin_end_native_overlay(3000);
+        }
+        s_output_mode = PLAYBACK_OUTPUT_NONE;
+        return err;
+    }
     return tater_audio_speaker_end();
+}
+
+static void playback_release_output(void)
+{
+    playback_output_mode_t mode = s_output_mode;
+    s_output_mode = PLAYBACK_OUTPUT_NONE;
+    if (mode == PLAYBACK_OUTPUT_SENDSPIN_OVERLAY) {
+        tater_sendspin_abort_native_overlay();
+    } else if (mode == PLAYBACK_OUTPUT_NATIVE) {
+        tater_sendspin_release_native_audio();
+    }
 }
 
 static void playback_recovery_task(void *arg)
@@ -530,11 +564,17 @@ static bool playback_begin_start(void)
         return false;
     }
 
-    if (!tater_sendspin_claim_native_audio(3000)) {
-        if (s_lifecycle_lock) {
-            xSemaphoreGive(s_lifecycle_lock);
+    s_output_mode = PLAYBACK_OUTPUT_NONE;
+    if (tater_sendspin_begin_native_overlay()) {
+        s_output_mode = PLAYBACK_OUTPUT_SENDSPIN_OVERLAY;
+    } else {
+        if (!tater_sendspin_claim_native_audio(3000)) {
+            if (s_lifecycle_lock) {
+                xSemaphoreGive(s_lifecycle_lock);
+            }
+            return false;
         }
-        return false;
+        s_output_mode = PLAYBACK_OUTPUT_NATIVE;
     }
 
     playback_recovery_begin_session();
@@ -556,7 +596,7 @@ static esp_err_t playback_start_failed(esp_err_t err)
     s_task = NULL;
     s_playing = false;
     s_abort = false;
-    tater_sendspin_release_native_audio();
+    playback_release_output();
     playback_end_start();
     return err;
 }
@@ -569,7 +609,7 @@ static void playback_mark_finished(void)
         s_task = NULL;
         s_playing = false;
         s_abort = false;
-        tater_sendspin_release_native_audio();
+        playback_release_output();
         return;
     }
 
@@ -2932,6 +2972,7 @@ esp_err_t tater_playback_init(void)
     s_abort = false;
     s_playing = false;
     s_task = NULL;
+    s_output_mode = PLAYBACK_OUTPUT_NONE;
     if (!s_lifecycle_lock) {
         s_lifecycle_lock = xSemaphoreCreateMutex();
         ESP_RETURN_ON_FALSE(s_lifecycle_lock, ESP_ERR_NO_MEM, TAG, "playback lifecycle mutex failed");
@@ -3182,9 +3223,6 @@ void tater_playback_stop(void)
         for (int i = 0; i < 20 && s_playing; i++) {
             vTaskDelay(pdMS_TO_TICKS(25));
         }
-    } else if (tater_sendspin_is_playing()) {
-        (void)tater_sendspin_claim_native_audio(3000);
-        tater_sendspin_release_native_audio();
     }
 }
 

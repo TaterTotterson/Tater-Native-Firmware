@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -40,12 +41,29 @@ typedef struct {
 esp_err_t tater_sendspin_init(const tater_config_t *config);
 
 /*
- * Native Tater audio (interactive TTS, wake sounds, timers, and tones) owns
- * the speaker while this claim is held.  Sendspin is disconnected before the
+ * Native Tater audio that cannot be mixed with active Sendspin owns the
+ * speaker while this claim is held. Sendspin is disconnected before the
  * claim returns so the two pipelines never write to I2S concurrently.
  */
 bool tater_sendspin_claim_native_audio(uint32_t timeout_ms);
 void tater_sendspin_release_native_audio(void);
+
+/*
+ * Wake sounds, replies, timers, and tones use this foreground plane while a
+ * Sendspin stream is active. The Sendspin renderer keeps the music timeline
+ * alive, ducks it smoothly, and mixes these 48 kHz stereo PCM frames over it.
+ */
+bool tater_sendspin_begin_native_overlay(void);
+esp_err_t tater_sendspin_write_native_overlay(
+    const int16_t *stereo_frames,
+    size_t frame_count,
+    uint32_t timeout_ms
+);
+esp_err_t tater_sendspin_end_native_overlay(uint32_t timeout_ms);
+void tater_sendspin_abort_native_overlay(void);
+
+/* Keep music ducked for the full Assist turn, independently of an overlay. */
+void tater_sendspin_set_voice_duck(bool active);
 
 void tater_sendspin_set_volume(uint8_t volume_percent);
 bool tater_sendspin_set_output_channel_mode(const char *mode);
