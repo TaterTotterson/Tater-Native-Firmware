@@ -1,4 +1,3 @@
-- Releases native firmware `0.5.3` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Keeps an active Sendspin music session connected when the wake word triggers instead of disconnecting the player and leaving it unavailable in Music Assistant.
-- Smoothly ducks Sendspin music during the full voice-assistant turn, mixes wake sounds and spoken replies over the live music timeline, then restores full music volume when the turn ends.
-- Applies the shared wake-ducking and foreground-audio behavior consistently across all four native satellite families.
+- Releases native firmware `0.5.4` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Fixes Satellite1 automatic output routing by configuring the PCM5122 jack-detect GPIO as an input and reading its correct input-status bit.
+- Prevents false line-out detection from disabling the Satellite1 internal speaker when no 3.5 mm cable is connected.

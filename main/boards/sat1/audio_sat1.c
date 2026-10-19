@@ -88,8 +88,12 @@ extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_end[] asm("_binary_sat1
 #define SAT1_SPK_DMA_DESC_NUM 4
 #define SAT1_SPK_DMA_FRAME_NUM 240
 #define SAT1_SPK_WRITE_FRAMES SAT1_SPK_DMA_FRAME_NUM
+#define SAT1_PCM5122_GPIO_ENABLE_REG 0x08
 #define SAT1_PCM5122_GPIO_INPUT_REG 0x77
-#define SAT1_PCM5122_LINE_OUT_GPIO_MASK (1u << 2)
+#define SAT1_PCM5122_LINE_OUT_GPIO 3
+#define SAT1_PCM5122_LINE_OUT_GPIO_ENABLE_MASK (1u << (SAT1_PCM5122_LINE_OUT_GPIO - 1))
+/* GPIO input register bit 0 is reserved, so GPIN_N is reported at bit N. */
+#define SAT1_PCM5122_LINE_OUT_GPIO_INPUT_MASK (1u << SAT1_PCM5122_LINE_OUT_GPIO)
 #define SAT1_LINE_OUT_POLL_INTERVAL_US 200000
 #define SAT1_LINE_OUT_DEBOUNCE_SAMPLES 2
 
@@ -382,6 +386,18 @@ static esp_err_t pcm5122_init(void)
     ESP_RETURN_ON_ERROR(i2c_write_reg(TATER_SAT1_PCM5122_I2C_ADDR, 0x01, 0x10), TAG, "pcm reset assert failed");
     vTaskDelay(pdMS_TO_TICKS(20));
     ESP_RETURN_ON_ERROR(i2c_write_reg(TATER_SAT1_PCM5122_I2C_ADDR, 0x01, 0x00), TAG, "pcm reset release failed");
+    uint8_t gpio_enable = 0;
+    ESP_RETURN_ON_ERROR(
+        i2c_read_reg(TATER_SAT1_PCM5122_I2C_ADDR, SAT1_PCM5122_GPIO_ENABLE_REG, &gpio_enable),
+        TAG,
+        "pcm gpio enable read failed"
+    );
+    gpio_enable &= (uint8_t)~SAT1_PCM5122_LINE_OUT_GPIO_ENABLE_MASK;
+    ESP_RETURN_ON_ERROR(
+        i2c_write_reg(TATER_SAT1_PCM5122_I2C_ADDR, SAT1_PCM5122_GPIO_ENABLE_REG, gpio_enable),
+        TAG,
+        "pcm line-out gpio input setup failed"
+    );
     uint8_t err_detect = 0;
     if (i2c_read_reg(TATER_SAT1_PCM5122_I2C_ADDR, 0x25, &err_detect) == ESP_OK) {
         err_detect |= (1 << 3);
@@ -659,7 +675,7 @@ static esp_err_t pcm5122_read_line_out_connected(bool *connected)
         TAG,
         "pcm gpio read failed"
     );
-    *connected = (gpio_input & SAT1_PCM5122_LINE_OUT_GPIO_MASK) != 0;
+    *connected = (gpio_input & SAT1_PCM5122_LINE_OUT_GPIO_INPUT_MASK) != 0;
     return ESP_OK;
 }
 
