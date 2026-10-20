@@ -1,3 +1,3 @@
-- Releases native firmware `0.5.4` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Fixes Satellite1 automatic output routing by configuring the PCM5122 jack-detect GPIO as an input and reading its correct input-status bit.
-- Prevents false line-out detection from disabling the Satellite1 internal speaker when no 3.5 mm cable is connected.
+- Releases Satellite1 native firmware `0.5.5`; the other native satellite families remain on `0.5.4`.
+- Reassembles inbound WebSocket text payloads that exceed the Satellite1 transport buffer before parsing them as JSON.
+- Allows large live-settings packets, including catalog wake-model URLs, to apply reliably after saving settings or reconnecting to Tater.

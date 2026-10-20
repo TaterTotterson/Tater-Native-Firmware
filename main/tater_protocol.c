@@ -54,6 +54,8 @@ static const char *TAG = "tater_proto";
 #define TATER_WAKE_VERIFY_TX_FRAGMENT_SIZE 4096
 #endif
 
+#define TATER_WS_MAX_RX_TEXT_SIZE (64 * 1024)
+
 #ifndef TATER_CAP_LINE_OUT
 #define TATER_CAP_LINE_OUT false
 #endif
@@ -127,6 +129,11 @@ static uint32_t s_json_send_failure_total;
 static uint32_t s_json_send_failure_streak;
 static uint32_t s_json_send_failures_tolerated;
 static char s_last_json_send_type[32];
+static uint8_t *s_rx_text_buffer;
+static size_t s_rx_text_capacity;
+static size_t s_rx_text_received;
+static size_t s_rx_text_expected;
+static bool s_rx_text_active;
 
 static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 static int send_audio_locked(const int16_t *pcm, size_t sample_count, TickType_t timeout);
@@ -2642,6 +2649,93 @@ static void handle_text_message(const char *data, int len)
     cJSON_Delete(root);
 }
 
+static void reset_rx_text_buffer(void)
+{
+    if (s_rx_text_buffer) {
+        heap_caps_free(s_rx_text_buffer);
+    }
+    s_rx_text_buffer = NULL;
+    s_rx_text_capacity = 0;
+    s_rx_text_received = 0;
+    s_rx_text_expected = 0;
+    s_rx_text_active = false;
+}
+
+static void handle_text_payload(const esp_websocket_event_data_t *data)
+{
+    if (!data || (!data->data_ptr && data->data_len > 0) || data->data_len <= 0) {
+        return;
+    }
+
+    const size_t chunk_len = (size_t)data->data_len;
+    const size_t payload_len = data->payload_len > 0
+        ? (size_t)data->payload_len
+        : chunk_len;
+    const size_t payload_offset = data->payload_offset > 0
+        ? (size_t)data->payload_offset
+        : 0;
+    const bool chunked = s_rx_text_active || payload_offset > 0 || payload_len > chunk_len;
+
+    if (!chunked) {
+        handle_text_message(data->data_ptr, data->data_len);
+        return;
+    }
+
+    if (payload_offset == 0) {
+        reset_rx_text_buffer();
+        if (payload_len == 0 || payload_len > TATER_WS_MAX_RX_TEXT_SIZE) {
+            ESP_LOGW(TAG, "dropping oversized websocket text payload bytes=%u", (unsigned)payload_len);
+            return;
+        }
+        s_rx_text_buffer = (uint8_t *)heap_caps_malloc(
+            payload_len + 1,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        );
+        if (!s_rx_text_buffer) {
+            s_rx_text_buffer = (uint8_t *)heap_caps_malloc(payload_len + 1, MALLOC_CAP_8BIT);
+        }
+        if (!s_rx_text_buffer) {
+            ESP_LOGE(TAG, "websocket text reassembly allocation failed bytes=%u", (unsigned)payload_len);
+            return;
+        }
+        s_rx_text_capacity = payload_len + 1;
+        s_rx_text_expected = payload_len;
+        s_rx_text_active = true;
+    }
+
+    if (!s_rx_text_active || !s_rx_text_buffer) {
+        ESP_LOGW(TAG, "websocket text continuation without an active payload offset=%u", (unsigned)payload_offset);
+        return;
+    }
+    if (payload_len != s_rx_text_expected || payload_offset != s_rx_text_received) {
+        ESP_LOGW(
+            TAG,
+            "websocket text fragment mismatch offset=%u received=%u payload=%u expected=%u",
+            (unsigned)payload_offset,
+            (unsigned)s_rx_text_received,
+            (unsigned)payload_len,
+            (unsigned)s_rx_text_expected
+        );
+        reset_rx_text_buffer();
+        return;
+    }
+    if (payload_offset + chunk_len > s_rx_text_expected || payload_offset + chunk_len >= s_rx_text_capacity) {
+        ESP_LOGW(TAG, "websocket text fragment exceeds declared payload");
+        reset_rx_text_buffer();
+        return;
+    }
+
+    memcpy(s_rx_text_buffer + payload_offset, data->data_ptr, chunk_len);
+    s_rx_text_received = payload_offset + chunk_len;
+    if (s_rx_text_received < s_rx_text_expected) {
+        return;
+    }
+
+    s_rx_text_buffer[s_rx_text_received] = '\0';
+    handle_text_message((const char *)s_rx_text_buffer, (int)s_rx_text_received);
+    reset_rx_text_buffer();
+}
+
 static const char *websocket_error_type_name(esp_websocket_error_type_t type)
 {
     switch (type) {
@@ -2669,6 +2763,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
     }
     switch (event_id) {
     case WEBSOCKET_EVENT_CONNECTED:
+        reset_rx_text_buffer();
         s_connected = true;
         s_hello_acked = false;
         s_json_send_failure_streak = 0;
@@ -2679,6 +2774,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
         send_hello();
         break;
     case WEBSOCKET_EVENT_DISCONNECTED:
+        reset_rx_text_buffer();
         remember_websocket_error(data);
         mark_link_down("disconnected");
         ESP_LOGW(
@@ -2701,14 +2797,17 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
             data->payload_offset,
             data->fin
         );
-        if (data->op_code == 0x1 && data->data_ptr && data->data_len > 0) {
-            handle_text_message(data->data_ptr, data->data_len);
+        if ((data->op_code == 0x1 || (data->op_code == 0x0 && s_rx_text_active))
+                && data->data_ptr && data->data_len > 0) {
+            handle_text_payload(data);
         } else if (data->op_code == 0x08) {
+            reset_rx_text_buffer();
             mark_link_down("server close frame");
             ESP_LOGW(TAG, "websocket close frame len=%d", data->data_len);
         }
         break;
     case WEBSOCKET_EVENT_ERROR:
+        reset_rx_text_buffer();
         remember_websocket_error(data);
         mark_link_down("websocket error");
         ESP_LOGE(
@@ -2723,6 +2822,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
         emit_state(TATER_STATE_ERROR, "websocket error");
         break;
     case WEBSOCKET_EVENT_CLOSED:
+        reset_rx_text_buffer();
         remember_websocket_error(data);
         mark_link_down("websocket closed");
         ESP_LOGW(TAG, "websocket closed cleanly");
