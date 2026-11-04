@@ -636,3 +636,9 @@ XMOS firmware version.
 6. Add it to the release workflow when it is ready for official builds.
 7. Test USB flashing, setup mode, pairing, wake word, mic streaming, playback,
    LEDs, OTA, and reconnect behavior before publishing.
+
+## License and trademarks
+
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+The Tater name and logo are governed by the [Tater Trademark Policy](TRADEMARKS.md).\n
