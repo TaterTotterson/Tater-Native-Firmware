@@ -1,6 +1,7 @@
 #include "wake_engine.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -60,7 +61,11 @@ constexpr float kBoundaryDefaultThreshold = 0.82f;
 constexpr int kBoundaryDefaultSearchBeforeMs = 700;
 constexpr int kBoundaryDefaultSearchAfterMs = 120;
 constexpr int kBoundaryDefaultEndpointOffsetMs = 0;
-constexpr size_t kBoundaryTransportPrerollSamples = kAudioSampleRate;
+constexpr int kBoundaryMinimumReplayMs = 1500;
+constexpr int kBoundaryReplayWarmupMs = 500;
+constexpr int kBoundaryCommandGuardMs = 80;
+constexpr size_t kBoundaryTransportMinimumSamples = kAudioSampleRate / 2;
+constexpr size_t kBoundaryTransportPreMarkerSamples = kAudioSampleRate / 4;
 constexpr int kWakeResourceVariableCount = 8;
 constexpr float kFilterbankLowerBandLimit = 125.0f;
 constexpr float kFilterbankUpperBandLimit = 7500.0f;
@@ -122,6 +127,11 @@ struct WakeDownloadRequest {
 
 struct WakeSoundDownloadRequest {
     char url[192];
+    bool task_with_caps;
+};
+
+struct BoundarySessionRequest {
+    char wake_word[32];
     bool task_with_caps;
 };
 
@@ -290,7 +300,11 @@ float s_feature_last_mean = 0.0f;
 int16_t *s_capture_ring = nullptr;
 size_t s_capture_ring_start = 0;
 size_t s_capture_ring_count = 0;
+uint64_t s_capture_ring_end_sample = 0;
 bool s_capture_ring_psram = false;
+SemaphoreHandle_t s_capture_ring_lock = nullptr;
+std::atomic<bool> s_boundary_session_running{false};
+std::atomic<bool> s_boundary_reset_pending{false};
 volatile bool s_capture_upload_running = false;
 uint32_t s_capture_upload_count = 0;
 uint32_t s_capture_upload_failures = 0;
@@ -1230,6 +1244,7 @@ bool ensure_capture_ring()
     }
     s_capture_ring_start = 0;
     s_capture_ring_count = 0;
+    s_capture_ring_end_sample = 0;
     std::memset(s_capture_ring, 0, kCaptureBufferSamples * sizeof(int16_t));
     ESP_LOGI(TAG, "trainer capture ring ready samples=%u psram=%d", (unsigned)kCaptureBufferSamples, s_capture_ring_psram);
     return true;
@@ -1258,6 +1273,9 @@ void append_capture_audio(const int16_t *pcm, size_t sample_count)
     if ((!s_boundary_ready && !capture_settings_enabled(settings)) || !pcm || sample_count == 0 || !ensure_capture_ring()) {
         return;
     }
+    if (s_capture_ring_lock) {
+        xSemaphoreTake(s_capture_ring_lock, portMAX_DELAY);
+    }
     for (size_t i = 0; i < sample_count; i++) {
         if (s_capture_ring_count < kCaptureBufferSamples) {
             size_t index = (s_capture_ring_start + s_capture_ring_count) % kCaptureBufferSamples;
@@ -1268,6 +1286,10 @@ void append_capture_audio(const int16_t *pcm, size_t sample_count)
             s_capture_ring_start = (s_capture_ring_start + 1) % kCaptureBufferSamples;
         }
     }
+    s_capture_ring_end_sample += sample_count;
+    if (s_capture_ring_lock) {
+        xSemaphoreGive(s_capture_ring_lock);
+    }
 }
 
 uint8_t *snapshot_capture_audio(size_t *out_byte_count)
@@ -1275,7 +1297,16 @@ uint8_t *snapshot_capture_audio(size_t *out_byte_count)
     if (out_byte_count) {
         *out_byte_count = 0;
     }
-    if (!out_byte_count || !s_capture_ring || s_capture_ring_count < (size_t)(kAudioSampleRate / 2)) {
+    if (!out_byte_count || !s_capture_ring) {
+        return nullptr;
+    }
+    if (s_capture_ring_lock) {
+        xSemaphoreTake(s_capture_ring_lock, portMAX_DELAY);
+    }
+    if (s_capture_ring_count < (size_t)(kAudioSampleRate / 2)) {
+        if (s_capture_ring_lock) {
+            xSemaphoreGive(s_capture_ring_lock);
+        }
         return nullptr;
     }
     size_t sample_count = s_capture_ring_count;
@@ -1285,6 +1316,9 @@ uint8_t *snapshot_capture_audio(size_t *out_byte_count)
         raw = static_cast<uint8_t *>(heap_caps_malloc(byte_count, MALLOC_CAP_8BIT));
     }
     if (!raw) {
+        if (s_capture_ring_lock) {
+            xSemaphoreGive(s_capture_ring_lock);
+        }
         set_capture_last_error("capture snapshot alloc failed");
         ESP_LOGW(TAG, "trainer capture snapshot alloc failed bytes=%u", (unsigned)byte_count);
         return nullptr;
@@ -1293,21 +1327,39 @@ uint8_t *snapshot_capture_audio(size_t *out_byte_count)
     for (size_t i = 0; i < sample_count; i++) {
         dst[i] = s_capture_ring[(s_capture_ring_start + i) % kCaptureBufferSamples];
     }
+    if (s_capture_ring_lock) {
+        xSemaphoreGive(s_capture_ring_lock);
+    }
     *out_byte_count = byte_count;
     return raw;
 }
 
-int16_t *snapshot_capture_audio_tail(size_t requested_samples, size_t *out_sample_count)
+int16_t *snapshot_capture_audio_tail(
+    size_t requested_samples,
+    size_t *out_sample_count,
+    uint64_t *out_end_sample = nullptr
+)
 {
     if (out_sample_count) {
         *out_sample_count = 0;
+    }
+    if (out_end_sample) {
+        *out_end_sample = 0;
     }
     if (
         !out_sample_count
         || !s_capture_ring
         || requested_samples == 0
-        || s_capture_ring_count < (size_t)(kAudioSampleRate / 2)
     ) {
+        return nullptr;
+    }
+    if (s_capture_ring_lock) {
+        xSemaphoreTake(s_capture_ring_lock, portMAX_DELAY);
+    }
+    if (s_capture_ring_count < (size_t)(kAudioSampleRate / 2)) {
+        if (s_capture_ring_lock) {
+            xSemaphoreGive(s_capture_ring_lock);
+        }
         return nullptr;
     }
     size_t sample_count = std::min(requested_samples, s_capture_ring_count);
@@ -1318,6 +1370,9 @@ int16_t *snapshot_capture_audio_tail(size_t requested_samples, size_t *out_sampl
         copy = static_cast<int16_t *>(heap_caps_malloc(sample_count * sizeof(int16_t), MALLOC_CAP_8BIT));
     }
     if (!copy) {
+        if (s_capture_ring_lock) {
+            xSemaphoreGive(s_capture_ring_lock);
+        }
         ESP_LOGW(TAG, "wake verifier snapshot alloc failed samples=%u", (unsigned)sample_count);
         return nullptr;
     }
@@ -1325,8 +1380,38 @@ int16_t *snapshot_capture_audio_tail(size_t requested_samples, size_t *out_sampl
     for (size_t i = 0; i < sample_count; i++) {
         copy[i] = s_capture_ring[(s_capture_ring_start + offset + i) % kCaptureBufferSamples];
     }
+    if (out_end_sample) {
+        *out_end_sample = s_capture_ring_end_sample;
+    }
+    if (s_capture_ring_lock) {
+        xSemaphoreGive(s_capture_ring_lock);
+    }
     *out_sample_count = sample_count;
     return copy;
+}
+
+uint64_t capture_audio_end_sample()
+{
+    if (s_capture_ring_lock) {
+        xSemaphoreTake(s_capture_ring_lock, portMAX_DELAY);
+    }
+    uint64_t end_sample = s_capture_ring_end_sample;
+    if (s_capture_ring_lock) {
+        xSemaphoreGive(s_capture_ring_lock);
+    }
+    return end_sample;
+}
+
+size_t capture_audio_sample_count()
+{
+    if (s_capture_ring_lock) {
+        xSemaphoreTake(s_capture_ring_lock, portMAX_DELAY);
+    }
+    size_t sample_count = s_capture_ring_count;
+    if (s_capture_ring_lock) {
+        xSemaphoreGive(s_capture_ring_lock);
+    }
+    return sample_count;
 }
 
 bool tater_server_host(char *out, size_t out_len)
@@ -2431,6 +2516,49 @@ struct BoundaryPreroll {
     float score;
 };
 
+BoundaryPreroll snapshot_boundary_transport(uint64_t boundary_sample, float score)
+{
+    BoundaryPreroll result = {};
+    uint64_t current_end_sample = capture_audio_end_sample();
+    uint64_t post_boundary_samples = current_end_sample > boundary_sample
+        ? current_end_sample - boundary_sample
+        : 0;
+    uint64_t requested_samples = std::max<uint64_t>(
+        kBoundaryTransportMinimumSamples,
+        post_boundary_samples + kBoundaryTransportPreMarkerSamples
+    );
+    requested_samples = std::min<uint64_t>(requested_samples, kCaptureBufferSamples);
+
+    uint64_t snapshot_end_sample = 0;
+    result.pcm = snapshot_capture_audio_tail(
+        static_cast<size_t>(requested_samples),
+        &result.sample_count,
+        &snapshot_end_sample
+    );
+    if (!result.pcm || result.sample_count == 0) {
+        result = {};
+        return result;
+    }
+
+    uint64_t snapshot_start_sample = snapshot_end_sample >= result.sample_count
+        ? snapshot_end_sample - result.sample_count
+        : 0;
+    if (boundary_sample < snapshot_start_sample) {
+        ESP_LOGW(
+            TAG,
+            "wake boundary fell before transport snapshot boundary=%llu start=%llu",
+            (unsigned long long)boundary_sample,
+            (unsigned long long)snapshot_start_sample
+        );
+        boundary_sample = snapshot_start_sample;
+    } else if (boundary_sample > snapshot_end_sample) {
+        boundary_sample = snapshot_end_sample;
+    }
+    result.boundary_sample = static_cast<size_t>(boundary_sample - snapshot_start_sample);
+    result.score = score;
+    return result;
+}
+
 BoundaryPreroll estimate_wake_boundary()
 {
     BoundaryPreroll result = {};
@@ -2438,8 +2566,19 @@ BoundaryPreroll estimate_wake_boundary()
         return result;
     }
 
+    int64_t estimate_started_us = esp_timer_get_time();
+    int replay_ms = std::max(
+        kBoundaryMinimumReplayMs,
+        s_boundary_search_before_ms + s_boundary_search_after_ms + kBoundaryReplayWarmupMs
+    );
+    replay_ms = std::min(replay_ms, static_cast<int>((kCaptureBufferSamples * 1000) / kAudioSampleRate));
     size_t captured_samples = 0;
-    int16_t *captured = snapshot_capture_audio_tail(kCaptureBufferSamples, &captured_samples);
+    uint64_t audio_end_sample = 0;
+    int16_t *captured = snapshot_capture_audio_tail(
+        static_cast<size_t>((static_cast<int64_t>(replay_ms) * kAudioSampleRate) / 1000),
+        &captured_samples,
+        &audio_end_sample
+    );
     if (!captured || captured_samples == 0) {
         s_boundary_failures++;
         return result;
@@ -2458,7 +2597,6 @@ BoundaryPreroll estimate_wake_boundary()
     size_t score_count = 0;
     float best_score = 0.0f;
     uint64_t best_sample = 0;
-    uint64_t audio_end_sample = s_audio_samples_seen;
     uint64_t audio_start_sample = audio_end_sample >= captured_samples
         ? audio_end_sample - captured_samples
         : 0;
@@ -2523,57 +2661,43 @@ BoundaryPreroll estimate_wake_boundary()
         return result;
     }
     int64_t adjusted = static_cast<int64_t>(best_sample)
-        + static_cast<int64_t>(s_boundary_endpoint_offset_ms * 16);
+        + static_cast<int64_t>(s_boundary_endpoint_offset_ms * 16)
+        - static_cast<int64_t>(kBoundaryCommandGuardMs * 16);
     if (adjusted < static_cast<int64_t>(audio_start_sample)) {
         adjusted = static_cast<int64_t>(audio_start_sample);
     } else if (adjusted > static_cast<int64_t>(audio_end_sample)) {
         adjusted = static_cast<int64_t>(audio_end_sample);
     }
     uint64_t boundary_sample = static_cast<uint64_t>(adjusted);
-    uint64_t transport_start = audio_end_sample > kBoundaryTransportPrerollSamples
-        ? audio_end_sample - kBoundaryTransportPrerollSamples
-        : audio_start_sample;
-    if (transport_start < audio_start_sample) {
-        transport_start = audio_start_sample;
-    }
-    if (boundary_sample < transport_start) {
-        transport_start = boundary_sample;
-    }
-    size_t source_offset = static_cast<size_t>(transport_start - audio_start_sample);
-    result.sample_count = captured_samples - source_offset;
-    result.boundary_sample = static_cast<size_t>(boundary_sample - transport_start);
-    result.pcm = static_cast<int16_t *>(heap_caps_malloc(
-        result.sample_count * sizeof(int16_t),
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-    ));
-    if (!result.pcm) {
-        heap_caps_free(captured);
-        result = {};
+    heap_caps_free(captured);
+    result = snapshot_boundary_transport(boundary_sample, best_score);
+    if (!result.pcm || result.sample_count == 0) {
         s_boundary_failures++;
         return result;
     }
-    std::memcpy(result.pcm, captured + source_offset, result.sample_count * sizeof(int16_t));
-    heap_caps_free(captured);
-    result.score = best_score;
     s_last_boundary_score = best_score;
     s_last_boundary_offset_ms = static_cast<int32_t>(
         (static_cast<int64_t>(boundary_sample) - static_cast<int64_t>(s_last_detection_sample)) / 16
     );
     s_boundary_estimates++;
+    int64_t elapsed_ms = (esp_timer_get_time() - estimate_started_us) / 1000;
     ESP_LOGI(
         TAG,
-        "wake boundary estimated score=%.3f offset_ms=%ld preroll=%u boundary=%u",
+        "wake boundary estimated score=%.3f offset_ms=%ld guard_ms=%d preroll=%u boundary=%u post_boundary=%u replay_ms=%d elapsed_ms=%ld",
         (double)best_score,
         (long)s_last_boundary_offset_ms,
+        kBoundaryCommandGuardMs,
         (unsigned)result.sample_count,
-        (unsigned)result.boundary_sample
+        (unsigned)result.boundary_sample,
+        (unsigned)(result.sample_count - result.boundary_sample),
+        replay_ms,
+        (long)elapsed_ms
     );
     return result;
 }
 
-void start_wake_session(const char *wake_word)
+void play_wake_acknowledgement()
 {
-    BoundaryPreroll boundary = estimate_wake_boundary();
     const tater_live_settings_t *settings = tater_live_settings_get();
     bool barge_in = settings && settings->barge_in_enabled && tater_playback_is_playing();
     if (barge_in) {
@@ -2617,6 +2741,31 @@ void start_wake_session(const char *wake_word)
         ESP_LOGW(TAG, "wake sound asset not found: %s", settings->wake_sound);
         tater_protocol_send_log("warn", "wake sound asset not found");
     }
+}
+
+void boundary_session_task(void *arg)
+{
+    BoundarySessionRequest *request = static_cast<BoundarySessionRequest *>(arg);
+    char wake_word[32] = "";
+    bool task_with_caps = false;
+    if (request) {
+        std::snprintf(wake_word, sizeof(wake_word), "%s", request->wake_word);
+        task_with_caps = request->task_with_caps;
+        heap_caps_free(request);
+    }
+
+    play_wake_acknowledgement();
+    BoundaryPreroll boundary = estimate_wake_boundary();
+    if (!boundary.pcm || boundary.sample_count == 0 || boundary.boundary_sample > boundary.sample_count) {
+        if (boundary.pcm) {
+            heap_caps_free(boundary.pcm);
+        }
+        ESP_LOGW(TAG, "wake boundary unavailable; preserving buffered speech with detection marker");
+        uint64_t fallback_boundary = s_last_detection_sample > (uint64_t)(kBoundaryCommandGuardMs * 16)
+            ? s_last_detection_sample - (uint64_t)(kBoundaryCommandGuardMs * 16)
+            : 0;
+        boundary = snapshot_boundary_transport(fallback_boundary, 0.0f);
+    }
     if (boundary.pcm && boundary.sample_count > 0 && boundary.boundary_sample <= boundary.sample_count) {
         tater_protocol_start_voice_with_wake_boundary(
             wake_word,
@@ -2629,7 +2778,83 @@ void start_wake_session(const char *wake_word)
     } else {
         tater_protocol_start_voice(wake_word, "micro_wake_word");
     }
-    tater_wake_engine_reset();
+
+    s_boundary_reset_pending.store(true, std::memory_order_release);
+    s_boundary_session_running.store(false, std::memory_order_release);
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    if (task_with_caps) {
+        vTaskDeleteWithCaps(nullptr);
+        return;
+    }
+#else
+    (void)task_with_caps;
+#endif
+    vTaskDelete(nullptr);
+}
+
+BaseType_t create_boundary_session_task(BoundarySessionRequest *request)
+{
+    if (!request) {
+        return pdFAIL;
+    }
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    request->task_with_caps = true;
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+        boundary_session_task,
+        "wake_boundary",
+        8192,
+        request,
+        5,
+        nullptr,
+        0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (created == pdPASS) {
+        return created;
+    }
+#endif
+    request->task_with_caps = false;
+    return xTaskCreatePinnedToCore(
+        boundary_session_task,
+        "wake_boundary",
+        8192,
+        request,
+        5,
+        nullptr,
+        0
+    );
+}
+
+void start_wake_session(const char *wake_word)
+{
+    bool expected = false;
+    if (!s_boundary_session_running.compare_exchange_strong(
+            expected,
+            true,
+            std::memory_order_acq_rel,
+            std::memory_order_acquire)) {
+        ESP_LOGW(TAG, "wake session already starting; duplicate ignored");
+        return;
+    }
+
+    BoundarySessionRequest *request = static_cast<BoundarySessionRequest *>(
+        heap_caps_calloc(1, sizeof(BoundarySessionRequest), MALLOC_CAP_8BIT)
+    );
+    if (!request) {
+        ESP_LOGW(TAG, "wake boundary request alloc failed; using legacy start");
+        tater_protocol_start_voice(wake_word, "micro_wake_word");
+        s_boundary_reset_pending.store(true, std::memory_order_release);
+        s_boundary_session_running.store(false, std::memory_order_release);
+        return;
+    }
+    std::snprintf(request->wake_word, sizeof(request->wake_word), "%s", wake_word ? wake_word : "");
+    if (create_boundary_session_task(request) != pdPASS) {
+        heap_caps_free(request);
+        ESP_LOGW(TAG, "wake boundary task create failed; using legacy start");
+        tater_protocol_start_voice(wake_word, "micro_wake_word");
+        s_boundary_reset_pending.store(true, std::memory_order_release);
+        s_boundary_session_running.store(false, std::memory_order_release);
+    }
 }
 
 void complete_wake_verification(
@@ -3673,6 +3898,9 @@ void process_audio_frontend(const int16_t *pcm, size_t sample_count)
         int8_t feature[kFeatureSize] = {0};
         if (convert_frontend_output(frontend_output, feature)) {
             handle_feature_frame(feature);
+            if (s_boundary_session_running.load(std::memory_order_acquire)) {
+                break;
+            }
         }
     }
 }
@@ -3692,6 +3920,13 @@ extern "C" esp_err_t tater_wake_engine_init(void)
     }
     if (!s_wake_verifier_lock) {
         s_wake_verifier_lock = xSemaphoreCreateMutex();
+    }
+    if (!s_capture_ring_lock) {
+        s_capture_ring_lock = xSemaphoreCreateMutex();
+    }
+    if (!s_capture_ring_lock) {
+        set_last_error("capture ring lock alloc failed");
+        return ESP_ERR_NO_MEM;
     }
 
     FrontendFillConfigWithDefaults(&s_frontend_config);
@@ -3846,6 +4081,12 @@ extern "C" void tater_wake_engine_note_audio(const int16_t *pcm, size_t sample_c
 
 extern "C" void tater_wake_engine_process(const int16_t *pcm, size_t sample_count)
 {
+    if (s_boundary_session_running.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (s_boundary_reset_pending.exchange(false, std::memory_order_acq_rel)) {
+        tater_wake_engine_reset();
+    }
     const tater_live_settings_t *settings = tater_live_settings_get();
     bool ota_running = tater_ota_is_running();
     if (s_timer_stop_mode_requested) {
@@ -3986,8 +4227,9 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     cJSON_AddNumberToObject(capture, "upload_failures", s_capture_upload_failures);
     cJSON_AddStringToObject(capture, "last_event_type", s_capture_last_event_type);
     cJSON_AddStringToObject(capture, "last_error", s_capture_last_error);
-    cJSON_AddNumberToObject(capture, "buffer_samples", (double)s_capture_ring_count);
-    cJSON_AddNumberToObject(capture, "buffer_seconds", (double)s_capture_ring_count / (double)kAudioSampleRate);
+    size_t capture_samples = capture_audio_sample_count();
+    cJSON_AddNumberToObject(capture, "buffer_samples", (double)capture_samples);
+    cJSON_AddNumberToObject(capture, "buffer_seconds", (double)capture_samples / (double)kAudioSampleRate);
     cJSON_AddBoolToObject(capture, "buffer_psram", s_capture_ring_psram);
     cJSON_AddBoolToObject(capture, "close_miss_pending", s_pending_close_miss.active);
     cJSON_AddItemToObject(wake, "capture", capture);
