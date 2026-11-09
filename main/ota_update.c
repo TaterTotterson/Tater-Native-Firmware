@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include "ota_family.h"
 #include "tater_protocol.h"
+#include "wake_engine.h"
 
 static const char *TAG = "tater_ota";
 static volatile bool s_running;
@@ -25,6 +26,7 @@ static volatile bool s_running;
 #define OTA_HTTP_BUFFER_SIZE 1024
 #define OTA_READ_BUFFER_SIZE 1024
 #define OTA_TASK_STACK_SIZE 6144
+#define OTA_BACKGROUND_DOWNLOAD_DRAIN_TIMEOUT_MS 25000
 
 static const char s_ota_family_marker[] =
     TATER_OTA_FAMILY_MARKER_PREFIX TATER_OTA_FAMILY TATER_OTA_FAMILY_MARKER_SUFFIX;
@@ -115,6 +117,7 @@ static void ota_run(ota_task_context_t *context)
     char *url = context->url;
     tater_ota_failure_callback_t failure_callback = context->failure_callback;
     esp_ota_handle_t ota = 0;
+    esp_http_client_handle_t client = NULL;
     const esp_partition_t *partition = NULL;
     uint8_t *buf = NULL;
     int last_progress = -1;
@@ -128,6 +131,22 @@ static void ota_run(ota_task_context_t *context)
     tater_protocol_send_log("info", "OTA download starting");
     ota_log_heap("starting");
 
+    if (tater_wake_engine_background_download_active()) {
+        stage = "background download drain";
+        tater_protocol_send_log("info", "OTA waiting for wake downloads to stop");
+        int waited_ms = 0;
+        while (tater_wake_engine_background_download_active()
+                && waited_ms < OTA_BACKGROUND_DOWNLOAD_DRAIN_TIMEOUT_MS) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            waited_ms += 20;
+        }
+        if (tater_wake_engine_background_download_active()) {
+            err = ESP_ERR_TIMEOUT;
+            goto done;
+        }
+        tater_protocol_send_log("info", "OTA wake downloads stopped");
+    }
+
     esp_http_client_config_t cfg = {
         .url = url,
         .timeout_ms = 20000,
@@ -137,7 +156,7 @@ static void ota_run(ota_task_context_t *context)
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
     }
     stage = "http client init";
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    client = esp_http_client_init(&cfg);
     if (!client) {
         err = ESP_ERR_NO_MEM;
         goto done;

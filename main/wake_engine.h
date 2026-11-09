@@ -13,6 +13,7 @@ extern "C" {
 
 esp_err_t tater_wake_engine_init(void);
 bool tater_wake_engine_ready(void);
+bool tater_wake_engine_background_download_active(void);
 void tater_wake_engine_reset(void);
 void tater_wake_engine_note_audio(const int16_t *pcm, size_t sample_count);
 void tater_wake_engine_process(const int16_t *pcm, size_t sample_count);

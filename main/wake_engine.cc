@@ -36,6 +36,7 @@ extern "C" {
 #include "tater_protocol.h"
 #include "wake_detection_policy.h"
 #include "wake_model_assets.h"
+#include "wake_model_policy.h"
 #include "wake_sound_assets.h"
 }
 
@@ -100,6 +101,7 @@ struct WakeDownloadRequest {
 
 struct WakeSoundDownloadRequest {
     char url[192];
+    bool task_with_caps;
 };
 
 struct CaptureUploadRequest {
@@ -208,6 +210,7 @@ DownloadedWakeModel s_pending_custom_model = {};
 char s_requested_custom_url[256] = "";
 char s_downloading_custom_url[256] = "";
 bool s_custom_download_running = false;
+bool s_custom_download_deferred_for_ota = false;
 uint32_t s_custom_download_failures = 0;
 uint32_t s_custom_cache_hits = 0;
 uint32_t s_custom_cache_writes = 0;
@@ -219,6 +222,8 @@ int64_t s_custom_download_retry_after_us = 0;
 char s_requested_wake_sound_url[192] = "";
 char s_downloading_wake_sound_url[192] = "";
 bool s_wake_sound_download_running = false;
+bool s_wake_sound_download_deferred_for_ota = false;
+int64_t s_wake_sound_download_retry_after_us = 0;
 uint32_t s_wake_sound_cache_hits = 0;
 uint32_t s_wake_sound_cache_writes = 0;
 uint32_t s_wake_sound_cache_failures = 0;
@@ -597,13 +602,20 @@ bool ends_with(const char *value, const char *suffix)
 uint8_t *download_alloc(size_t size)
 {
     uint8_t *data = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!data) {
+    if (!data && tater_download_internal_fallback_allowed(size)) {
         data = static_cast<uint8_t *>(heap_caps_malloc(size, MALLOC_CAP_8BIT));
     }
     return data;
 }
 
-bool http_download_to_memory(const char *url, size_t max_bytes, bool null_terminate, uint8_t **out_data, size_t *out_size)
+bool http_download_to_memory(
+    const char *url,
+    size_t max_bytes,
+    bool null_terminate,
+    uint8_t **out_data,
+    size_t *out_size,
+    bool *deferred_for_ota
+)
 {
     if (out_data) {
         *out_data = nullptr;
@@ -611,15 +623,17 @@ bool http_download_to_memory(const char *url, size_t max_bytes, bool null_termin
     if (out_size) {
         *out_size = 0;
     }
+    if (deferred_for_ota) {
+        *deferred_for_ota = false;
+    }
     if (!url || !url[0] || !out_data || !out_size || max_bytes == 0) {
         return false;
     }
-
-    size_t capacity = max_bytes + (null_terminate ? 1 : 0);
-    uint8_t *buffer = download_alloc(capacity);
-    if (!buffer) {
-        set_last_errorf("wake download alloc failed size=%u", (unsigned)capacity);
-        ESP_LOGE(TAG, "wake download alloc failed url=%s size=%u", url, (unsigned)capacity);
+    if (!tater_background_download_allowed(tater_ota_is_running())) {
+        if (deferred_for_ota) {
+            *deferred_for_ota = true;
+        }
+        set_last_error("background download deferred during OTA");
         return false;
     }
 
@@ -633,7 +647,6 @@ bool http_download_to_memory(const char *url, size_t max_bytes, bool null_termin
     cfg.disable_auto_redirect = false;
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
-        heap_caps_free(buffer);
         set_last_error("wake download client init failed");
         return false;
     }
@@ -642,23 +655,54 @@ bool http_download_to_memory(const char *url, size_t max_bytes, bool null_termin
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "wake download open failed url=%s err=%s", url, esp_err_to_name(err));
         esp_http_client_cleanup(client);
-        heap_caps_free(buffer);
         set_last_errorf("wake download open failed: %s", esp_err_to_name(err));
         return false;
     }
 
     int64_t content_len = esp_http_client_fetch_headers(client);
-    if (content_len > 0 && (uint64_t)content_len > max_bytes) {
+    size_t capacity = tater_download_allocation_size(content_len, max_bytes, null_terminate);
+    if (capacity == 0) {
         ESP_LOGE(TAG, "wake download too large url=%s bytes=%lld max=%u", url, (long long)content_len, (unsigned)max_bytes);
         esp_http_client_cleanup(client);
-        heap_caps_free(buffer);
         set_last_error("wake download too large");
         return false;
     }
 
+    uint8_t *buffer = download_alloc(capacity);
+    if (!buffer) {
+        set_last_errorf("wake download alloc failed size=%u", (unsigned)capacity);
+        ESP_LOGE(
+            TAG,
+            "wake download alloc failed url=%s size=%u psram=%u internal=%u largest_internal=%u",
+            url,
+            (unsigned)capacity,
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+        );
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    const bool known_length = content_len > 0;
+    const size_t payload_capacity = known_length ? (size_t)content_len : max_bytes;
+
     size_t used = 0;
-    while (used < max_bytes) {
-        int got = esp_http_client_read(client, reinterpret_cast<char *>(buffer + used), max_bytes - used);
+    while (used < payload_capacity) {
+        if (!tater_background_download_allowed(tater_ota_is_running())) {
+            if (deferred_for_ota) {
+                *deferred_for_ota = true;
+            }
+            set_last_error("background download deferred during OTA");
+            esp_http_client_cleanup(client);
+            heap_caps_free(buffer);
+            return false;
+        }
+        int got = esp_http_client_read(
+            client,
+            reinterpret_cast<char *>(buffer + used),
+            payload_capacity - used
+        );
         if (got < 0) {
             ESP_LOGE(TAG, "wake download read failed url=%s", url);
             esp_http_client_cleanup(client);
@@ -679,7 +723,19 @@ bool http_download_to_memory(const char *url, size_t max_bytes, bool null_termin
         ESP_LOGE(TAG, "wake download empty url=%s", url);
         return false;
     }
-    if (used >= max_bytes) {
+    if (known_length && used != (size_t)content_len) {
+        heap_caps_free(buffer);
+        set_last_error("wake download truncated");
+        ESP_LOGE(
+            TAG,
+            "wake download truncated url=%s bytes=%u expected=%lld",
+            url,
+            (unsigned)used,
+            (long long)content_len
+        );
+        return false;
+    }
+    if (!known_length && used >= max_bytes) {
         heap_caps_free(buffer);
         set_last_error("wake download exceeded limit");
         ESP_LOGE(TAG, "wake download exceeded limit url=%s max=%u", url, (unsigned)max_bytes);
@@ -1640,15 +1696,9 @@ bool load_cached_custom_wake_model(const char *url)
     return true;
 }
 
-bool cached_wake_sound_load(const char *url, uint8_t **out_data, size_t *out_size)
+bool cached_wake_sound_matches(const char *url)
 {
-    if (out_data) {
-        *out_data = nullptr;
-    }
-    if (out_size) {
-        *out_size = 0;
-    }
-    if (!url || !url[0] || !out_data || !out_size || !tater_cache_ready()) {
+    if (!url || !url[0] || !tater_cache_ready()) {
         return false;
     }
 
@@ -1666,7 +1716,18 @@ bool cached_wake_sound_load(const char *url, uint8_t **out_data, size_t *out_siz
     const cJSON *source_url = cJSON_GetObjectItem(meta, "source_url");
     bool matches = cJSON_IsString(source_url) && source_url->valuestring && std::strcmp(source_url->valuestring, url) == 0;
     cJSON_Delete(meta);
-    if (!matches) {
+    return matches;
+}
+
+bool cached_wake_sound_load(const char *url, uint8_t **out_data, size_t *out_size)
+{
+    if (out_data) {
+        *out_data = nullptr;
+    }
+    if (out_size) {
+        *out_size = 0;
+    }
+    if (!url || !url[0] || !out_data || !out_size || !cached_wake_sound_matches(url)) {
         return false;
     }
 
@@ -1719,38 +1780,112 @@ void wake_sound_download_task(void *arg)
 {
     WakeSoundDownloadRequest *request = static_cast<WakeSoundDownloadRequest *>(arg);
     char requested_url[sizeof(request->url)] = {0};
+    bool task_with_caps = false;
     if (request) {
         std::snprintf(requested_url, sizeof(requested_url), "%s", request->url);
+        task_with_caps = request->task_with_caps;
         heap_caps_free(request);
     }
 
     uint8_t *data = nullptr;
     size_t size = 0;
+    bool deferred_for_ota = false;
     ESP_LOGI(TAG, "wake sound custom download starting url=%s", requested_url);
     tater_protocol_send_log("info", "wake sound download starting");
-    bool ok = http_download_to_memory(requested_url, kWakeDownloadedSoundMaxBytes, false, &data, &size);
+    bool ok = http_download_to_memory(
+        requested_url,
+        kWakeDownloadedSoundMaxBytes,
+        false,
+        &data,
+        &size,
+        &deferred_for_ota
+    );
+    if (ok && !tater_background_download_allowed(tater_ota_is_running())) {
+        ok = false;
+        deferred_for_ota = true;
+    }
     if (ok) {
         ok = cached_wake_sound_save(requested_url, data, size);
     }
     if (ok) {
+        if (s_wake_sound_lock) {
+            xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+        }
+        s_wake_sound_download_deferred_for_ota = false;
+        s_wake_sound_download_retry_after_us = 0;
+        if (s_wake_sound_lock) {
+            xSemaphoreGive(s_wake_sound_lock);
+        }
         tater_protocol_send_log("info", "wake sound cached");
+    } else if (deferred_for_ota) {
+        if (s_wake_sound_lock) {
+            xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+        }
+        s_wake_sound_download_deferred_for_ota = true;
+        s_wake_sound_download_retry_after_us = 0;
+        if (s_wake_sound_lock) {
+            xSemaphoreGive(s_wake_sound_lock);
+        }
+        tater_protocol_send_log("info", "wake sound download deferred during OTA");
+        ESP_LOGI(TAG, "wake sound download deferred during OTA url=%s", requested_url);
     } else {
         s_wake_sound_download_failures++;
         if (s_wake_sound_lock) {
             xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
         }
         s_requested_wake_sound_url[0] = '\0';
+        s_wake_sound_download_retry_after_us = esp_timer_get_time() + kWakeDownloadRetryDelayUs;
         if (s_wake_sound_lock) {
             xSemaphoreGive(s_wake_sound_lock);
         }
-        tater_protocol_send_log("warn", "wake sound download failed");
-        ESP_LOGW(TAG, "wake sound custom download failed url=%s", requested_url);
+        char message[192];
+        std::snprintf(
+            message,
+            sizeof(message),
+            "wake sound download failed psram=%u internal=%u largest_internal=%u",
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+        );
+        tater_protocol_send_log("warn", message);
+        ESP_LOGW(TAG, "%s url=%s", message, requested_url);
     }
     if (data) {
         heap_caps_free(data);
     }
     set_wake_sound_download_running(false, "");
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    if (task_with_caps) {
+        vTaskDeleteWithCaps(NULL);
+        return;
+    }
+#else
+    (void)task_with_caps;
+#endif
     vTaskDelete(NULL);
+}
+
+BaseType_t create_wake_sound_download_task(WakeSoundDownloadRequest *request)
+{
+    if (!request) {
+        return pdFAIL;
+    }
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    request->task_with_caps = true;
+    return xTaskCreatePinnedToCoreWithCaps(
+        wake_sound_download_task,
+        "wake_sound_dl",
+        6144,
+        request,
+        3,
+        NULL,
+        1,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+#else
+    request->task_with_caps = false;
+    return pdFAIL;
+#endif
 }
 
 bool start_wake_sound_download(const char *url)
@@ -1758,19 +1893,56 @@ bool start_wake_sound_download(const char *url)
     if (!url || !url[0]) {
         return false;
     }
+    if (!tater_background_download_allowed(tater_ota_is_running())) {
+        if (s_wake_sound_lock) {
+            xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+        }
+        bool first_defer = !s_wake_sound_download_deferred_for_ota;
+        std::snprintf(s_requested_wake_sound_url, sizeof(s_requested_wake_sound_url), "%s", url);
+        s_wake_sound_download_deferred_for_ota = true;
+        s_wake_sound_download_retry_after_us = 0;
+        if (s_wake_sound_lock) {
+            xSemaphoreGive(s_wake_sound_lock);
+        }
+        if (first_defer) {
+            ESP_LOGI(TAG, "wake sound download queued until OTA completes url=%s", url);
+            tater_protocol_send_log("info", "wake sound download queued until OTA completes");
+        }
+        return true;
+    }
+    bool model_download_running = false;
+    if (s_custom_model_lock) {
+        xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
+    }
+    model_download_running = s_custom_download_running;
+    if (s_custom_model_lock) {
+        xSemaphoreGive(s_custom_model_lock);
+    }
+    if (model_download_running) {
+        return false;
+    }
     if (s_wake_sound_lock) {
         xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
     }
     bool already_running = s_wake_sound_download_running;
     bool already_requested = std::strcmp(s_requested_wake_sound_url, url) == 0;
-    if (already_running || already_requested) {
+    int64_t retry_after_us = s_wake_sound_download_retry_after_us;
+    if (already_running) {
         if (s_wake_sound_lock) {
             xSemaphoreGive(s_wake_sound_lock);
         }
-        return true;
+        return already_requested;
+    }
+    if (esp_timer_get_time() < retry_after_us) {
+        if (s_wake_sound_lock) {
+            xSemaphoreGive(s_wake_sound_lock);
+        }
+        return false;
     }
     std::snprintf(s_requested_wake_sound_url, sizeof(s_requested_wake_sound_url), "%s", url);
     s_wake_sound_download_running = true;
+    s_wake_sound_download_deferred_for_ota = false;
+    s_wake_sound_download_retry_after_us = 0;
     std::snprintf(s_downloading_wake_sound_url, sizeof(s_downloading_wake_sound_url), "%s", url);
     if (s_wake_sound_lock) {
         xSemaphoreGive(s_wake_sound_lock);
@@ -1779,16 +1951,76 @@ bool start_wake_sound_download(const char *url)
     WakeSoundDownloadRequest *request = static_cast<WakeSoundDownloadRequest *>(heap_caps_calloc(1, sizeof(WakeSoundDownloadRequest), MALLOC_CAP_8BIT));
     if (!request) {
         set_wake_sound_download_running(false, "");
+        if (s_wake_sound_lock) {
+            xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+        }
+        s_requested_wake_sound_url[0] = '\0';
+        s_wake_sound_download_retry_after_us = esp_timer_get_time() + kWakeDownloadRetryDelayUs;
+        if (s_wake_sound_lock) {
+            xSemaphoreGive(s_wake_sound_lock);
+        }
         return false;
     }
     std::snprintf(request->url, sizeof(request->url), "%s", url);
-    BaseType_t created = xTaskCreatePinnedToCore(wake_sound_download_task, "wake_sound_dl", 6144, request, 3, NULL, 1);
+    BaseType_t created = create_wake_sound_download_task(request);
     if (created != pdPASS) {
         heap_caps_free(request);
         set_wake_sound_download_running(false, "");
+        if (s_wake_sound_lock) {
+            xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+        }
+        s_requested_wake_sound_url[0] = '\0';
+        s_wake_sound_download_retry_after_us = esp_timer_get_time() + kWakeDownloadRetryDelayUs;
+        if (s_wake_sound_lock) {
+            xSemaphoreGive(s_wake_sound_lock);
+        }
+        ESP_LOGW(
+            TAG,
+            "wake sound PSRAM task create failed psram=%u internal=%u largest_internal=%u",
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+        );
         return false;
     }
     return true;
+}
+
+void ensure_selected_wake_sound(const tater_live_settings_t *settings)
+{
+    if (!settings || !settings->wake_sound_enabled || !settings->wake_sound_url[0]) {
+        return;
+    }
+
+    char requested_url[sizeof(s_requested_wake_sound_url)] = {0};
+    if (s_wake_sound_lock) {
+        xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+    }
+    std::snprintf(requested_url, sizeof(requested_url), "%s", s_requested_wake_sound_url);
+    if (s_wake_sound_lock) {
+        xSemaphoreGive(s_wake_sound_lock);
+    }
+    if (std::strcmp(requested_url, settings->wake_sound_url) == 0) {
+        if (!s_wake_sound_download_deferred_for_ota || tater_ota_is_running()) {
+            return;
+        }
+    } else if (cached_wake_sound_matches(settings->wake_sound_url)) {
+        if (s_wake_sound_lock) {
+            xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+        }
+        std::snprintf(
+            s_requested_wake_sound_url,
+            sizeof(s_requested_wake_sound_url),
+            "%s",
+            settings->wake_sound_url
+        );
+        s_wake_sound_download_deferred_for_ota = false;
+        if (s_wake_sound_lock) {
+            xSemaphoreGive(s_wake_sound_lock);
+        }
+        return;
+    }
+    (void)start_wake_sound_download(settings->wake_sound_url);
 }
 
 esp_err_t play_custom_wake_sound(const char *url)
@@ -2086,7 +2318,7 @@ BaseType_t create_wake_download_task(WakeDownloadRequest *request)
 
 #if (configSUPPORT_STATIC_ALLOCATION == 1)
     request->task_with_caps = true;
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+    return xTaskCreatePinnedToCoreWithCaps(
         wake_model_download_task,
         "wake_model_dl",
         8192,
@@ -2096,20 +2328,10 @@ BaseType_t create_wake_download_task(WakeDownloadRequest *request)
         0,
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
     );
-    if (created == pdPASS) {
-        return created;
-    }
-    ESP_LOGW(
-        TAG,
-        "wake download PSRAM task create failed psram=%u internal=%u largest=%u; retrying internal",
-        (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-        (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
-    );
-#endif
-
+#else
     request->task_with_caps = false;
-    return xTaskCreatePinnedToCore(wake_model_download_task, "wake_model_dl", 8192, request, 4, NULL, 0);
+    return pdFAIL;
+#endif
 }
 
 void queue_pending_custom_model(DownloadedWakeModel *model)
@@ -2149,6 +2371,7 @@ void wake_model_download_task(void *arg)
     size_t json_size = 0;
     size_t downloaded_size = 0;
     bool ok = false;
+    bool deferred_for_ota = false;
 
     ESP_LOGI(TAG, "wake model custom download starting url=%s", requested_url);
     tater_protocol_send_log("info", "wake model download starting");
@@ -2158,7 +2381,14 @@ void wake_model_download_task(void *arg)
         std::snprintf(model.label, sizeof(model.label), "%s", model.id);
         std::snprintf(model.source_url, sizeof(model.source_url), "%s", requested_url);
         std::snprintf(model.model_url, sizeof(model.model_url), "%s", requested_url);
-    } else if (http_download_to_memory(requested_url, kWakeManifestMaxBytes, true, &json_data, &json_size)) {
+    } else if (http_download_to_memory(
+        requested_url,
+        kWakeManifestMaxBytes,
+        true,
+        &json_data,
+        &json_size,
+        &deferred_for_ota
+    )) {
         ok = parse_wake_model_json(requested_url, json_data, json_size, &model);
         heap_caps_free(json_data);
         json_data = nullptr;
@@ -2169,8 +2399,20 @@ void wake_model_download_task(void *arg)
         goto done;
     }
 
-    ok = http_download_to_memory(model.model_url, kWakeDownloadedModelMaxBytes, false, &model.data, &model.size);
+    ok = http_download_to_memory(
+        model.model_url,
+        kWakeDownloadedModelMaxBytes,
+        false,
+        &model.data,
+        &model.size,
+        &deferred_for_ota
+    );
     if (!ok) {
+        goto done;
+    }
+    if (!tater_background_download_allowed(tater_ota_is_running())) {
+        deferred_for_ota = true;
+        ok = false;
         goto done;
     }
     if (!tflite::GetModel(model.data) || tflite::GetModel(model.data)->version() != TFLITE_SCHEMA_VERSION) {
@@ -2183,15 +2425,31 @@ void wake_model_download_task(void *arg)
     (void)save_cached_custom_wake_model(&model);
     queue_pending_custom_model(&model);
     set_last_error("wake model download ready");
+    s_custom_download_deferred_for_ota = false;
     ESP_LOGI(TAG, "wake model custom download ready id=%s source=%s model=%s bytes=%u", model.id, model.source_url, model.model_url, (unsigned)downloaded_size);
     tater_protocol_send_log("info", "wake model download ready");
 
 done:
-    if (!ok) {
+    if (deferred_for_ota) {
+        s_custom_download_deferred_for_ota = true;
+        set_custom_download_retry_after(0, request_generation);
+        set_last_error("wake model download deferred during OTA");
+        ESP_LOGI(TAG, "wake model download deferred during OTA url=%s", requested_url);
+        tater_protocol_send_log("info", "wake model download deferred during OTA");
+    } else if (!ok) {
         s_custom_download_failures++;
         set_custom_download_retry_after(esp_timer_get_time() + kWakeDownloadRetryDelayUs, request_generation);
-        ESP_LOGE(TAG, "wake model custom download failed url=%s", requested_url);
-        tater_protocol_send_log("error", "wake model download failed");
+        char message[192];
+        std::snprintf(
+            message,
+            sizeof(message),
+            "wake model download failed psram=%u internal=%u largest_internal=%u",
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+            (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
+        );
+        ESP_LOGE(TAG, "%s url=%s", message, requested_url);
+        tater_protocol_send_log("error", message);
     } else {
         set_custom_download_retry_after(0, request_generation);
     }
@@ -2250,6 +2508,27 @@ bool start_custom_wake_model_download(const char *url, bool force_download)
     }
     if (!force_download && s_ready && std::strcmp(s_active_model_source, "url") == 0 && std::strcmp(s_active_model_url, url) == 0) {
         return true;
+    }
+    if (!tater_background_download_allowed(tater_ota_is_running())) {
+        if (!s_custom_download_deferred_for_ota) {
+            ESP_LOGI(TAG, "wake model download queued until OTA completes url=%s", url);
+            tater_protocol_send_log("info", "wake model download queued until OTA completes");
+        }
+        s_custom_download_deferred_for_ota = true;
+        set_last_error("wake model download queued until OTA completes");
+        return false;
+    }
+    s_custom_download_deferred_for_ota = false;
+    bool wake_sound_download_running = false;
+    if (s_wake_sound_lock) {
+        xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+    }
+    wake_sound_download_running = s_wake_sound_download_running;
+    if (s_wake_sound_lock) {
+        xSemaphoreGive(s_wake_sound_lock);
+    }
+    if (wake_sound_download_running) {
+        return false;
     }
     uint32_t request_generation = 0;
     if (s_custom_model_lock) {
@@ -2322,7 +2601,7 @@ bool start_custom_wake_model_download(const char *url, bool force_download)
         set_last_error("custom wake download task failed");
         ESP_LOGE(
             TAG,
-            "wake download task create failed psram=%u internal=%u largest=%u; retrying in 5 seconds",
+            "wake download PSRAM task create failed psram=%u internal=%u largest=%u; retrying in 5 seconds",
             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)
@@ -2881,6 +3160,27 @@ extern "C" bool tater_wake_engine_ready(void)
     return s_ready;
 }
 
+extern "C" bool tater_wake_engine_background_download_active(void)
+{
+    bool model_running = false;
+    bool sound_running = false;
+    if (s_custom_model_lock) {
+        xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
+    }
+    model_running = s_custom_download_running;
+    if (s_custom_model_lock) {
+        xSemaphoreGive(s_custom_model_lock);
+    }
+    if (s_wake_sound_lock) {
+        xSemaphoreTake(s_wake_sound_lock, portMAX_DELAY);
+    }
+    sound_running = s_wake_sound_download_running;
+    if (s_wake_sound_lock) {
+        xSemaphoreGive(s_wake_sound_lock);
+    }
+    return model_running || sound_running;
+}
+
 extern "C" void tater_wake_engine_reset(void)
 {
     reset_buffers();
@@ -2949,14 +3249,16 @@ extern "C" void tater_wake_engine_note_audio(const int16_t *pcm, size_t sample_c
 extern "C" void tater_wake_engine_process(const int16_t *pcm, size_t sample_count)
 {
     const tater_live_settings_t *settings = tater_live_settings_get();
+    bool ota_running = tater_ota_is_running();
     if (s_timer_stop_mode_requested) {
         (void)enter_timer_stop_mode();
     } else if (s_timer_stop_mode_active) {
         (void)restore_saved_wake_model();
     }
-    if (!s_timer_stop_mode_requested && !s_timer_stop_mode_active && settings) {
+    if (!ota_running && !s_timer_stop_mode_requested && !s_timer_stop_mode_active && settings) {
         consume_pending_custom_model(settings);
         (void)ensure_selected_wake_model(settings);
+        ensure_selected_wake_sound(settings);
     }
     bool enabled = runtime_enabled();
     if (!enabled) {
@@ -2998,6 +3300,7 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     }
     cJSON_AddBoolToObject(wake, "custom_download_running", custom_download_running);
     cJSON_AddStringToObject(wake, "custom_download_url", custom_download_url);
+    cJSON_AddBoolToObject(wake, "custom_download_deferred_for_ota", s_custom_download_deferred_for_ota);
     cJSON_AddNumberToObject(wake, "custom_download_failures", s_custom_download_failures);
     cJSON_AddNumberToObject(wake, "custom_cache_hits", s_custom_cache_hits);
     cJSON_AddNumberToObject(wake, "custom_cache_writes", s_custom_cache_writes);
@@ -3014,6 +3317,7 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     }
     cJSON_AddBoolToObject(wake, "wake_sound_download_running", wake_sound_download_running);
     cJSON_AddStringToObject(wake, "wake_sound_download_url", wake_sound_download_url);
+    cJSON_AddBoolToObject(wake, "wake_sound_download_deferred_for_ota", s_wake_sound_download_deferred_for_ota);
     cJSON_AddNumberToObject(wake, "wake_sound_cache_hits", s_wake_sound_cache_hits);
     cJSON_AddNumberToObject(wake, "wake_sound_cache_writes", s_wake_sound_cache_writes);
     cJSON_AddNumberToObject(wake, "wake_sound_cache_failures", s_wake_sound_cache_failures);

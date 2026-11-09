@@ -1,3 +1,5 @@
-- Releases Satellite1 native firmware `0.5.5`; the other native satellite families remain on `0.5.4`.
-- Reassembles inbound WebSocket text payloads that exceed the Satellite1 transport buffer before parsing them as JSON.
-- Allows large live-settings packets, including catalog wake-model URLs, to apply reliably after saving settings or reconnecting to Tater.
+- Releases native firmware `0.5.6` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Defers wake-model and custom wake-sound downloads during OTA, then retries them automatically after an interrupted or failed update.
+- Stops active background downloads before OTA begins so firmware writes do not compete for HTTP, flash, or internal-memory resources.
+- Keeps large download buffers and worker stacks in PSRAM, sizes known-length buffers to the actual payload, and reports PSRAM and internal-memory diagnostics on failures.
+- Brings the large WebSocket settings-packet support introduced for Satellite1 in `0.5.5` to every native satellite family.
