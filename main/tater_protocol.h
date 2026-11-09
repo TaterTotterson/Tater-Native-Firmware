@@ -48,6 +48,13 @@ const char *tater_protocol_server_url(void);
 const char *tater_protocol_token(void);
 void tater_protocol_send_status(const char *state);
 void tater_protocol_start_voice(const char *wake_word, const char *source);
+void tater_protocol_start_voice_with_wake_boundary(
+    const char *wake_word,
+    const char *source,
+    const int16_t *preroll,
+    size_t preroll_samples,
+    size_t boundary_sample
+);
 void tater_protocol_start_voice_with_conversation(const char *wake_word, const char *source, const char *conversation_id);
 void tater_protocol_stop_voice(bool abort);
 void tater_protocol_send_audio(const int16_t *pcm, size_t sample_count);

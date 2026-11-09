@@ -14,6 +14,7 @@ idf_component_register(
         "boards/voice_pe/button_voice_pe.c"
         "boards/voice_pe/led_ring_voice_pe.c"
         "cache_storage.c"
+        "compressed_asset.c"
         "display_clock.c"
         "doa_activity_gate.c"
         "doa_direction_memory.c"
@@ -54,6 +55,7 @@ idf_component_register(
         esp-tflite-micro
         json
         led_strip
+        mbedtls
         mdns
         nvs_flash
         pthread
@@ -63,19 +65,20 @@ idf_component_register(
 )
 
 target_add_binary_data(${COMPONENT_LIB} "models/hey_tater.tflite" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "models/hey_tater.boundary.tflite" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "models/stop.tflite" BINARY)
 if(TATER_NATIVE_BUILD_ENV STREQUAL "voicepe")
-    target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin.zlib" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "sat1")
-    target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin.zlib" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "respeaker_xvf3800")
-    target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin.zlib" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "s3_box")
     message(STATUS "Building S3 Box target without XMOS firmware payload")
 else()
-    target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin" BINARY)
-    target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin" BINARY)
-    target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin.zlib" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin.zlib" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin.zlib" BINARY)
 endif()
 if(TATER_NATIVE_BUILD_ENV STREQUAL "respeaker_xvf3800")
     # The 8 MB ReSpeaker has the same 3 MB OTA slot as the other targets plus

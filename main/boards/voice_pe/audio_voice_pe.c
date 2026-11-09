@@ -9,6 +9,7 @@
 #include "audio_aec.h"
 #include "audio_render_clock.h"
 #include "board.h"
+#include "compressed_asset.h"
 #include "doa_activity_gate.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
@@ -55,8 +56,8 @@ static tater_audio_xmos_status_t s_xmos_status = {
     .update_state = TATER_XMOS_UPDATE_IDLE,
 };
 
-extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_start[] asm("_binary_ffva_v1_3_2_vod_upgrade_bin_start");
-extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_end[] asm("_binary_ffva_v1_3_2_vod_upgrade_bin_end");
+extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_start[] asm("_binary_ffva_v1_3_2_vod_upgrade_bin_zlib_start");
+extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_end[] asm("_binary_ffva_v1_3_2_vod_upgrade_bin_zlib_end");
 
 #define TATER_I2C_PORT I2C_NUM_0
 #define AIC3204_I2C_ADDR 0x18
@@ -83,6 +84,7 @@ extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_end[] asm("_binary_ffva
 #define XMOS_TARGET_VERSION_MAJOR 1
 #define XMOS_TARGET_VERSION_MINOR 3
 #define XMOS_TARGET_VERSION_PATCH 2
+#define XMOS_TARGET_IMAGE_SIZE 282624U
 #define VOICE_PE_XMOS_PROCESSED_CHANNEL 0
 #define CONFIGURATION_SERVICER_RESID_CHANNEL_0_PIPELINE_STAGE 0x30
 #define CONFIGURATION_SERVICER_RESID_CHANNEL_1_PIPELINE_STAGE 0x40
@@ -146,9 +148,9 @@ static esp_err_t xmos_reset_boot(void)
     return ESP_OK;
 }
 
-static size_t xmos_target_firmware_size(void)
+static size_t xmos_target_compressed_size(void)
 {
-    return (size_t)(_binary_ffva_v1_3_2_vod_upgrade_bin_end - _binary_ffva_v1_3_2_vod_upgrade_bin_start);
+    return (size_t)(_binary_ffva_v1_3_2_vod_upgrade_bin_zlib_end - _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_start);
 }
 
 static esp_err_t speaker_session_take(void)
@@ -602,10 +604,8 @@ static esp_err_t xmos_wait_for_target_version(void)
     return ESP_ERR_TIMEOUT;
 }
 
-static esp_err_t xmos_dfu_update_to_target(void)
+static esp_err_t xmos_dfu_update_image(const uint8_t *image, size_t image_size)
 {
-    const uint8_t *image = _binary_ffva_v1_3_2_vod_upgrade_bin_start;
-    size_t image_size = xmos_target_firmware_size();
     ESP_RETURN_ON_FALSE(image && image_size > 0, ESP_ERR_INVALID_SIZE, TAG, "xmos target firmware image missing");
 
     xmos_status_set_update_flags(true, true);
@@ -651,6 +651,23 @@ static esp_err_t xmos_dfu_update_to_target(void)
     xmos_status_set_update_state(TATER_XMOS_UPDATE_COMPLETE);
     ESP_LOGI(TAG, "xmos firmware update complete");
     return ESP_OK;
+}
+
+static esp_err_t xmos_dfu_update_to_target(void)
+{
+    uint8_t *image = NULL;
+    esp_err_t err = tater_compressed_asset_expand(
+        _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_start,
+        xmos_target_compressed_size(),
+        XMOS_TARGET_IMAGE_SIZE,
+        &image
+    );
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = xmos_dfu_update_image(image, XMOS_TARGET_IMAGE_SIZE);
+    heap_caps_free(image);
+    return err;
 }
 
 static esp_err_t xmos_ensure_target_firmware(void)

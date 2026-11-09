@@ -11,3 +11,4 @@ typedef struct {
 } tater_wake_model_asset_t;
 
 const tater_wake_model_asset_t *tater_wake_model_asset_lookup(const char *id);
+const tater_wake_model_asset_t *tater_wake_boundary_asset(void);

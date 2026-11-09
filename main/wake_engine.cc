@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <new>
+#include <strings.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
@@ -18,6 +19,7 @@
 #include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "mbedtls/sha256.h"
 #include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/micro/micro_allocator.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
@@ -53,6 +55,12 @@ constexpr int kMaxSlidingWindow = 10;
 constexpr int64_t kCloseMissConfirmationDelayUs = 900000;
 constexpr int64_t kCloseMissUploadCooldownUs = 10000000;
 constexpr size_t kWakeArenaSize = 192 * 1024;
+constexpr size_t kBoundaryArenaSize = 64 * 1024;
+constexpr float kBoundaryDefaultThreshold = 0.82f;
+constexpr int kBoundaryDefaultSearchBeforeMs = 700;
+constexpr int kBoundaryDefaultSearchAfterMs = 120;
+constexpr int kBoundaryDefaultEndpointOffsetMs = 0;
+constexpr size_t kBoundaryTransportPrerollSamples = kAudioSampleRate;
 constexpr int kWakeResourceVariableCount = 8;
 constexpr float kFilterbankLowerBandLimit = 125.0f;
 constexpr float kFilterbankUpperBandLimit = 7500.0f;
@@ -79,6 +87,7 @@ constexpr int kCaptureUploadTimeoutMs = 15000;
 constexpr char kCaptureUploadPath[] = "/api/upload_captured_audio_raw";
 constexpr char kWakeModelCacheMetaPath[] = "/spiffs/wake_model.json";
 constexpr char kWakeModelCacheDataPath[] = "/spiffs/wake_model.tflite";
+constexpr char kWakeBoundaryCacheDataPath[] = "/spiffs/wake_boundary.tflite";
 constexpr char kWakeSoundCacheMetaPath[] = "/spiffs/wake_sound.json";
 constexpr char kWakeSoundCacheDataPath[] = "/spiffs/wake_sound.wav";
 
@@ -87,10 +96,22 @@ using WakeOpResolver = tflite::MicroMutableOpResolver<14>;
 struct DownloadedWakeModel {
     uint8_t *data;
     size_t size;
+    uint8_t *boundary_data;
+    size_t boundary_size;
     char id[32];
     char label[48];
     char source_url[256];
     char model_url[256];
+    char model_sha256[65];
+    size_t expected_model_size;
+    char boundary_model_url[256];
+    char boundary_sha256[65];
+    size_t expected_boundary_size;
+    bool has_boundary;
+    float boundary_threshold;
+    int boundary_search_before_ms;
+    int boundary_search_after_ms;
+    int boundary_endpoint_offset_ms;
 };
 
 struct WakeDownloadRequest {
@@ -167,6 +188,31 @@ bool s_wake_interpreter_constructed = false;
 FrontendConfig s_frontend_config;
 FrontendState s_frontend_state;
 bool s_frontend_ready = false;
+
+uint8_t *s_boundary_arena = nullptr;
+const tflite::Model *s_boundary_model = nullptr;
+tflite::MicroInterpreter *s_boundary_interpreter = nullptr;
+tflite::MicroAllocator *s_boundary_allocator = nullptr;
+tflite::MicroResourceVariables *s_boundary_resources = nullptr;
+alignas(tflite::MicroInterpreter) uint8_t s_boundary_interpreter_storage[sizeof(tflite::MicroInterpreter)];
+bool s_boundary_interpreter_constructed = false;
+FrontendConfig s_boundary_frontend_config;
+FrontendState s_boundary_frontend_state;
+bool s_boundary_frontend_ready = false;
+bool s_boundary_ready = false;
+bool s_boundary_arena_psram = false;
+size_t s_boundary_arena_used = 0;
+float s_boundary_threshold = kBoundaryDefaultThreshold;
+int s_boundary_search_before_ms = kBoundaryDefaultSearchBeforeMs;
+int s_boundary_search_after_ms = kBoundaryDefaultSearchAfterMs;
+int s_boundary_endpoint_offset_ms = kBoundaryDefaultEndpointOffsetMs;
+uint8_t *s_active_custom_boundary_data = nullptr;
+size_t s_active_custom_boundary_size = 0;
+uint64_t s_last_detection_sample = 0;
+float s_last_boundary_score = 0.0f;
+int32_t s_last_boundary_offset_ms = 0;
+uint32_t s_boundary_estimates = 0;
+uint32_t s_boundary_failures = 0;
 
 int8_t s_feature_history[kWakeInputElements];
 float s_score_window[kMaxSlidingWindow];
@@ -372,6 +418,127 @@ void destroy_wake_interpreter()
     s_wake_arena_used = 0;
 }
 
+void destroy_boundary_interpreter()
+{
+    if (s_boundary_interpreter_constructed && s_boundary_interpreter) {
+        s_boundary_interpreter->~MicroInterpreter();
+    }
+    s_boundary_interpreter = nullptr;
+    s_boundary_interpreter_constructed = false;
+    s_boundary_allocator = nullptr;
+    s_boundary_resources = nullptr;
+    s_boundary_arena_used = 0;
+    s_boundary_ready = false;
+}
+
+bool ensure_boundary_arena()
+{
+    if (s_boundary_arena) {
+        return true;
+    }
+    s_boundary_arena = static_cast<uint8_t *>(
+        heap_caps_malloc(kBoundaryArenaSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+    );
+    s_boundary_arena_psram = s_boundary_arena != nullptr;
+    if (!s_boundary_arena) {
+        ESP_LOGW(TAG, "wake boundary arena unavailable bytes=%u", (unsigned)kBoundaryArenaSize);
+        return false;
+    }
+    return true;
+}
+
+bool configure_boundary_model_bytes(
+    const uint8_t *data,
+    size_t model_size,
+    float threshold,
+    int search_before_ms,
+    int search_after_ms,
+    int endpoint_offset_ms
+)
+{
+    if (!data || model_size == 0 || !ensure_wake_ops() || !ensure_boundary_arena()) {
+        return false;
+    }
+    const tflite::Model *model = tflite::GetModel(data);
+    if (!model || model->version() != TFLITE_SCHEMA_VERSION) {
+        ESP_LOGW(TAG, "wake boundary schema mismatch bytes=%u", (unsigned)model_size);
+        return false;
+    }
+
+    destroy_boundary_interpreter();
+    std::memset(s_boundary_arena, 0, kBoundaryArenaSize);
+    s_boundary_model = model;
+    s_boundary_allocator = tflite::MicroAllocator::Create(s_boundary_arena, kBoundaryArenaSize);
+    if (!s_boundary_allocator) {
+        return false;
+    }
+    s_boundary_resources = tflite::MicroResourceVariables::Create(
+        s_boundary_allocator,
+        kWakeResourceVariableCount
+    );
+    if (!s_boundary_resources) {
+        destroy_boundary_interpreter();
+        return false;
+    }
+    s_boundary_interpreter = new (s_boundary_interpreter_storage) tflite::MicroInterpreter(
+        s_boundary_model,
+        s_wake_resolver,
+        s_boundary_allocator,
+        s_boundary_resources
+    );
+    s_boundary_interpreter_constructed = true;
+    if (s_boundary_interpreter->AllocateTensors() != kTfLiteOk) {
+        ESP_LOGW(TAG, "wake boundary AllocateTensors failed arena=%u model=%u", (unsigned)kBoundaryArenaSize, (unsigned)model_size);
+        destroy_boundary_interpreter();
+        return false;
+    }
+    TfLiteTensor *input = s_boundary_interpreter->input(0);
+    TfLiteTensor *output = s_boundary_interpreter->output(0);
+    if (!input || !output || input->type != kTfLiteInt8 || output->type != kTfLiteUInt8
+            || input->bytes < kWakeInputElements || output->bytes < 1) {
+        ESP_LOGW(TAG, "wake boundary tensor contract mismatch");
+        destroy_boundary_interpreter();
+        return false;
+    }
+    s_boundary_threshold = threshold > 0.0f && threshold <= 1.0f
+        ? threshold
+        : kBoundaryDefaultThreshold;
+    s_boundary_search_before_ms = search_before_ms > 0 ? search_before_ms : kBoundaryDefaultSearchBeforeMs;
+    s_boundary_search_after_ms = search_after_ms >= 0 ? search_after_ms : kBoundaryDefaultSearchAfterMs;
+    s_boundary_endpoint_offset_ms = endpoint_offset_ms;
+    s_boundary_arena_used = s_boundary_interpreter->arena_used_bytes();
+    s_boundary_ready = true;
+    ESP_LOGI(
+        TAG,
+        "wake boundary ready model=%u arena=%u used=%u threshold=%.3f search=-%d/+%d offset=%d psram=%d",
+        (unsigned)model_size,
+        (unsigned)kBoundaryArenaSize,
+        (unsigned)s_boundary_arena_used,
+        (double)s_boundary_threshold,
+        s_boundary_search_before_ms,
+        s_boundary_search_after_ms,
+        s_boundary_endpoint_offset_ms,
+        s_boundary_arena_psram
+    );
+    return true;
+}
+
+bool configure_embedded_boundary()
+{
+    const tater_wake_model_asset_t *asset = tater_wake_boundary_asset();
+    if (!asset || !asset->data || !asset->end || asset->end <= asset->data) {
+        return false;
+    }
+    return configure_boundary_model_bytes(
+        asset->data,
+        static_cast<size_t>(asset->end - asset->data),
+        kBoundaryDefaultThreshold,
+        kBoundaryDefaultSearchBeforeMs,
+        kBoundaryDefaultSearchAfterMs,
+        kBoundaryDefaultEndpointOffsetMs
+    );
+}
+
 bool configure_wake_model_bytes(
     const char *id,
     const char *label,
@@ -476,13 +643,74 @@ bool configure_wake_model(const tater_wake_model_asset_t *asset)
         ESP_LOGE(TAG, "wake model asset missing");
         return false;
     }
-    return configure_wake_model_bytes(
+    bool configured = configure_wake_model_bytes(
         asset->id,
         asset->label,
         asset->data,
         static_cast<size_t>(asset->end - asset->data),
         nullptr
     );
+    if (configured && std::strcmp(asset->id, "hey_tater") == 0) {
+        uint8_t *old_boundary = s_active_custom_boundary_data;
+        s_active_custom_boundary_data = nullptr;
+        s_active_custom_boundary_size = 0;
+        (void)configure_embedded_boundary();
+        if (old_boundary) {
+            heap_caps_free(old_boundary);
+        }
+    }
+    return configured;
+}
+
+bool configure_downloaded_wake_model(DownloadedWakeModel *model)
+{
+    if (!model || !model->data || model->size == 0) {
+        return false;
+    }
+    if (!configure_wake_model_bytes(
+            model->id,
+            model->label,
+            model->data,
+            model->size,
+            model->source_url)) {
+        return false;
+    }
+    model->data = nullptr;
+    model->size = 0;
+
+    uint8_t *old_boundary = s_active_custom_boundary_data;
+    s_active_custom_boundary_data = nullptr;
+    s_active_custom_boundary_size = 0;
+    destroy_boundary_interpreter();
+    bool boundary_ok = false;
+    if (model->has_boundary && model->boundary_data && model->boundary_size > 0) {
+        boundary_ok = configure_boundary_model_bytes(
+            model->boundary_data,
+            model->boundary_size,
+            model->boundary_threshold,
+            model->boundary_search_before_ms,
+            model->boundary_search_after_ms,
+            model->boundary_endpoint_offset_ms
+        );
+        if (boundary_ok) {
+            s_active_custom_boundary_data = model->boundary_data;
+            s_active_custom_boundary_size = model->boundary_size;
+            model->boundary_data = nullptr;
+            model->boundary_size = 0;
+        }
+    }
+    if (old_boundary) {
+        heap_caps_free(old_boundary);
+    }
+    if (model->boundary_data) {
+        heap_caps_free(model->boundary_data);
+        model->boundary_data = nullptr;
+        model->boundary_size = 0;
+    }
+    if (model->has_boundary && !boundary_ok) {
+        ESP_LOGW(TAG, "custom wake model active without requested boundary model");
+    }
+    return true;
 }
 
 bool restore_saved_wake_model()
@@ -1027,7 +1255,7 @@ bool capture_settings_enabled(const tater_live_settings_t *settings)
 void append_capture_audio(const int16_t *pcm, size_t sample_count)
 {
     const tater_live_settings_t *settings = tater_live_settings_get();
-    if (!capture_settings_enabled(settings) || !pcm || sample_count == 0 || !ensure_capture_ring()) {
+    if ((!s_boundary_ready && !capture_settings_enabled(settings)) || !pcm || sample_count == 0 || !ensure_capture_ring()) {
         return;
     }
     for (size_t i = 0; i < sample_count; i++) {
@@ -1555,6 +1783,26 @@ bool resolve_model_url(const char *json_url, const char *model_ref, char *out, s
     return true;
 }
 
+bool sha256_matches(const uint8_t *data, size_t size, const char *expected_hex)
+{
+    if (!expected_hex || !expected_hex[0]) {
+        return true;
+    }
+    if (!data || std::strlen(expected_hex) != 64) {
+        return false;
+    }
+    uint8_t digest[32];
+    if (mbedtls_sha256(data, size, digest, 0) != 0) {
+        return false;
+    }
+    char actual[65];
+    for (size_t i = 0; i < sizeof(digest); i++) {
+        std::snprintf(actual + (i * 2), 3, "%02x", digest[i]);
+    }
+    actual[64] = '\0';
+    return strcasecmp(actual, expected_hex) == 0;
+}
+
 bool parse_wake_model_json(const char *json_url, const uint8_t *json_data, size_t json_size, DownloadedWakeModel *model)
 {
     if (!json_data || json_size == 0 || !model) {
@@ -1567,11 +1815,16 @@ bool parse_wake_model_json(const char *json_url, const uint8_t *json_data, size_
         return false;
     }
 
-    const cJSON *wake_word = cJSON_GetObjectItem(root, "wake_word");
-    const cJSON *label = cJSON_GetObjectItem(root, "label");
-    const cJSON *model_item = cJSON_GetObjectItem(root, "model");
+    const cJSON *schema_version = cJSON_GetObjectItem(root, "schema_version");
+    const cJSON *micro = cJSON_GetObjectItem(root, "micro_wake_word");
+    bool is_bundle = cJSON_IsNumber(schema_version)
+        && schema_version->valueint >= 4
+        && cJSON_IsObject(micro);
+    const cJSON *wake_word = cJSON_GetObjectItem(root, is_bundle ? "key" : "wake_word");
+    const cJSON *label = cJSON_GetObjectItem(is_bundle ? micro : root, "label");
+    const cJSON *model_item = cJSON_GetObjectItem(is_bundle ? micro : root, "model");
     if (!cJSON_IsString(model_item) || !model_item->valuestring || !model_item->valuestring[0]) {
-        model_item = cJSON_GetObjectItem(root, "model_url");
+        model_item = cJSON_GetObjectItem(is_bundle ? micro : root, "model_url");
     }
     if (!cJSON_IsString(model_item) || !model_item->valuestring || !model_item->valuestring[0]) {
         cJSON_Delete(root);
@@ -1594,6 +1847,82 @@ bool parse_wake_model_json(const char *json_url, const uint8_t *json_data, size_
     std::snprintf(model_ref, sizeof(model_ref), "%s", model_item->valuestring);
     bool resolved = resolve_model_url(json_url, model_ref, model->model_url, sizeof(model->model_url));
     std::snprintf(model->source_url, sizeof(model->source_url), "%s", json_url ? json_url : "");
+    if (is_bundle) {
+        const cJSON *model_size = cJSON_GetObjectItem(micro, "model_size_bytes");
+        const cJSON *model_sha = cJSON_GetObjectItem(micro, "model_sha256");
+        if (!cJSON_IsNumber(model_size) || model_size->valuedouble <= 0
+                || !cJSON_IsString(model_sha) || !model_sha->valuestring
+                || std::strlen(model_sha->valuestring) != 64) {
+            cJSON_Delete(root);
+            set_last_error("wake bundle mww integrity missing");
+            return false;
+        }
+        model->expected_model_size = static_cast<size_t>(model_size->valuedouble);
+        std::snprintf(model->model_sha256, sizeof(model->model_sha256), "%s", model_sha->valuestring);
+
+        const cJSON *boundary = cJSON_GetObjectItem(root, "wake_boundary");
+        if (cJSON_IsObject(boundary)) {
+            const cJSON *type = cJSON_GetObjectItem(boundary, "type");
+            const cJSON *boundary_model = cJSON_GetObjectItem(boundary, "model");
+            const cJSON *boundary_size = cJSON_GetObjectItem(boundary, "model_size_bytes");
+            const cJSON *boundary_sha = cJSON_GetObjectItem(boundary, "model_sha256");
+            const cJSON *format = cJSON_GetObjectItem(boundary, "model_format");
+            const cJSON *quantization = cJSON_GetObjectItem(boundary, "quantization");
+            const cJSON *sample_rate = cJSON_GetObjectItem(boundary, "sample_rate");
+            const cJSON *threshold = cJSON_GetObjectItem(boundary, "threshold");
+            const cJSON *tensor_arena_size = cJSON_GetObjectItem(boundary, "tensor_arena_size");
+            const cJSON *search_before = cJSON_GetObjectItem(boundary, "search_before_ms");
+            const cJSON *search_after = cJSON_GetObjectItem(boundary, "search_after_ms");
+            const cJSON *endpoint_offset = cJSON_GetObjectItem(boundary, "endpoint_offset_ms");
+            const cJSON *frontend = cJSON_GetObjectItem(boundary, "frontend");
+            const cJSON *frontend_name = cJSON_GetObjectItem(frontend, "name");
+            const cJSON *frontend_sample_rate = cJSON_GetObjectItem(frontend, "sample_rate");
+            const cJSON *feature_duration = cJSON_GetObjectItem(frontend, "feature_duration_ms");
+            const cJSON *feature_step = cJSON_GetObjectItem(frontend, "feature_step_ms");
+            const cJSON *feature_size = cJSON_GetObjectItem(frontend, "feature_size");
+            const cJSON *input_frames = cJSON_GetObjectItem(frontend, "input_feature_frames");
+            const cJSON *lower_band = cJSON_GetObjectItem(frontend, "lower_band_limit");
+            const cJSON *upper_band = cJSON_GetObjectItem(frontend, "upper_band_limit");
+            bool frontend_ok = cJSON_IsObject(frontend)
+                && cJSON_IsString(frontend_name) && std::strcmp(frontend_name->valuestring, "tflm_microfrontend") == 0
+                && cJSON_IsNumber(frontend_sample_rate) && frontend_sample_rate->valueint == kAudioSampleRate
+                && cJSON_IsNumber(feature_duration) && feature_duration->valueint == kFeatureDurationMs
+                && cJSON_IsNumber(feature_step) && feature_step->valueint == kFeatureStepMs
+                && cJSON_IsNumber(feature_size) && feature_size->valueint == kFeatureSize
+                && cJSON_IsNumber(input_frames) && input_frames->valueint == kWakeInputFeatureFrames
+                && cJSON_IsNumber(lower_band) && std::fabs(lower_band->valuedouble - kFilterbankLowerBandLimit) < 0.01
+                && cJSON_IsNumber(upper_band) && std::fabs(upper_band->valuedouble - kFilterbankUpperBandLimit) < 0.01;
+            bool contract_ok = cJSON_IsString(type) && std::strcmp(type->valuestring, "wake_word_end") == 0
+                && cJSON_IsString(boundary_model) && boundary_model->valuestring && boundary_model->valuestring[0]
+                && cJSON_IsNumber(boundary_size) && boundary_size->valuedouble > 0
+                && cJSON_IsString(boundary_sha) && boundary_sha->valuestring && std::strlen(boundary_sha->valuestring) == 64
+                && cJSON_IsString(format) && std::strcmp(format->valuestring, "tflite_stream_state_internal_quant") == 0
+                && cJSON_IsString(quantization) && std::strcmp(quantization->valuestring, "int8") == 0
+                && cJSON_IsNumber(sample_rate) && sample_rate->valueint == kAudioSampleRate
+                && cJSON_IsNumber(threshold) && threshold->valuedouble > 0.0 && threshold->valuedouble <= 1.0
+                && cJSON_IsNumber(tensor_arena_size) && tensor_arena_size->valueint > 0
+                && tensor_arena_size->valueint <= static_cast<int>(kBoundaryArenaSize)
+                && cJSON_IsNumber(search_before) && search_before->valueint > 0 && search_before->valueint <= 2000
+                && cJSON_IsNumber(search_after) && search_after->valueint >= 0 && search_after->valueint <= 500
+                && frontend_ok;
+            if (!contract_ok || !resolve_model_url(
+                    json_url,
+                    boundary_model->valuestring,
+                    model->boundary_model_url,
+                    sizeof(model->boundary_model_url))) {
+                cJSON_Delete(root);
+                set_last_error("wake bundle boundary contract invalid");
+                return false;
+            }
+            model->has_boundary = true;
+            model->expected_boundary_size = static_cast<size_t>(boundary_size->valuedouble);
+            std::snprintf(model->boundary_sha256, sizeof(model->boundary_sha256), "%s", boundary_sha->valuestring);
+            model->boundary_threshold = static_cast<float>(threshold->valuedouble);
+            model->boundary_search_before_ms = search_before->valueint;
+            model->boundary_search_after_ms = search_after->valueint;
+            model->boundary_endpoint_offset_ms = cJSON_IsNumber(endpoint_offset) ? endpoint_offset->valueint : 0;
+        }
+    }
     cJSON_Delete(root);
     if (!resolved) {
         set_last_error("wake model url resolve failed");
@@ -1617,8 +1946,18 @@ bool save_cached_custom_wake_model(const DownloadedWakeModel *model)
     cJSON_AddStringToObject(meta, "id", model->id);
     cJSON_AddStringToObject(meta, "label", model->label);
     cJSON_AddNumberToObject(meta, "size", (double)model->size);
+    cJSON_AddBoolToObject(meta, "has_boundary", model->has_boundary);
+    if (model->has_boundary) {
+        cJSON_AddStringToObject(meta, "boundary_model_url", model->boundary_model_url);
+        cJSON_AddNumberToObject(meta, "boundary_size", (double)model->boundary_size);
+        cJSON_AddNumberToObject(meta, "boundary_threshold", model->boundary_threshold);
+        cJSON_AddNumberToObject(meta, "boundary_search_before_ms", model->boundary_search_before_ms);
+        cJSON_AddNumberToObject(meta, "boundary_search_after_ms", model->boundary_search_after_ms);
+        cJSON_AddNumberToObject(meta, "boundary_endpoint_offset_ms", model->boundary_endpoint_offset_ms);
+    }
 
     std::remove(kWakeModelCacheDataPath);
+    std::remove(kWakeBoundaryCacheDataPath);
     std::remove(kWakeModelCacheMetaPath);
     bool data_ok = write_cache_file_atomic(kWakeModelCacheDataPath, model->data, model->size);
     if (!data_ok) {
@@ -1626,6 +1965,10 @@ bool save_cached_custom_wake_model(const DownloadedWakeModel *model)
         if (tater_cache_format() == ESP_OK) {
             data_ok = write_cache_file_atomic(kWakeModelCacheDataPath, model->data, model->size);
         }
+    }
+    if (data_ok && model->has_boundary) {
+        data_ok = model->boundary_data && model->boundary_size > 0
+            && write_cache_file_atomic(kWakeBoundaryCacheDataPath, model->boundary_data, model->boundary_size);
     }
     bool ok = data_ok && write_cache_json_atomic(kWakeModelCacheMetaPath, meta);
     cJSON_Delete(meta);
@@ -1661,6 +2004,7 @@ bool load_cached_custom_wake_model(const char *url)
     const cJSON *source_url = cJSON_GetObjectItem(meta, "source_url");
     const cJSON *id = cJSON_GetObjectItem(meta, "id");
     const cJSON *label = cJSON_GetObjectItem(meta, "label");
+    const cJSON *has_boundary = cJSON_GetObjectItem(meta, "has_boundary");
     if (!cJSON_IsString(source_url) || !source_url->valuestring || std::strcmp(source_url->valuestring, url) != 0) {
         cJSON_Delete(meta);
         return false;
@@ -1668,8 +2012,23 @@ bool load_cached_custom_wake_model(const char *url)
 
     char cached_id[32];
     char cached_label[48];
+    DownloadedWakeModel cached = {};
     std::snprintf(cached_id, sizeof(cached_id), "%s", cJSON_IsString(id) && id->valuestring && id->valuestring[0] ? id->valuestring : "custom_url");
     std::snprintf(cached_label, sizeof(cached_label), "%s", cJSON_IsString(label) && label->valuestring && label->valuestring[0] ? label->valuestring : cached_id);
+    std::snprintf(cached.id, sizeof(cached.id), "%s", cached_id);
+    std::snprintf(cached.label, sizeof(cached.label), "%s", cached_label);
+    std::snprintf(cached.source_url, sizeof(cached.source_url), "%s", url);
+    cached.has_boundary = cJSON_IsTrue(has_boundary);
+    if (cached.has_boundary) {
+        const cJSON *threshold = cJSON_GetObjectItem(meta, "boundary_threshold");
+        const cJSON *search_before = cJSON_GetObjectItem(meta, "boundary_search_before_ms");
+        const cJSON *search_after = cJSON_GetObjectItem(meta, "boundary_search_after_ms");
+        const cJSON *endpoint_offset = cJSON_GetObjectItem(meta, "boundary_endpoint_offset_ms");
+        cached.boundary_threshold = cJSON_IsNumber(threshold) ? (float)threshold->valuedouble : kBoundaryDefaultThreshold;
+        cached.boundary_search_before_ms = cJSON_IsNumber(search_before) ? search_before->valueint : kBoundaryDefaultSearchBeforeMs;
+        cached.boundary_search_after_ms = cJSON_IsNumber(search_after) ? search_after->valueint : kBoundaryDefaultSearchAfterMs;
+        cached.boundary_endpoint_offset_ms = cJSON_IsNumber(endpoint_offset) ? endpoint_offset->valueint : 0;
+    }
     cJSON_Delete(meta);
 
     uint8_t *model_data = nullptr;
@@ -1685,8 +2044,31 @@ bool load_cached_custom_wake_model(const char *url)
         return false;
     }
 
-    if (!configure_wake_model_bytes(cached_id, cached_label, model_data, model_size, url)) {
+    cached.data = model_data;
+    cached.size = model_size;
+    if (cached.has_boundary) {
+        if (!read_cache_file(
+                kWakeBoundaryCacheDataPath,
+                kWakeDownloadedModelMaxBytes,
+                false,
+                &cached.boundary_data,
+                &cached.boundary_size)
+                || !tflite::GetModel(cached.boundary_data)
+                || tflite::GetModel(cached.boundary_data)->version() != TFLITE_SCHEMA_VERSION) {
+            if (cached.boundary_data) {
+                heap_caps_free(cached.boundary_data);
+            }
+            heap_caps_free(cached.data);
+            s_custom_cache_failures++;
+            ESP_LOGW(TAG, "cached wake boundary invalid source=%s", url);
+            return false;
+        }
+    }
+    if (!configure_downloaded_wake_model(&cached)) {
         heap_caps_free(model_data);
+        if (cached.boundary_data) {
+            heap_caps_free(cached.boundary_data);
+        }
         s_custom_cache_failures++;
         return false;
     }
@@ -2042,8 +2424,156 @@ esp_err_t play_custom_wake_sound(const char *url)
     return ESP_ERR_NOT_FOUND;
 }
 
+struct BoundaryPreroll {
+    int16_t *pcm;
+    size_t sample_count;
+    size_t boundary_sample;
+    float score;
+};
+
+BoundaryPreroll estimate_wake_boundary()
+{
+    BoundaryPreroll result = {};
+    if (!s_boundary_ready || !s_boundary_interpreter || !s_boundary_frontend_ready || s_last_detection_sample == 0) {
+        return result;
+    }
+
+    size_t captured_samples = 0;
+    int16_t *captured = snapshot_capture_audio_tail(kCaptureBufferSamples, &captured_samples);
+    if (!captured || captured_samples == 0) {
+        s_boundary_failures++;
+        return result;
+    }
+
+    FrontendReset(&s_boundary_frontend_state);
+    if (s_boundary_interpreter->Reset() != kTfLiteOk) {
+        ESP_LOGW(TAG, "wake boundary interpreter reset failed");
+        heap_caps_free(captured);
+        s_boundary_failures++;
+        return result;
+    }
+
+    int8_t feature_history[kWakeInputElements] = {0};
+    size_t feature_frames = 0;
+    size_t score_count = 0;
+    float best_score = 0.0f;
+    uint64_t best_sample = 0;
+    uint64_t audio_end_sample = s_audio_samples_seen;
+    uint64_t audio_start_sample = audio_end_sample >= captured_samples
+        ? audio_end_sample - captured_samples
+        : 0;
+    uint64_t window_start = s_last_detection_sample > (uint64_t)(s_boundary_search_before_ms * 16)
+        ? s_last_detection_sample - (uint64_t)(s_boundary_search_before_ms * 16)
+        : 0;
+    uint64_t window_end = s_last_detection_sample + (uint64_t)(s_boundary_search_after_ms * 16);
+
+    size_t offset = 0;
+    while (offset < captured_samples) {
+        size_t processed_samples = 0;
+        FrontendOutput frontend_output = FrontendProcessSamples(
+            &s_boundary_frontend_state,
+            captured + offset,
+            captured_samples - offset,
+            &processed_samples
+        );
+        if (processed_samples == 0 && frontend_output.size == 0) {
+            break;
+        }
+        offset += processed_samples;
+        if (frontend_output.size == 0 || !frontend_output.values || frontend_output.size != kFeatureSize) {
+            continue;
+        }
+        size_t slot = feature_frames % kWakeInputFeatureFrames;
+        for (int i = 0; i < kFeatureSize; i++) {
+            int32_t value = ((frontend_output.values[i] * kFrontendValueScale) + (kFrontendValueDiv / 2)) / kFrontendValueDiv;
+            value += INT8_MIN;
+            value = std::min<int32_t>(std::max<int32_t>(value, INT8_MIN), INT8_MAX);
+            feature_history[(slot * kFeatureSize) + i] = static_cast<int8_t>(value);
+        }
+        feature_frames++;
+        if ((feature_frames % kWakeInputFeatureFrames) != 0) {
+            continue;
+        }
+
+        TfLiteTensor *input = s_boundary_interpreter->input(0);
+        TfLiteTensor *output = s_boundary_interpreter->output(0);
+        std::memcpy(input->data.int8, feature_history, kWakeInputElements);
+        if (s_boundary_interpreter->Invoke() != kTfLiteOk) {
+            ESP_LOGW(TAG, "wake boundary invoke failed");
+            heap_caps_free(captured);
+            s_boundary_failures++;
+            return result;
+        }
+        float score = static_cast<float>(output->data.uint8[0]) / 255.0f;
+        uint64_t score_sample = audio_start_sample
+            + (uint64_t)((kFeatureDurationMs + (kWakeInputFeatureFrames - 1) * kFeatureStepMs) * 16)
+            + (uint64_t)(score_count * kWakeInputFeatureFrames * kFeatureStepMs * 16);
+        score_count++;
+        if (score_sample >= window_start && score_sample <= window_end
+                && score >= s_boundary_threshold && score > best_score) {
+            best_score = score;
+            best_sample = score_sample;
+        }
+    }
+
+    if (best_sample == 0) {
+        ESP_LOGW(TAG, "wake boundary produced no threshold-valid endpoint");
+        heap_caps_free(captured);
+        s_boundary_failures++;
+        return result;
+    }
+    int64_t adjusted = static_cast<int64_t>(best_sample)
+        + static_cast<int64_t>(s_boundary_endpoint_offset_ms * 16);
+    if (adjusted < static_cast<int64_t>(audio_start_sample)) {
+        adjusted = static_cast<int64_t>(audio_start_sample);
+    } else if (adjusted > static_cast<int64_t>(audio_end_sample)) {
+        adjusted = static_cast<int64_t>(audio_end_sample);
+    }
+    uint64_t boundary_sample = static_cast<uint64_t>(adjusted);
+    uint64_t transport_start = audio_end_sample > kBoundaryTransportPrerollSamples
+        ? audio_end_sample - kBoundaryTransportPrerollSamples
+        : audio_start_sample;
+    if (transport_start < audio_start_sample) {
+        transport_start = audio_start_sample;
+    }
+    if (boundary_sample < transport_start) {
+        transport_start = boundary_sample;
+    }
+    size_t source_offset = static_cast<size_t>(transport_start - audio_start_sample);
+    result.sample_count = captured_samples - source_offset;
+    result.boundary_sample = static_cast<size_t>(boundary_sample - transport_start);
+    result.pcm = static_cast<int16_t *>(heap_caps_malloc(
+        result.sample_count * sizeof(int16_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    ));
+    if (!result.pcm) {
+        heap_caps_free(captured);
+        result = {};
+        s_boundary_failures++;
+        return result;
+    }
+    std::memcpy(result.pcm, captured + source_offset, result.sample_count * sizeof(int16_t));
+    heap_caps_free(captured);
+    result.score = best_score;
+    s_last_boundary_score = best_score;
+    s_last_boundary_offset_ms = static_cast<int32_t>(
+        (static_cast<int64_t>(boundary_sample) - static_cast<int64_t>(s_last_detection_sample)) / 16
+    );
+    s_boundary_estimates++;
+    ESP_LOGI(
+        TAG,
+        "wake boundary estimated score=%.3f offset_ms=%ld preroll=%u boundary=%u",
+        (double)best_score,
+        (long)s_last_boundary_offset_ms,
+        (unsigned)result.sample_count,
+        (unsigned)result.boundary_sample
+    );
+    return result;
+}
+
 void start_wake_session(const char *wake_word)
 {
+    BoundaryPreroll boundary = estimate_wake_boundary();
     const tater_live_settings_t *settings = tater_live_settings_get();
     bool barge_in = settings && settings->barge_in_enabled && tater_playback_is_playing();
     if (barge_in) {
@@ -2087,7 +2617,18 @@ void start_wake_session(const char *wake_word)
         ESP_LOGW(TAG, "wake sound asset not found: %s", settings->wake_sound);
         tater_protocol_send_log("warn", "wake sound asset not found");
     }
-    tater_protocol_start_voice(wake_word, "micro_wake_word");
+    if (boundary.pcm && boundary.sample_count > 0 && boundary.boundary_sample <= boundary.sample_count) {
+        tater_protocol_start_voice_with_wake_boundary(
+            wake_word,
+            "micro_wake_word",
+            boundary.pcm,
+            boundary.sample_count,
+            boundary.boundary_sample
+        );
+        heap_caps_free(boundary.pcm);
+    } else {
+        tater_protocol_start_voice(wake_word, "micro_wake_word");
+    }
     tater_wake_engine_reset();
 }
 
@@ -2345,9 +2886,14 @@ void queue_pending_custom_model(DownloadedWakeModel *model)
     if (s_pending_custom_model.data) {
         heap_caps_free(s_pending_custom_model.data);
     }
+    if (s_pending_custom_model.boundary_data) {
+        heap_caps_free(s_pending_custom_model.boundary_data);
+    }
     s_pending_custom_model = *model;
     model->data = nullptr;
     model->size = 0;
+    model->boundary_data = nullptr;
+    model->boundary_size = 0;
     if (s_custom_model_lock) {
         xSemaphoreGive(s_custom_model_lock);
     }
@@ -2421,7 +2967,36 @@ void wake_model_download_task(void *arg)
         ok = false;
         goto done;
     }
-    downloaded_size = model.size;
+    if ((model.expected_model_size > 0 && model.size != model.expected_model_size)
+            || !sha256_matches(model.data, model.size, model.model_sha256)) {
+        set_last_error("downloaded wake integrity mismatch");
+        ESP_LOGE(TAG, "downloaded wake model size or SHA-256 mismatch url=%s", model.model_url);
+        ok = false;
+        goto done;
+    }
+    if (model.has_boundary) {
+        ok = http_download_to_memory(
+            model.boundary_model_url,
+            kWakeDownloadedModelMaxBytes,
+            false,
+            &model.boundary_data,
+            &model.boundary_size,
+            &deferred_for_ota
+        );
+        if (!ok) {
+            goto done;
+        }
+        if (!tflite::GetModel(model.boundary_data)
+                || tflite::GetModel(model.boundary_data)->version() != TFLITE_SCHEMA_VERSION
+                || model.boundary_size != model.expected_boundary_size
+                || !sha256_matches(model.boundary_data, model.boundary_size, model.boundary_sha256)) {
+            set_last_error("downloaded wake boundary integrity mismatch");
+            ESP_LOGE(TAG, "downloaded wake boundary size, SHA-256, or schema mismatch url=%s", model.boundary_model_url);
+            ok = false;
+            goto done;
+        }
+    }
+    downloaded_size = model.size + model.boundary_size;
     (void)save_cached_custom_wake_model(&model);
     queue_pending_custom_model(&model);
     set_last_error("wake model download ready");
@@ -2459,6 +3034,9 @@ done:
     if (model.data) {
         heap_caps_free(model.data);
     }
+    if (model.boundary_data) {
+        heap_caps_free(model.boundary_data);
+    }
     set_custom_download_running(false, "", request_generation);
 #if (configSUPPORT_STATIC_ALLOCATION == 1)
     if (task_with_caps) {
@@ -2492,11 +3070,19 @@ void consume_pending_custom_model(const tater_live_settings_t *settings)
     if (!settings || !is_custom_wake_word(settings->wake_word) || std::strcmp(selected_url, pending.source_url) != 0) {
         ESP_LOGW(TAG, "discarding stale custom wake model url=%s selected=%s", pending.source_url, selected_url ? selected_url : "");
         heap_caps_free(pending.data);
+        if (pending.boundary_data) {
+            heap_caps_free(pending.boundary_data);
+        }
         return;
     }
 
-    if (!configure_wake_model_bytes(pending.id, pending.label, pending.data, pending.size, pending.source_url)) {
-        heap_caps_free(pending.data);
+    if (!configure_downloaded_wake_model(&pending)) {
+        if (pending.data) {
+            heap_caps_free(pending.data);
+        }
+        if (pending.boundary_data) {
+            heap_caps_free(pending.boundary_data);
+        }
     }
 }
 
@@ -3022,6 +3608,7 @@ void handle_feature_frame(const int8_t *feature)
     s_detection_count++;
     int64_t trigger_time_us = esp_timer_get_time();
     s_cooldown_until_us = trigger_time_us + ((int64_t)s_last_cooldown_ms * 1000);
+    s_last_detection_sample = s_audio_samples_seen;
     ESP_LOGI(
         TAG,
         "wake detected score=%.3f avg=%.3f peak=%.3f threshold=%.3f profile=%s active=%u/%u rise=%.3f",
@@ -3129,6 +3716,13 @@ extern "C" esp_err_t tater_wake_engine_init(void)
         return ESP_FAIL;
     }
     s_frontend_ready = true;
+    s_boundary_frontend_config = s_frontend_config;
+    if (!FrontendPopulateState(&s_boundary_frontend_config, &s_boundary_frontend_state, kAudioSampleRate)) {
+        ESP_LOGW(TAG, "wake boundary frontend populate failed");
+        s_boundary_frontend_ready = false;
+    } else {
+        s_boundary_frontend_ready = true;
+    }
     ESP_LOGI(
         TAG,
         "microfrontend ready sample_rate=%d window_ms=%d step_ms=%d channels=%d band=%.0f-%.0f",
@@ -3144,6 +3738,10 @@ extern "C" esp_err_t tater_wake_engine_init(void)
     if (!configure_wake_model(default_model)) {
         return ESP_FAIL;
     }
+    if (!s_boundary_ready) {
+        ESP_LOGW(TAG, "embedded wake boundary unavailable; wake detection will use legacy start");
+    }
+    (void)ensure_capture_ring();
     ESP_LOGI(
         TAG,
         "microWakeWord ready active_model=%s frontend=tflm_microfrontend wake_arena=%u wake_used=%u wake_psram=%d",
@@ -3330,6 +3928,16 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     cJSON_AddNumberToObject(wake, "preprocessor_arena_used", 0);
     cJSON_AddNumberToObject(wake, "wake_arena_used", (double)s_wake_arena_used);
     cJSON_AddBoolToObject(wake, "wake_arena_psram", s_wake_arena_psram);
+    cJSON *boundary = cJSON_CreateObject();
+    cJSON_AddBoolToObject(boundary, "ready", s_boundary_ready);
+    cJSON_AddNumberToObject(boundary, "threshold", s_boundary_threshold);
+    cJSON_AddNumberToObject(boundary, "arena_used", (double)s_boundary_arena_used);
+    cJSON_AddBoolToObject(boundary, "arena_psram", s_boundary_arena_psram);
+    cJSON_AddNumberToObject(boundary, "estimates", s_boundary_estimates);
+    cJSON_AddNumberToObject(boundary, "failures", s_boundary_failures);
+    cJSON_AddNumberToObject(boundary, "last_score", s_last_boundary_score);
+    cJSON_AddNumberToObject(boundary, "last_offset_ms", s_last_boundary_offset_ms);
+    cJSON_AddItemToObject(wake, "boundary", boundary);
     cJSON_AddNumberToObject(wake, "last_raw_score", s_last_raw_score);
     cJSON_AddNumberToObject(wake, "last_score", s_last_score);
     cJSON_AddNumberToObject(wake, "last_average", s_last_average);

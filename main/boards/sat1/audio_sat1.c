@@ -11,6 +11,7 @@
 #include "audio_aec.h"
 #include "audio_render_clock.h"
 #include "board.h"
+#include "compressed_asset.h"
 #include "driver/gpio.h"
 #include "driver/i2c.h"
 #include "driver/i2s_std.h"
@@ -34,8 +35,8 @@
 
 static const char *TAG = "tater_audio_sat1";
 
-extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_start[] asm("_binary_sat1_xmos_1_1_1_factory_bin_start");
-extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_end[] asm("_binary_sat1_xmos_1_1_1_factory_bin_end");
+extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_zlib_start[] asm("_binary_sat1_xmos_1_1_1_factory_bin_zlib_start");
+extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_zlib_end[] asm("_binary_sat1_xmos_1_1_1_factory_bin_zlib_end");
 
 #define TATER_I2C_PORT I2C_NUM_0
 #define SAT1_SPI_HOST SPI2_HOST
@@ -65,6 +66,7 @@ extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_end[] asm("_binary_sat1
 #define SAT1_XMOS_TARGET_PATCH 1
 #define SAT1_XMOS_TARGET_PRERELEASE 0
 #define SAT1_XMOS_TARGET_COUNTER 0
+#define SAT1_XMOS_TARGET_IMAGE_SIZE 241664U
 #define SAT1_XMOS_VERSION_READY_TIMEOUT_MS 8000
 #define SAT1_XMOS_VERSION_RETRY_DELAY_MS 250
 #define SAT1_XMOS_FLASH_PAGE_SIZE 256U
@@ -172,9 +174,9 @@ static int16_t read_i16_le(const uint8_t *payload)
     return (int16_t)((uint16_t)payload[0] | ((uint16_t)payload[1] << 8));
 }
 
-static size_t sat1_xmos_target_image_size(void)
+static size_t sat1_xmos_target_compressed_size(void)
 {
-    return (size_t)(_binary_sat1_xmos_1_1_1_factory_bin_end - _binary_sat1_xmos_1_1_1_factory_bin_start);
+    return (size_t)(_binary_sat1_xmos_1_1_1_factory_bin_zlib_end - _binary_sat1_xmos_1_1_1_factory_bin_zlib_start);
 }
 
 static esp_err_t speaker_session_take(void)
@@ -1251,10 +1253,8 @@ static void sat1_xmos_set_flash_progress(size_t done, size_t total, uint8_t *las
     }
 }
 
-static esp_err_t sat1_xmos_flash_target_image(void)
+static esp_err_t sat1_xmos_flash_image(const uint8_t *image, size_t image_size)
 {
-    const uint8_t *image = _binary_sat1_xmos_1_1_1_factory_bin_start;
-    const size_t image_size = sat1_xmos_target_image_size();
     ESP_RETURN_ON_FALSE(image && image_size > 0, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image missing");
     ESP_RETURN_ON_FALSE(image_size <= SAT1_XMOS_FLASH_TOTAL_SIZE, ESP_ERR_INVALID_SIZE, TAG, "sat1 xmos target image too large");
 
@@ -1383,6 +1383,23 @@ cleanup:
     xmos_status_set_update_state(TATER_XMOS_UPDATE_ERROR);
     ESP_LOGE(TAG, "sat1 xmos direct flash failed err=%s", esp_err_to_name(err));
     return err == ESP_OK ? ESP_FAIL : err;
+}
+
+static esp_err_t sat1_xmos_flash_target_image(void)
+{
+    uint8_t *image = NULL;
+    esp_err_t err = tater_compressed_asset_expand(
+        _binary_sat1_xmos_1_1_1_factory_bin_zlib_start,
+        sat1_xmos_target_compressed_size(),
+        SAT1_XMOS_TARGET_IMAGE_SIZE,
+        &image
+    );
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = sat1_xmos_flash_image(image, SAT1_XMOS_TARGET_IMAGE_SIZE);
+    heap_caps_free(image);
+    return err;
 }
 
 static esp_err_t sat1_xmos_ensure_target_firmware(void)

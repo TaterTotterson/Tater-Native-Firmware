@@ -10,6 +10,7 @@
 #include "audio_aec.h"
 #include "audio_render_clock.h"
 #include "board.h"
+#include "compressed_asset.h"
 #include "doa_activity_gate.h"
 #include "driver/i2c.h"
 #include "driver/i2s_std.h"
@@ -29,8 +30,8 @@
 
 static const char *TAG = "tater_audio_xvf3800";
 
-extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_start[] asm("_binary_xvf3800_i2s_1_0_7_bin_start");
-extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_end[] asm("_binary_xvf3800_i2s_1_0_7_bin_end");
+extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_zlib_start[] asm("_binary_xvf3800_i2s_1_0_7_bin_zlib_start");
+extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_zlib_end[] asm("_binary_xvf3800_i2s_1_0_7_bin_zlib_end");
 
 #define TATER_I2C_PORT I2C_NUM_0
 #define XVF3800_I2C_ADDR 0x2C
@@ -56,6 +57,7 @@ extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_end[] asm("_binary_xvf3800_i2
 #define XVF_TARGET_MAJOR 1
 #define XVF_TARGET_MINOR 0
 #define XVF_TARGET_PATCH 7
+#define XVF_TARGET_IMAGE_SIZE 888832U
 
 #define XVF_GPO_RESID 20
 #define XVF_GPO_READ_VALUES 0
@@ -119,9 +121,9 @@ static tater_audio_xmos_status_t s_xmos_status = {
     .update_state = TATER_XMOS_UPDATE_IDLE,
 };
 
-static size_t xvf_target_firmware_size(void)
+static size_t xvf_target_compressed_size(void)
 {
-    return (size_t)(_binary_xvf3800_i2s_1_0_7_bin_end - _binary_xvf3800_i2s_1_0_7_bin_start);
+    return (size_t)(_binary_xvf3800_i2s_1_0_7_bin_zlib_end - _binary_xvf3800_i2s_1_0_7_bin_zlib_start);
 }
 
 static uint32_t read_u24_le(const uint8_t *payload)
@@ -440,10 +442,8 @@ static esp_err_t xvf_dfu_reboot(void)
     return locked_i2c_write(request, sizeof(request));
 }
 
-static esp_err_t xvf_dfu_update_to_target(void)
+static esp_err_t xvf_dfu_update_image(const uint8_t *image, size_t image_size)
 {
-    const uint8_t *image = _binary_xvf3800_i2s_1_0_7_bin_start;
-    const size_t image_size = xvf_target_firmware_size();
     ESP_RETURN_ON_FALSE(image && image_size > 0, ESP_ERR_INVALID_SIZE, TAG, "xvf target image missing");
 
     xmos_status_set_update_flags(true, true);
@@ -497,6 +497,23 @@ static esp_err_t xvf_dfu_update_to_target(void)
     xmos_status_set_update_state(TATER_XMOS_UPDATE_COMPLETE);
     ESP_LOGI(TAG, "xvf3800 firmware update complete");
     return ESP_OK;
+}
+
+static esp_err_t xvf_dfu_update_to_target(void)
+{
+    uint8_t *image = NULL;
+    esp_err_t err = tater_compressed_asset_expand(
+        _binary_xvf3800_i2s_1_0_7_bin_zlib_start,
+        xvf_target_compressed_size(),
+        XVF_TARGET_IMAGE_SIZE,
+        &image
+    );
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = xvf_dfu_update_image(image, XVF_TARGET_IMAGE_SIZE);
+    heap_caps_free(image);
+    return err;
 }
 
 static esp_err_t xvf_ensure_target_firmware(void)

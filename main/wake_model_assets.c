@@ -4,6 +4,8 @@
 
 extern const uint8_t _binary_hey_tater_tflite_start[] asm("_binary_hey_tater_tflite_start");
 extern const uint8_t _binary_hey_tater_tflite_end[] asm("_binary_hey_tater_tflite_end");
+extern const uint8_t _binary_hey_tater_boundary_tflite_start[] asm("_binary_hey_tater_boundary_tflite_start");
+extern const uint8_t _binary_hey_tater_boundary_tflite_end[] asm("_binary_hey_tater_boundary_tflite_end");
 extern const uint8_t _binary_stop_tflite_start[] asm("_binary_stop_tflite_start");
 extern const uint8_t _binary_stop_tflite_end[] asm("_binary_stop_tflite_end");
 
@@ -13,6 +15,13 @@ extern const uint8_t _binary_stop_tflite_end[] asm("_binary_stop_tflite_end");
 static const tater_wake_model_asset_t s_assets[] = {
     WAKE_MODEL_ASSET("hey_tater", "Hey Tater", hey_tater),
     WAKE_MODEL_ASSET("stop", "Stop", stop),
+};
+
+static const tater_wake_model_asset_t s_boundary_asset = {
+    "hey_tater_boundary",
+    "Hey Tater Boundary",
+    _binary_hey_tater_boundary_tflite_start,
+    _binary_hey_tater_boundary_tflite_end,
 };
 
 const tater_wake_model_asset_t *tater_wake_model_asset_lookup(const char *id)
@@ -26,4 +35,9 @@ const tater_wake_model_asset_t *tater_wake_model_asset_lookup(const char *id)
         }
     }
     return NULL;
+}
+
+const tater_wake_model_asset_t *tater_wake_boundary_asset(void)
+{
+    return &s_boundary_asset;
 }
