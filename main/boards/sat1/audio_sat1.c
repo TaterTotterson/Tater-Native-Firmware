@@ -77,6 +77,7 @@ extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_zlib_end[] asm("_binary
 #define SAT1_XMOS_FLASH_WRITE_TIMEOUT_MS 100
 #define SAT1_XMOS_FLASH_ERASE_TIMEOUT_MS 2000
 #define SAT1_MIC_GAIN_Q8 2048
+#define SAT1_AUDIO_TASK_STACK_BYTES (16U * 1024U)
 #define SAT1_XMOS_WAKE_CHANNEL 0
 #define SAT1_XMOS_STREAM_CHANNEL 1
 #define SAT1_STREAM_LEVELER_MIN_GAIN_Q8 256U
@@ -112,6 +113,12 @@ typedef enum {
     SAT1_OUTPUT_ACTIVE_AUX,
     SAT1_OUTPUT_ACTIVE_BOTH,
 } sat1_output_active_t;
+
+typedef struct {
+    int32_t rx[TATER_MIC_SOURCE_CHUNK_FRAMES * TATER_MIC_SOURCE_CHANNELS];
+    int16_t mono[TATER_MIC_CHUNK_FRAMES];
+    int16_t mono_stream[TATER_MIC_CHUNK_FRAMES];
+} sat1_audio_buffers_t;
 
 static i2s_chan_handle_t s_rx_chan;
 static i2s_chan_handle_t s_tx_chan;
@@ -1825,10 +1832,10 @@ static void update_speaker_audio_level(const int16_t *stereo_frames, size_t fram
 
 static void audio_task(void *arg)
 {
-    (void)arg;
-    int32_t rx[TATER_MIC_SOURCE_CHUNK_FRAMES * TATER_MIC_SOURCE_CHANNELS];
-    int16_t mono[TATER_MIC_CHUNK_FRAMES];
-    int16_t mono_stream[TATER_MIC_CHUNK_FRAMES];
+    sat1_audio_buffers_t *buffers = (sat1_audio_buffers_t *)arg;
+    int32_t *rx = buffers->rx;
+    int16_t *mono = buffers->mono;
+    int16_t *mono_stream = buffers->mono_stream;
     uint32_t active_read_errors = 0;
     uint32_t active_chunks = 0;
     int64_t last_wake_diag_us = 0;
@@ -1846,7 +1853,7 @@ static void audio_task(void *arg)
         last_active = active;
 
         size_t bytes_read = 0;
-        esp_err_t err = i2s_channel_read(s_rx_chan, rx, sizeof(rx), &bytes_read, pdMS_TO_TICKS(100));
+        esp_err_t err = i2s_channel_read(s_rx_chan, rx, sizeof(buffers->rx), &bytes_read, pdMS_TO_TICKS(100));
         if (err != ESP_OK || bytes_read == 0) {
             if (active && (++active_read_errors % 10) == 0) {
                 ESP_LOGW(TAG, "sat1 mic i2s read waiting err=%s bytes=%u", esp_err_to_name(err), (unsigned)bytes_read);
@@ -1937,13 +1944,21 @@ void tater_audio_i2s_start_task(void)
         s_speaker_mutex = xSemaphoreCreateMutex();
     }
     ESP_ERROR_CHECK_WITHOUT_ABORT(sat1_output_mutex_ensure());
+    /* Model activation also runs on this task; keep capture scratch off its stack. */
+    sat1_audio_buffers_t *buffers = heap_caps_calloc(
+        1, sizeof(*buffers), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (!buffers) {
+        ESP_LOGE(TAG, "sat1 audio PSRAM buffers allocation failed bytes=%u", (unsigned)sizeof(*buffers));
+        return;
+    }
 #if (configSUPPORT_STATIC_ALLOCATION == 1)
     bool audio_psram = true;
     BaseType_t audio_created = xTaskCreatePinnedToCoreWithCaps(
         audio_task,
         "tater_audio",
-        8192,
-        NULL,
+        SAT1_AUDIO_TASK_STACK_BYTES,
+        buffers,
         6,
         NULL,
         1,
@@ -1952,20 +1967,23 @@ void tater_audio_i2s_start_task(void)
     if (audio_created != pdPASS) {
         ESP_LOGW(TAG, "sat1 audio PSRAM task create failed; retrying internal stack");
         audio_psram = false;
-        audio_created = xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
+        audio_created = xTaskCreatePinnedToCore(audio_task, "tater_audio", SAT1_AUDIO_TASK_STACK_BYTES, buffers, 6, NULL, 1);
     }
 #else
-    BaseType_t audio_created = xTaskCreatePinnedToCore(audio_task, "tater_audio", 8192, NULL, 6, NULL, 1);
+    BaseType_t audio_created = xTaskCreatePinnedToCore(audio_task, "tater_audio", SAT1_AUDIO_TASK_STACK_BYTES, buffers, 6, NULL, 1);
 #endif
     if (audio_created != pdPASS) {
+        heap_caps_free(buffers);
         ESP_LOGE(TAG, "sat1 audio task create failed");
     } else {
-        ESP_LOGI(TAG, "sat1 audio task started stack=%s",
+        ESP_LOGI(TAG, "sat1 audio task started stack=%s bytes=%u buffers=psram/%u",
 #if (configSUPPORT_STATIC_ALLOCATION == 1)
-            audio_psram ? "psram" : "internal"
+            audio_psram ? "psram" : "internal",
 #else
-            "internal"
+            "internal",
 #endif
+            (unsigned)SAT1_AUDIO_TASK_STACK_BYTES,
+            (unsigned)sizeof(*buffers)
         );
     }
 

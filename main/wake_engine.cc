@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <strings.h>
 
@@ -118,6 +119,27 @@ struct DownloadedWakeModel {
     int boundary_search_after_ms;
     int boundary_endpoint_offset_ms;
 };
+
+struct DownloadedWakeModelDeleter {
+    void operator()(DownloadedWakeModel *model) const
+    {
+        if (model) {
+            heap_caps_free(model->data);
+            heap_caps_free(model->boundary_data);
+            heap_caps_free(model);
+        }
+    }
+};
+
+using DownloadedWakeModelPtr = std::unique_ptr<DownloadedWakeModel, DownloadedWakeModelDeleter>;
+
+DownloadedWakeModelPtr allocate_downloaded_wake_model()
+{
+    // Activation runs on the audio task. Keep metadata and untransferred buffers off its stack.
+    return DownloadedWakeModelPtr(static_cast<DownloadedWakeModel *>(
+        heap_caps_calloc(1, sizeof(DownloadedWakeModel), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+    ));
+}
 
 struct WakeDownloadRequest {
     char url[256];
@@ -724,6 +746,12 @@ bool configure_downloaded_wake_model(DownloadedWakeModel *model)
     if (model->has_boundary && !boundary_ok) {
         ESP_LOGW(TAG, "custom wake model active without requested boundary model");
     }
+    ESP_LOGI(
+        TAG,
+        "wake model activation complete task=%s stack_min_free=%u",
+        pcTaskGetName(nullptr),
+        (unsigned)uxTaskGetStackHighWaterMark(nullptr)
+    );
     return true;
 }
 
@@ -2095,71 +2123,61 @@ bool load_cached_custom_wake_model(const char *url)
         return false;
     }
 
-    char cached_id[32];
-    char cached_label[48];
-    DownloadedWakeModel cached = {};
-    std::snprintf(cached_id, sizeof(cached_id), "%s", cJSON_IsString(id) && id->valuestring && id->valuestring[0] ? id->valuestring : "custom_url");
-    std::snprintf(cached_label, sizeof(cached_label), "%s", cJSON_IsString(label) && label->valuestring && label->valuestring[0] ? label->valuestring : cached_id);
-    std::snprintf(cached.id, sizeof(cached.id), "%s", cached_id);
-    std::snprintf(cached.label, sizeof(cached.label), "%s", cached_label);
-    std::snprintf(cached.source_url, sizeof(cached.source_url), "%s", url);
-    cached.has_boundary = cJSON_IsTrue(has_boundary);
-    if (cached.has_boundary) {
+    auto cached = allocate_downloaded_wake_model();
+    if (!cached) {
+        cJSON_Delete(meta);
+        s_custom_cache_failures++;
+        set_last_error("cached wake metadata allocation failed");
+        return false;
+    }
+    std::snprintf(cached->id, sizeof(cached->id), "%s", cJSON_IsString(id) && id->valuestring && id->valuestring[0] ? id->valuestring : "custom_url");
+    std::snprintf(cached->label, sizeof(cached->label), "%s", cJSON_IsString(label) && label->valuestring && label->valuestring[0] ? label->valuestring : cached->id);
+    std::snprintf(cached->source_url, sizeof(cached->source_url), "%s", url);
+    cached->has_boundary = cJSON_IsTrue(has_boundary);
+    if (cached->has_boundary) {
         const cJSON *threshold = cJSON_GetObjectItem(meta, "boundary_threshold");
         const cJSON *search_before = cJSON_GetObjectItem(meta, "boundary_search_before_ms");
         const cJSON *search_after = cJSON_GetObjectItem(meta, "boundary_search_after_ms");
         const cJSON *endpoint_offset = cJSON_GetObjectItem(meta, "boundary_endpoint_offset_ms");
-        cached.boundary_threshold = cJSON_IsNumber(threshold) ? (float)threshold->valuedouble : kBoundaryDefaultThreshold;
-        cached.boundary_search_before_ms = cJSON_IsNumber(search_before) ? search_before->valueint : kBoundaryDefaultSearchBeforeMs;
-        cached.boundary_search_after_ms = cJSON_IsNumber(search_after) ? search_after->valueint : kBoundaryDefaultSearchAfterMs;
-        cached.boundary_endpoint_offset_ms = cJSON_IsNumber(endpoint_offset) ? endpoint_offset->valueint : 0;
+        cached->boundary_threshold = cJSON_IsNumber(threshold) ? (float)threshold->valuedouble : kBoundaryDefaultThreshold;
+        cached->boundary_search_before_ms = cJSON_IsNumber(search_before) ? search_before->valueint : kBoundaryDefaultSearchBeforeMs;
+        cached->boundary_search_after_ms = cJSON_IsNumber(search_after) ? search_after->valueint : kBoundaryDefaultSearchAfterMs;
+        cached->boundary_endpoint_offset_ms = cJSON_IsNumber(endpoint_offset) ? endpoint_offset->valueint : 0;
     }
     cJSON_Delete(meta);
 
-    uint8_t *model_data = nullptr;
-    size_t model_size = 0;
-    if (!read_cache_file(kWakeModelCacheDataPath, kWakeDownloadedModelMaxBytes, false, &model_data, &model_size)) {
+    if (!read_cache_file(kWakeModelCacheDataPath, kWakeDownloadedModelMaxBytes, false, &cached->data, &cached->size)) {
         s_custom_cache_failures++;
         return false;
     }
-    if (!tflite::GetModel(model_data) || tflite::GetModel(model_data)->version() != TFLITE_SCHEMA_VERSION) {
-        heap_caps_free(model_data);
+    if (!tflite::GetModel(cached->data) || tflite::GetModel(cached->data)->version() != TFLITE_SCHEMA_VERSION) {
         s_custom_cache_failures++;
         ESP_LOGW(TAG, "cached wake model schema mismatch source=%s", url);
         return false;
     }
 
-    cached.data = model_data;
-    cached.size = model_size;
-    if (cached.has_boundary) {
+    if (cached->has_boundary) {
         if (!read_cache_file(
                 kWakeBoundaryCacheDataPath,
                 kWakeDownloadedModelMaxBytes,
                 false,
-                &cached.boundary_data,
-                &cached.boundary_size)
-                || !tflite::GetModel(cached.boundary_data)
-                || tflite::GetModel(cached.boundary_data)->version() != TFLITE_SCHEMA_VERSION) {
-            if (cached.boundary_data) {
-                heap_caps_free(cached.boundary_data);
-            }
-            heap_caps_free(cached.data);
+                &cached->boundary_data,
+                &cached->boundary_size)
+                || !tflite::GetModel(cached->boundary_data)
+                || tflite::GetModel(cached->boundary_data)->version() != TFLITE_SCHEMA_VERSION) {
             s_custom_cache_failures++;
             ESP_LOGW(TAG, "cached wake boundary invalid source=%s", url);
             return false;
         }
     }
-    if (!configure_downloaded_wake_model(&cached)) {
-        heap_caps_free(model_data);
-        if (cached.boundary_data) {
-            heap_caps_free(cached.boundary_data);
-        }
+    const size_t model_size = cached->size;
+    if (!configure_downloaded_wake_model(cached.get())) {
         s_custom_cache_failures++;
         return false;
     }
     s_custom_cache_hits++;
     set_last_error("wake model cache loaded");
-    ESP_LOGI(TAG, "wake model cache loaded id=%s source=%s bytes=%u", cached_id, url, (unsigned)model_size);
+    ESP_LOGI(TAG, "wake model cache loaded id=%s source=%s bytes=%u", cached->id, url, (unsigned)model_size);
     return true;
 }
 
@@ -3276,39 +3294,33 @@ done:
 
 void consume_pending_custom_model(const tater_live_settings_t *settings)
 {
-    DownloadedWakeModel pending = {};
+    DownloadedWakeModelPtr pending;
     if (s_custom_model_lock) {
         xSemaphoreTake(s_custom_model_lock, portMAX_DELAY);
     }
     if (s_pending_custom_model.data) {
-        pending = s_pending_custom_model;
-        s_pending_custom_model = {};
+        pending = allocate_downloaded_wake_model();
+        if (pending) {
+            *pending = s_pending_custom_model;
+            s_pending_custom_model = {};
+        } else {
+            set_last_error("custom wake handoff allocation failed");
+        }
     }
     if (s_custom_model_lock) {
         xSemaphoreGive(s_custom_model_lock);
     }
-    if (!pending.data) {
+    if (!pending) {
         return;
     }
 
     const char *selected_url = settings ? settings->wake_word_url : "";
-    if (!settings || !is_custom_wake_word(settings->wake_word) || std::strcmp(selected_url, pending.source_url) != 0) {
-        ESP_LOGW(TAG, "discarding stale custom wake model url=%s selected=%s", pending.source_url, selected_url ? selected_url : "");
-        heap_caps_free(pending.data);
-        if (pending.boundary_data) {
-            heap_caps_free(pending.boundary_data);
-        }
+    if (!settings || !is_custom_wake_word(settings->wake_word) || std::strcmp(selected_url, pending->source_url) != 0) {
+        ESP_LOGW(TAG, "discarding stale custom wake model url=%s selected=%s", pending->source_url, selected_url ? selected_url : "");
         return;
     }
 
-    if (!configure_downloaded_wake_model(&pending)) {
-        if (pending.data) {
-            heap_caps_free(pending.data);
-        }
-        if (pending.boundary_data) {
-            heap_caps_free(pending.boundary_data);
-        }
-    }
+    (void)configure_downloaded_wake_model(pending.get());
 }
 
 bool start_custom_wake_model_download(const char *url, bool force_download)
