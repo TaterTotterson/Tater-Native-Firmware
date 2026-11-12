@@ -85,6 +85,10 @@ extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_end[] asm("_binary
 #define XMOS_TARGET_VERSION_MINOR 3
 #define XMOS_TARGET_VERSION_PATCH 2
 #define XMOS_TARGET_IMAGE_SIZE 282624U
+#define XMOS_DFU_TASK_STACK_SIZE 16384
+#define XMOS_DFU_TASK_PRIORITY 4
+#define XMOS_DFU_TASK_CORE 0
+#define XMOS_DFU_TASK_DELETE_GRACE_MS 20
 #define VOICE_PE_XMOS_PROCESSED_CHANNEL 0
 #define CONFIGURATION_SERVICER_RESID_CHANNEL_0_PIPELINE_STAGE 0x30
 #define CONFIGURATION_SERVICER_RESID_CHANNEL_1_PIPELINE_STAGE 0x40
@@ -670,6 +674,79 @@ static esp_err_t xmos_dfu_update_to_target(void)
     return err;
 }
 
+// The DFU update chain (compressed image expansion plus chunked I2C writes)
+// needs a stack much deeper than the main task's. Run it in a one-shot task
+// with a dedicated PSRAM stack so the main task only blocks on a semaphore.
+static SemaphoreHandle_t s_xmos_dfu_done;
+static esp_err_t s_xmos_dfu_result;
+
+static void xmos_dfu_task(void *arg)
+{
+    (void)arg;
+    s_xmos_dfu_result = xmos_dfu_update_to_target();
+    xSemaphoreGive(s_xmos_dfu_done);
+    for (;;) {
+        vTaskDelay(portMAX_DELAY);
+    }
+}
+
+static esp_err_t xmos_dfu_run_in_task(void)
+{
+    StackType_t *stack = (StackType_t *)heap_caps_malloc(
+        XMOS_DFU_TASK_STACK_SIZE,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (!stack) {
+        xmos_status_set_update_state(TATER_XMOS_UPDATE_ERROR);
+        ESP_LOGE(TAG, "xmos dfu task PSRAM stack alloc failed bytes=%d", XMOS_DFU_TASK_STACK_SIZE);
+        return ESP_ERR_NO_MEM;
+    }
+    StaticTask_t *tcb = (StaticTask_t *)heap_caps_malloc(
+        sizeof(StaticTask_t),
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
+    );
+    if (!tcb) {
+        heap_caps_free(stack);
+        xmos_status_set_update_state(TATER_XMOS_UPDATE_ERROR);
+        ESP_LOGE(TAG, "xmos dfu task TCB alloc failed");
+        return ESP_ERR_NO_MEM;
+    }
+    if (!s_xmos_dfu_done) {
+        s_xmos_dfu_done = xSemaphoreCreateBinary();
+        if (!s_xmos_dfu_done) {
+            heap_caps_free(stack);
+            heap_caps_free(tcb);
+            xmos_status_set_update_state(TATER_XMOS_UPDATE_ERROR);
+            ESP_LOGE(TAG, "xmos dfu done semaphore alloc failed");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    TaskHandle_t handle = xTaskCreateStaticPinnedToCore(
+        xmos_dfu_task,
+        "xmos_dfu",
+        XMOS_DFU_TASK_STACK_SIZE,
+        NULL,
+        XMOS_DFU_TASK_PRIORITY,
+        stack,
+        tcb,
+        XMOS_DFU_TASK_CORE
+    );
+    if (!handle) {
+        heap_caps_free(stack);
+        heap_caps_free(tcb);
+        xmos_status_set_update_state(TATER_XMOS_UPDATE_ERROR);
+        ESP_LOGE(TAG, "xmos dfu task create failed");
+        return ESP_FAIL;
+    }
+    ESP_LOGW(TAG, "xmos firmware update running in dedicated task stack=%d", XMOS_DFU_TASK_STACK_SIZE);
+    xSemaphoreTake(s_xmos_dfu_done, portMAX_DELAY);
+    vTaskDelete(handle);
+    vTaskDelay(pdMS_TO_TICKS(XMOS_DFU_TASK_DELETE_GRACE_MS));
+    heap_caps_free(stack);
+    heap_caps_free(tcb);
+    return s_xmos_dfu_result;
+}
+
 static esp_err_t xmos_ensure_target_firmware(void)
 {
     uint8_t major = 0;
@@ -699,7 +776,7 @@ static esp_err_t xmos_ensure_target_firmware(void)
         XMOS_TARGET_VERSION_MINOR,
         XMOS_TARGET_VERSION_PATCH
     );
-    err = xmos_dfu_update_to_target();
+    err = xmos_dfu_run_in_task();
     if (err != ESP_OK) {
         xmos_status_set_update_state(TATER_XMOS_UPDATE_ERROR);
     }
