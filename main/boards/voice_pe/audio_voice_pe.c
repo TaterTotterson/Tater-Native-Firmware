@@ -648,6 +648,8 @@ static esp_err_t xmos_dfu_update_image(const uint8_t *image, size_t image_size)
     vTaskDelay(pdMS_TO_TICKS(500));
     ESP_RETURN_ON_ERROR(xmos_wait_for_target_version(), TAG, "xmos dfu version verify failed");
 
+    xmos_status_set_update_flags(true, false);
+    xmos_status_set_dfu(0, 0);
     xmos_status_set_progress(100);
     xmos_status_set_update_state(TATER_XMOS_UPDATE_COMPLETE);
     ESP_LOGI(TAG, "xmos firmware update complete");
