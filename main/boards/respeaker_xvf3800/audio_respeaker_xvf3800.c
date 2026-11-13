@@ -53,6 +53,7 @@ extern const uint8_t _binary_xvf3800_i2s_1_0_7_bin_zlib_end[] asm("_binary_xvf38
 #define XVF_DFU_MAX_XFER 128
 #define XVF_DFU_READY_TIMEOUT_MS 30000
 #define XVF_DFU_VERIFY_TIMEOUT_MS 10000
+#define XVF_DFU_REBOOT_SETTLE_MS 500
 #define XVF_VERSION_READY_TIMEOUT_MS 8000
 #define XVF_VERSION_RETRY_DELAY_MS 250
 #define XVF_TARGET_MAJOR 1
@@ -486,6 +487,10 @@ static esp_err_t xvf_dfu_update_image(const uint8_t *image, size_t image_size)
     ESP_RETURN_ON_ERROR(locked_i2c_write(final_request, sizeof(final_request)), TAG, "dfu final download failed");
     ESP_RETURN_ON_ERROR(xvf_dfu_wait_ready("manifest", XVF_DFU_READY_TIMEOUT_MS), TAG, "dfu manifest wait failed");
     ESP_RETURN_ON_ERROR(xvf_dfu_reboot(), TAG, "dfu reboot failed");
+
+    // Reboot is asynchronous: the old image can still answer briefly before
+    // XMOS drops off I2C. Wait before accepting a version as the new image.
+    vTaskDelay(pdMS_TO_TICKS(XVF_DFU_REBOOT_SETTLE_MS));
 
     uint8_t major = 0;
     uint8_t minor = 0;
