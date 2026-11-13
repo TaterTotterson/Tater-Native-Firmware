@@ -24,6 +24,7 @@
 #include "native_settings.h"
 #include "tater_protocol.h"
 #include "wake_engine.h"
+#include "xmos_update.h"
 #include "boards/respeaker_xvf3800/xvf3800_doa.h"
 
 #if TATER_BOARD_RESPEAKER_XVF3800
@@ -534,7 +535,7 @@ static esp_err_t xvf_ensure_target_firmware(void)
     } else {
         ESP_LOGW(TAG, "xvf3800 firmware version unavailable; attempting I2C DFU target=%u.%u.%u", XVF_TARGET_MAJOR, XVF_TARGET_MINOR, XVF_TARGET_PATCH);
     }
-    err = xvf_dfu_update_to_target();
+    err = tater_xmos_update_run(xvf_dfu_update_to_target);
     if (err != ESP_OK) {
         xmos_status_set_update_state(TATER_XMOS_UPDATE_ERROR);
         ESP_LOGE(TAG, "xvf3800 firmware update failed: %s", esp_err_to_name(err));

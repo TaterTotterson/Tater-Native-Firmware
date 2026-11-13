@@ -38,6 +38,7 @@ idf_component_register(
         "wake_model_assets.c"
         "wake_sound_assets.c"
         "wifi_station.c"
+        "xmos_update.c"
     INCLUDE_DIRS "."
     REQUIRES
         driver
