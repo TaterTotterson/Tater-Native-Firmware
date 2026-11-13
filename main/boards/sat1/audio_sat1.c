@@ -28,6 +28,7 @@
 #include "soc/soc_caps.h"
 #include "tater_protocol.h"
 #include "wake_engine.h"
+#include "xmos_update.h"
 
 #if TATER_BOARD_SAT1
 
@@ -1439,7 +1440,11 @@ static esp_err_t sat1_xmos_ensure_target_firmware(void)
     } else {
         ESP_LOGW(TAG, "sat1 xmos version unavailable; attempting direct flash recovery target=%s", target_text);
     }
-    return sat1_xmos_flash_target_image();
+    err = tater_xmos_update_run(sat1_xmos_flash_target_image);
+    if (err != ESP_OK) {
+        xmos_status_set_update_state(TATER_XMOS_UPDATE_ERROR);
+    }
+    return err;
 }
 
 static esp_err_t sat1_read_doa(tater_audio_doa_t *out)
