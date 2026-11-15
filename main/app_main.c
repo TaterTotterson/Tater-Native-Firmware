@@ -171,9 +171,16 @@ void app_main(void)
     tater_audio_i2s_start_task();
     tater_button_start_task();
 
+    unsigned service_ticks = 0;
     unsigned heartbeat_ticks = 0;
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(10));
+        tater_wake_engine_poll();
+        // Preserve the 250 ms Bluetooth poll and five-second heartbeat cadence.
+        if (++service_ticks < 25) {
+            continue;
+        }
+        service_ticks = 0;
         tater_ble_scanner_poll(tater_protocol_audio_busy());
         if (++heartbeat_ticks < 20) {
             continue;

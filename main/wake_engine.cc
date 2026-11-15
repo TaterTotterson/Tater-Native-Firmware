@@ -191,11 +191,6 @@ struct PendingCloseMiss {
     uint8_t min_active_windows;
 };
 
-struct WakeVerifierTimeoutRequest {
-    uint32_t request_id;
-    uint16_t timeout_ms;
-};
-
 struct SavedWakeModel {
     bool valid;
     char id[32];
@@ -343,6 +338,7 @@ uint32_t s_wake_verifier_count = 0;
 uint32_t s_wake_verifier_rejections = 0;
 uint32_t s_wake_verifier_fail_open = 0;
 bool s_wake_verifier_pending = false;
+int64_t s_wake_verifier_deadline_us = 0;
 char s_wake_verifier_pending_word[32] = "";
 char s_wake_verifier_last_reason[64] = "";
 
@@ -2921,6 +2917,7 @@ void complete_wake_verification(
             );
             s_wake_verifier_pending = false;
             s_wake_verifier_pending_id = 0;
+            s_wake_verifier_deadline_us = 0;
             s_wake_verifier_pending_word[0] = '\0';
         }
     }
@@ -2952,15 +2949,26 @@ void complete_wake_verification(
     }
 }
 
-void wake_verifier_timeout_task(void *arg)
+void poll_wake_verification_timeout()
 {
-    WakeVerifierTimeoutRequest *request = static_cast<WakeVerifierTimeoutRequest *>(arg);
-    uint32_t request_id = request ? request->request_id : 0;
-    uint16_t timeout_ms = request ? request->timeout_ms : 500;
-    delete request;
-    vTaskDelay(pdMS_TO_TICKS(timeout_ms));
-    complete_wake_verification(request_id, true, true, "satellite_timeout_fail_open");
-    vTaskDelete(nullptr);
+    uint32_t expired_id = 0;
+    if (s_wake_verifier_lock) {
+        xSemaphoreTake(s_wake_verifier_lock, portMAX_DELAY);
+    }
+    if (
+        s_wake_verifier_pending
+        && s_wake_verifier_deadline_us > 0
+        && esp_timer_get_time() >= s_wake_verifier_deadline_us
+    ) {
+        expired_id = s_wake_verifier_pending_id;
+    }
+    if (s_wake_verifier_lock) {
+        xSemaphoreGive(s_wake_verifier_lock);
+    }
+    if (expired_id != 0) {
+        // The request-id/completed guards also handle a reply racing this poll.
+        complete_wake_verification(expired_id, true, true, "satellite_timeout_fail_open");
+    }
 }
 
 bool queue_wake_verification(
@@ -3001,6 +3009,7 @@ bool queue_wake_verification(
     if (enforce) {
         s_wake_verifier_pending = true;
         s_wake_verifier_pending_id = request_id;
+        s_wake_verifier_deadline_us = 0;
         std::snprintf(
             s_wake_verifier_pending_word,
             sizeof(s_wake_verifier_pending_word),
@@ -3036,26 +3045,22 @@ bool queue_wake_verification(
         return true;
     }
 
-    WakeVerifierTimeoutRequest *timeout = new (std::nothrow) WakeVerifierTimeoutRequest{
-        request_id,
-        settings->wake_verifier_timeout_ms,
-    };
-    if (!timeout) {
-        complete_wake_verification(request_id, true, true, "timeout_alloc_fail_open");
-        return true;
+    // The existing application service loop owns the timeout. Do not allocate
+    // a task/stack per wake: internal-RAM pressure must not bypass a prompt
+    // server rejection just because the timeout worker could not be created.
+    if (s_wake_verifier_lock) {
+        xSemaphoreTake(s_wake_verifier_lock, portMAX_DELAY);
     }
-    BaseType_t created = xTaskCreatePinnedToCore(
-        wake_verifier_timeout_task,
-        "wake_verify_wait",
-        3072,
-        timeout,
-        3,
-        nullptr,
-        0
-    );
-    if (created != pdPASS) {
-        delete timeout;
-        complete_wake_verification(request_id, true, true, "timeout_task_fail_open");
+    if (
+        s_wake_verifier_pending
+        && s_wake_verifier_pending_id == request_id
+        && s_wake_verifier_completed_id != request_id
+    ) {
+        s_wake_verifier_deadline_us = esp_timer_get_time()
+            + (int64_t)settings->wake_verifier_timeout_ms * 1000;
+    }
+    if (s_wake_verifier_lock) {
+        xSemaphoreGive(s_wake_verifier_lock);
     }
     return true;
 }
@@ -4047,6 +4052,13 @@ extern "C" void tater_wake_engine_verification_result(
 )
 {
     complete_wake_verification(request_id, accepted, fail_open, reason);
+}
+
+extern "C" void tater_wake_engine_poll(void)
+{
+    // Keep timeout handling independent of microphone reads, playback, model
+    // loading, and wake inference without adding another FreeRTOS task.
+    poll_wake_verification_timeout();
 }
 
 extern "C" void tater_wake_engine_note_audio(const int16_t *pcm, size_t sample_count)

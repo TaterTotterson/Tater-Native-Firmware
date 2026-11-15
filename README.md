@@ -101,6 +101,8 @@ negotiation and a safe 5V amplifier fallback.
   environment profile, threshold, and sliding-window settings
 - Optional low-latency Tater STT wake verification in observe or enforce mode,
   with fail-open handling if verification is unavailable or times out
+- Wake verification uses an allocation-free timeout deadline, so limited
+  internal RAM cannot bypass enforcement by preventing a timeout task from starting
 - A `tv_nearby` profile that uses a more permissive first-stage candidate and
   automatically verifies it before opening a voice session
 - Optional good-wake and close-miss raw PCM upload hooks for the trainer
