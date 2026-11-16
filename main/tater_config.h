@@ -25,6 +25,8 @@ void tater_config_defaults(tater_config_t *config);
 esp_err_t tater_config_load(tater_config_t *config);
 esp_err_t tater_config_save(const tater_config_t *config);
 esp_err_t tater_config_save_token(const char *token);
+/* Persists only the "room" key; wifi credentials and the token are untouched. */
+esp_err_t tater_config_save_room(const char *room);
 esp_err_t tater_config_clear(void);
 esp_err_t tater_config_forget_wifi(void);
 bool tater_config_has_wifi(const tater_config_t *config);

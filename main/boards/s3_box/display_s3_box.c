@@ -966,9 +966,8 @@ static void display_target_label(char *out, size_t out_len)
         return;
     }
     out[0] = '\0';
-    const char *room = tater_protocol_room();
-    if (room && room[0]) {
-        strlcpy(out, room, out_len);
+    tater_protocol_copy_room(out, out_len);
+    if (out[0]) {
         return;
     }
     const char *device = tater_protocol_device_name();
@@ -1737,7 +1736,8 @@ static void render_home_dashboard(const tater_live_settings_t *settings)
     volume_label(settings, volume, sizeof(volume));
 
     const char *device_name = tater_protocol_device_name();
-    const char *room = tater_protocol_room();
+    char room[TATER_CFG_ROOM_LEN] = {0};
+    tater_protocol_copy_room(room, sizeof(room));
     const char *date_text = feed.clock_date[0] ? feed.clock_date : TATER_FIRMWARE_VERSION;
     const char *clock_text = best_clock_time ? best_clock_time : (tater_protocol_is_connected() ? "ONLINE" : "WAIT");
     const char *clock_ampm = best_clock_ampm;
@@ -1755,7 +1755,7 @@ static void render_home_dashboard(const tater_live_settings_t *settings)
         draw_text(252, 88, clock_ampm, 2, TATER_TEXT_MUTED);
     }
     render_info_card(12, 128, "SERVER", server);
-    render_info_card(166, 128, room && room[0] ? "ROOM" : "DEVICE", room && room[0] ? room : device_name);
+    render_info_card(166, 128, room[0] ? "ROOM" : "DEVICE", room[0] ? room : device_name);
     render_small_card(12, 202, 90, "WAKE", settings ? settings->wake_word : "HEY");
     render_small_card(114, 202, 90, "VOL", volume);
     render_small_card(216, 202, 92, "WIFI", wifi);

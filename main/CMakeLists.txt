@@ -27,6 +27,7 @@ idf_component_register(
         "playback_recovery.c"
         "playback_wake_policy.c"
         "provisioning.c"
+        "room_config.c"
         "server_url.c"
         "sendspin_player.cpp"
         "tater_config.c"

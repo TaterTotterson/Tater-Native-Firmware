@@ -91,6 +91,39 @@ negotiation and a safe 5V amplifier fallback.
 - Supports native firmware OTA commands from Tater
 - Sends logs, OTA status, playback-finished events, timer events, and trainer
   feedback events
+- Accepts a live room change from Tater with `config.set`, advertised as the
+  `room_config` capability version 1
+
+Tater can rename the satellite's room without re-provisioning. The room is
+trimmed of surrounding whitespace, must be valid UTF-8 without control
+characters, and must fit in 63 bytes; an empty string clears it. Unknown keys
+are ignored:
+
+```json
+{
+  "type": "config.set",
+  "id": "req-42",
+  "payload": {"room": "Kitchen"}
+}
+```
+
+The satellite saves the room to flash and replies with the room now in effect.
+`changed` is `false` when the room already matched. On failure `ok` is `false`
+and `code` is one of `invalid_type`, `too_long`, `control_character`,
+`invalid_utf8`, `storage_error`, or `no_supported_keys`:
+
+```json
+{
+  "type": "config.result",
+  "payload": {
+    "reply_to": "req-42",
+    "action": "set",
+    "ok": true,
+    "room": "Kitchen",
+    "changed": true
+  }
+}
+```
 
 ### Voice And Audio
 

@@ -112,6 +112,20 @@ esp_err_t tater_config_save_token(const char *token)
     return err;
 }
 
+esp_err_t tater_config_save_room(const char *room)
+{
+    ESP_RETURN_ON_FALSE(room, ESP_ERR_INVALID_ARG, TAG, "room is null");
+    ESP_RETURN_ON_FALSE(strlen(room) < TATER_CFG_ROOM_LEN, ESP_ERR_INVALID_SIZE, TAG, "room is too long");
+    nvs_handle_t nvs = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs), TAG, "nvs open failed");
+    esp_err_t err = nvs_set_str(nvs, "room", room);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    return err;
+}
+
 esp_err_t tater_config_clear(void)
 {
     nvs_handle_t nvs = 0;

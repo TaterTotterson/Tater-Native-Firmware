@@ -31,6 +31,7 @@
 #include "ota_update.h"
 #include "playback.h"
 #include "playback_wake_policy.h"
+#include "room_config.h"
 #include "server_url.h"
 #include "sendspin_player.h"
 #include "timer_sound_assets.h"
@@ -74,6 +75,12 @@ static tater_play_tone_callback_t s_play_tone_cb;
 static tater_ota_url_callback_t s_ota_url_cb;
 static tater_state_t s_current_state = TATER_STATE_DISCONNECTED;
 static tater_config_t s_config;
+/*
+ * s_config.room is written by the WebSocket task when Tater sends config.set
+ * and read by other tasks (S3 Box display). Writers and cross-task readers
+ * copy the fixed-size buffer under this lock so no reader sees a torn name.
+ */
+static portMUX_TYPE s_room_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_device_id[48];
 static char s_hardware_id[13];
 static char s_ws_url[192];
@@ -2251,6 +2258,83 @@ static void send_simple_result(
     send_json(root);
 }
 
+static void send_config_set_result(
+    const char *reply_to,
+    bool ok,
+    const char *code,
+    const char *message,
+    bool changed
+)
+{
+    cJSON *root = new_envelope("config.result");
+    cJSON *payload = cJSON_GetObjectItem(root, "payload");
+    cJSON_AddStringToObject(payload, "reply_to", reply_to ? reply_to : "");
+    cJSON_AddStringToObject(payload, "action", "set");
+    cJSON_AddBoolToObject(payload, "ok", ok);
+    if (code && code[0]) {
+        cJSON_AddStringToObject(payload, "code", code);
+    }
+    if (message && message[0]) {
+        cJSON_AddStringToObject(payload, "message", message);
+    }
+    // Only this (WebSocket) task writes the room, so reading it here is safe.
+    cJSON_AddStringToObject(payload, "room", s_config.room);
+    cJSON_AddBoolToObject(payload, "changed", changed);
+    send_json(root);
+}
+
+static void config_set_from_payload(const cJSON *payload, const char *reply_to, const char *raw, int raw_len)
+{
+    const cJSON *room_item = cJSON_GetObjectItem(payload, "room");
+    if (!room_item) {
+        send_config_set_result(reply_to, false, "no_supported_keys", "No supported configuration keys.", false);
+        return;
+    }
+
+    char room[sizeof(s_config.room)] = {0};
+    tater_room_config_result_t result = cJSON_IsString(room_item)
+        ? tater_room_config_normalize(room_item->valuestring, room, sizeof(room))
+        : TATER_ROOM_CONFIG_INVALID_TYPE;
+    // cJSON turns a \u0000 escape into an embedded NUL, which would make the
+    // room look shorter than sent. Reject it instead of saving a truncated
+    // name. The raw scan covers the whole message, so U+0000 in any string of
+    // a config.set that sets the room also rejects it.
+    if (result == TATER_ROOM_CONFIG_OK && raw_len > 0
+        && tater_room_config_json_has_nul_escape(raw, (size_t)raw_len)) {
+        result = TATER_ROOM_CONFIG_CONTROL_CHARACTER;
+        room[0] = '\0';
+    }
+    if (result != TATER_ROOM_CONFIG_OK) {
+        ESP_LOGW(TAG, "config.set room rejected: %s", tater_room_config_result_code(result));
+        send_config_set_result(
+            reply_to,
+            false,
+            tater_room_config_result_code(result),
+            tater_room_config_result_message(result),
+            false
+        );
+        return;
+    }
+
+    if (strcmp(room, s_config.room) == 0) {
+        send_config_set_result(reply_to, true, "", "", false);
+        return;
+    }
+
+    esp_err_t err = tater_config_save_room(room);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "room save failed: %s", esp_err_to_name(err));
+        send_config_set_result(reply_to, false, "storage_error", "Room could not be saved.", false);
+        return;
+    }
+
+    portENTER_CRITICAL(&s_room_lock);
+    memcpy(s_config.room, room, sizeof(s_config.room));
+    portEXIT_CRITICAL(&s_room_lock);
+    ESP_LOGI(TAG, "room set by Tater: \"%s\"", room);
+    send_config_set_result(reply_to, true, "", "", true);
+}
+
 static void send_hello(void)
 {
     s_hello_acked = false;
@@ -2277,6 +2361,8 @@ static void send_hello(void)
     cJSON_AddNumberToObject(caps, "wake_boundary_version", 1);
     cJSON_AddNumberToObject(caps, "wake_bundle_version", 4);
     cJSON_AddBoolToObject(caps, "live_settings", true);
+    cJSON_AddBoolToObject(caps, "room_config", true);
+    cJSON_AddNumberToObject(caps, "room_config_version", 1);
     cJSON_AddBoolToObject(caps, "setup_mode", true);
     cJSON_AddBoolToObject(caps, "continued_chat_reopen", true);
     cJSON_AddBoolToObject(caps, "barge_in", true);
@@ -2745,6 +2831,8 @@ static void handle_text_message(const char *data, int len)
         esp_restart();
     } else if (strcmp(type, "settings") == 0 && cJSON_IsObject(payload)) {
         tater_live_settings_apply_json(payload);
+    } else if (strcmp(type, "config.set") == 0 && cJSON_IsObject(payload)) {
+        config_set_from_payload(payload, request_id, data, len);
     } else if (strcmp(type, "error") == 0) {
         clear_voice_capture_state();
         tater_sendspin_set_voice_duck(false);
@@ -3115,6 +3203,19 @@ const char *tater_protocol_device_name(void)
 const char *tater_protocol_room(void)
 {
     return s_config.room;
+}
+
+void tater_protocol_copy_room(char *out, size_t out_len)
+{
+    if (!out || out_len == 0) {
+        return;
+    }
+    char room[sizeof(s_config.room)];
+    portENTER_CRITICAL(&s_room_lock);
+    memcpy(room, s_config.room, sizeof(room));
+    portEXIT_CRITICAL(&s_room_lock);
+    room[sizeof(room) - 1] = '\0';
+    strlcpy(out, room, out_len);
 }
 
 const char *tater_protocol_server_url(void)

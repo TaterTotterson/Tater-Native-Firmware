@@ -43,7 +43,13 @@ bool tater_protocol_can_detect_timer_stop(void);
 bool tater_protocol_audio_busy(void);
 const char *tater_protocol_device_id(void);
 const char *tater_protocol_device_name(void);
+/*
+ * Returns the protocol-owned room buffer. Tater can change it at runtime via
+ * config.set on the WebSocket task, so other tasks should use
+ * tater_protocol_copy_room() instead of holding this pointer.
+ */
 const char *tater_protocol_room(void);
+void tater_protocol_copy_room(char *out, size_t out_len);
 const char *tater_protocol_server_url(void);
 const char *tater_protocol_token(void);
 void tater_protocol_send_status(const char *state);
