@@ -34,6 +34,7 @@ extern "C" {
 #include "native_settings.h"
 #include "playback_mix.h"
 #include "tater_protocol.h"
+#include "task_cleanup.h"
 #include "wifi_station.h"
 }
 
@@ -888,13 +889,7 @@ void sendspin_task(void *arg) {
     if (!client.start()) {
         ESP_LOGE(TAG, "Sendspin client failed to start");
         s_initialized.store(false, std::memory_order_release);
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-        if (s_sendspin_task_stack_psram.load(std::memory_order_acquire)) {
-            vTaskDeleteWithCaps(nullptr);
-            return;
-        }
-#endif
-        vTaskDelete(nullptr);
+        tater_task_delete_current(s_sendspin_task_stack_psram.load(std::memory_order_acquire));
         return;
     }
     s_output_delay_ms.store(player.get_output_delay_ms(), std::memory_order_release);

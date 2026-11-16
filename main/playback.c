@@ -26,6 +26,7 @@
 #include "playback_mix.h"
 #include "playback_recovery.h"
 #include "sendspin_player.h"
+#include "task_cleanup.h"
 #include "tater_protocol.h"
 
 static const char *TAG = "tater_playback";
@@ -515,15 +516,7 @@ static BaseType_t playback_create_task(
 
 static void playback_delete_current_task(bool task_with_caps)
 {
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-    if (task_with_caps) {
-        vTaskDeleteWithCaps(NULL);
-        return;
-    }
-#else
-    (void)task_with_caps;
-#endif
-    vTaskDelete(NULL);
+    tater_task_delete_current(task_with_caps);
 }
 
 static bool playback_wait_stopped_locked(TickType_t timeout_ticks)

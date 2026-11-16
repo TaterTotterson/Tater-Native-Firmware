@@ -41,6 +41,7 @@ bool tater_protocol_timer_is_ringing(void);
 void tater_protocol_timer_stop_from_device(void);
 bool tater_protocol_can_detect_timer_stop(void);
 bool tater_protocol_audio_busy(void);
+bool tater_protocol_background_work_allowed(void);
 const char *tater_protocol_device_id(void);
 const char *tater_protocol_device_name(void);
 const char *tater_protocol_room(void);

@@ -73,6 +73,7 @@ int64_t esp_timer_get_time() { return now_us; }
 void tater_protocol_send_log(const char*, const char*) { assert(mutex_depth == 0); }
 void start_wake_session(const char*) { assert(mutex_depth == 0); ++starts; }
 void tater_wake_engine_reset() { assert(mutex_depth == 0); ++resets; }
+void poll_capture_upload() {} // Covered separately by the capture-upload harness.
 void heap_caps_free(void* ptr) { std::free(ptr); }
 int16_t* snapshot_capture_audio_tail(size_t, size_t* count) {
     *count = 16;

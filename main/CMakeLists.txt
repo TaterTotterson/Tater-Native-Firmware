@@ -29,6 +29,7 @@ idf_component_register(
         "provisioning.c"
         "server_url.c"
         "sendspin_player.cpp"
+        "task_cleanup.c"
         "tater_config.c"
         "tater_protocol.c"
         "timer_sound_assets.c"

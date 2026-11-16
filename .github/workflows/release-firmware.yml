@@ -37,6 +37,13 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install --upgrade pip "platformio==${PLATFORMIO_VERSION}"
 
+      - name: Run host regressions
+        run: |
+          set -euo pipefail
+          for test in main/scripts/test_*_host.sh; do
+            bash "$test"
+          done
+
       - name: Build firmware
         run: platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
 

@@ -33,6 +33,7 @@
 #include "playback_wake_policy.h"
 #include "server_url.h"
 #include "sendspin_player.h"
+#include "task_cleanup.h"
 #include "timer_sound_assets.h"
 #include "wake_engine.h"
 
@@ -281,15 +282,7 @@ static BaseType_t create_transient_task(
 
 static void delete_transient_task(bool task_with_caps)
 {
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-    if (task_with_caps) {
-        vTaskDeleteWithCaps(NULL);
-        return;
-    }
-#else
-    (void)task_with_caps;
-#endif
-    vTaskDelete(NULL);
+    tater_task_delete_current(task_with_caps);
 }
 
 static const char *reset_reason_name(esp_reset_reason_t reason)
@@ -3058,6 +3051,15 @@ bool tater_protocol_audio_busy(void)
         || s_current_state == TATER_STATE_OTA
         || tater_playback_is_playing()
         || tater_sendspin_is_playing();
+}
+
+bool tater_protocol_background_work_allowed(void)
+{
+    // Listening can end before STT/LLM/TTS do. THINKING and every other
+    // non-idle state must remain protected from optional training uploads.
+    return s_connected && s_current_state == TATER_STATE_IDLE
+        && !s_pending_reopen && !timer_any_ringing()
+        && !tater_ota_is_running() && !tater_protocol_audio_busy();
 }
 
 void tater_protocol_timer_stop_from_device(void)

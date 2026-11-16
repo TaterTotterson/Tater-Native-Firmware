@@ -38,6 +38,7 @@ extern "C" {
 #include "ota_update.h"
 #include "playback.h"
 #include "tater_protocol.h"
+#include "task_cleanup.h"
 #include "wake_detection_policy.h"
 #include "wake_model_assets.h"
 #include "wake_model_policy.h"
@@ -89,7 +90,15 @@ constexpr int64_t kWakeDownloadStaleUs = 30000000;
 constexpr int64_t kWakeDownloadRetryDelayUs = 5000000;
 constexpr size_t kCaptureBufferSamples = kAudioSampleRate * 3;
 constexpr size_t kCaptureUploadBufferSize = 2048;
-constexpr int kCaptureUploadTimeoutMs = 15000;
+// IDF's HTTP client owns these malloc() buffers. Put them above the configured
+// internal-allocation cutoff so they prefer PSRAM, independently of write chunks.
+constexpr size_t kCaptureHttpBufferSize =
+    CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL >= kCaptureUploadBufferSize
+        ? CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL + 1 : kCaptureUploadBufferSize;
+constexpr int kCaptureUploadTimeoutMs = 1500;
+constexpr int64_t kCaptureUploadIdleUs = 2000000;
+constexpr int64_t kCaptureUploadMaxAgeUs = 60000000;
+constexpr int64_t kCaptureUploadRetryUs = 5000000;
 constexpr char kCaptureUploadPath[] = "/api/upload_captured_audio_raw";
 constexpr char kWakeModelCacheMetaPath[] = "/spiffs/wake_model.json";
 constexpr char kWakeModelCacheDataPath[] = "/spiffs/wake_model.tflite";
@@ -160,6 +169,7 @@ struct BoundarySessionRequest {
 struct CaptureUploadRequest {
     uint8_t *pcm_data;
     size_t byte_count;
+    int64_t queued_us;
     char upload_url[256];
     char source_device[64];
     char wake_word[32];
@@ -322,9 +332,14 @@ bool s_capture_ring_psram = false;
 SemaphoreHandle_t s_capture_ring_lock = nullptr;
 std::atomic<bool> s_boundary_session_running{false};
 std::atomic<bool> s_boundary_reset_pending{false};
-volatile bool s_capture_upload_running = false;
-uint32_t s_capture_upload_count = 0;
-uint32_t s_capture_upload_failures = 0;
+std::atomic<bool> s_capture_upload_running{false};
+std::atomic<CaptureUploadRequest *> s_pending_capture_upload{nullptr};
+std::atomic<uint32_t> s_capture_upload_count{0};
+std::atomic<uint32_t> s_capture_upload_failures{0};
+std::atomic<uint32_t> s_capture_upload_deferred{0};
+std::atomic<uint32_t> s_capture_upload_skipped{0};
+int64_t s_capture_idle_since_us = 0;
+int64_t s_capture_retry_after_us = 0;
 char s_capture_last_event_type[16] = "";
 char s_capture_last_error[96] = "";
 PendingCloseMiss s_pending_close_miss = {};
@@ -1337,9 +1352,6 @@ uint8_t *snapshot_capture_audio(size_t *out_byte_count)
     size_t byte_count = sample_count * sizeof(int16_t);
     uint8_t *raw = static_cast<uint8_t *>(heap_caps_malloc(byte_count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     if (!raw) {
-        raw = static_cast<uint8_t *>(heap_caps_malloc(byte_count, MALLOC_CAP_8BIT));
-    }
-    if (!raw) {
         if (s_capture_ring_lock) {
             xSemaphoreGive(s_capture_ring_lock);
         }
@@ -1512,6 +1524,39 @@ void build_capture_upload_url(const char *base_url, char *out, size_t out_len)
     std::snprintf(out, out_len, "%s%s%s", base, len > 0 && base[len - 1] == '/' ? "" : "/", "api/upload_captured_audio_raw");
 }
 
+bool capture_upload_may_run()
+{
+    if (!tater_protocol_background_work_allowed()
+        || s_boundary_session_running.load(std::memory_order_acquire)
+        || tater_wake_engine_background_download_active()) {
+        return false;
+    }
+    if (s_wake_verifier_lock) {
+        xSemaphoreTake(s_wake_verifier_lock, portMAX_DELAY);
+    }
+    bool pending_verification = s_wake_verifier_pending;
+    if (s_wake_verifier_lock) {
+        xSemaphoreGive(s_wake_verifier_lock);
+    }
+    return !pending_verification;
+}
+
+void free_capture_upload(CaptureUploadRequest *request)
+{
+    if (request) {
+        heap_caps_free(request->pcm_data);
+        heap_caps_free(request);
+    }
+}
+
+bool requeue_capture_upload(CaptureUploadRequest *request)
+{
+    CaptureUploadRequest *empty = nullptr;
+    return s_pending_capture_upload.compare_exchange_strong(
+        empty, request, std::memory_order_release, std::memory_order_relaxed
+    );
+}
+
 void capture_upload_task(void *arg)
 {
     CaptureUploadRequest *request = static_cast<CaptureUploadRequest *>(arg);
@@ -1522,6 +1567,7 @@ void capture_upload_task(void *arg)
     }
 
     bool ok = false;
+    bool preempted = false;
     char sample_rate[16] = {0};
     char max_probability[24] = {0};
     char average_probability[24] = {0};
@@ -1537,11 +1583,16 @@ void capture_upload_task(void *arg)
     cfg.url = request->upload_url;
     cfg.method = HTTP_METHOD_POST;
     cfg.timeout_ms = kCaptureUploadTimeoutMs;
-    cfg.buffer_size = kCaptureUploadBufferSize;
-    cfg.buffer_size_tx = kCaptureUploadBufferSize;
+    cfg.buffer_size = kCaptureHttpBufferSize;
+    cfg.buffer_size_tx = kCaptureHttpBufferSize;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
 
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    esp_http_client_handle_t client = nullptr;
+    if (!capture_upload_may_run()) {
+        preempted = true;
+        goto done;
+    }
+    client = esp_http_client_init(&cfg);
     if (!client) {
         set_capture_last_error("upload client init failed");
         goto done;
@@ -1575,22 +1626,27 @@ void capture_upload_task(void *arg)
     esp_http_client_set_header(client, "X-Probability-History", request->probability_history);
     esp_http_client_set_header(client, "X-Notes", "tater native satellite");
 
+    if (!capture_upload_may_run()) {
+        preempted = true;
+        goto done;
+    }
     err = esp_http_client_open(client, request->byte_count);
     if (err != ESP_OK) {
         set_capture_last_error("upload open failed");
         ESP_LOGW(TAG, "trainer capture upload open failed url=%s err=%s", request->upload_url, esp_err_to_name(err));
-        esp_http_client_cleanup(client);
         goto done;
     }
 
     while (written_total < request->byte_count) {
+        if (!capture_upload_may_run()) {
+            preempted = true;
+            goto done;
+        }
         size_t chunk = std::min(kCaptureUploadBufferSize, request->byte_count - written_total);
         int written = esp_http_client_write(client, reinterpret_cast<const char *>(request->pcm_data + written_total), chunk);
         if (written <= 0) {
             set_capture_last_error("upload write failed");
             ESP_LOGW(TAG, "trainer capture upload write failed event=%s", request->event_type);
-            esp_http_client_close(client);
-            esp_http_client_cleanup(client);
             goto done;
         }
         written_total += (size_t)written;
@@ -1599,8 +1655,6 @@ void capture_upload_task(void *arg)
 
     (void)esp_http_client_fetch_headers(client);
     status_code = esp_http_client_get_status_code(client);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
     if (status_code < 200 || status_code >= 300) {
         set_capture_last_error("upload http error");
         ESP_LOGW(TAG, "trainer capture upload failed status=%d event=%s", status_code, request->event_type);
@@ -1622,24 +1676,79 @@ void capture_upload_task(void *arg)
     tater_protocol_send_log("info", "trainer capture uploaded");
 
 done:
-    if (!ok) {
+    if (client) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+    }
+    if (preempted && requeue_capture_upload(request)) {
+        s_capture_upload_deferred++;
+        set_capture_last_error("upload deferred during voice activity");
+        request = nullptr; // The bounded pending slot owns it again.
+    } else if (!ok) {
         s_capture_upload_failures++;
         tater_protocol_send_log("warn", "trainer capture upload failed");
     }
-    if (request->pcm_data) {
-        heap_caps_free(request->pcm_data);
-    }
-    heap_caps_free(request);
+    free_capture_upload(request);
     s_capture_upload_running = false;
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-    if (task_with_caps) {
-        vTaskDeleteWithCaps(nullptr);
+    tater_task_delete_current(task_with_caps);
+}
+
+void poll_capture_upload()
+{
+    // Only the application poll consumes the pending slot. Producers publish
+    // immutable PSRAM snapshots and never replace or free a published request.
+    CaptureUploadRequest *request = s_pending_capture_upload.load(std::memory_order_acquire);
+    int64_t now = esp_timer_get_time();
+    if (request) {
+        const tater_live_settings_t *settings = tater_live_settings_get();
+        bool enabled = settings && (std::strcmp(request->event_type, "wake_detected") == 0
+            ? settings->capture_wake_audio : settings->capture_close_misses);
+        if (!enabled || now - request->queued_us >= kCaptureUploadMaxAgeUs) {
+            request = s_pending_capture_upload.exchange(nullptr, std::memory_order_acq_rel);
+            free_capture_upload(request);
+            s_capture_upload_skipped++;
+            set_capture_last_error(enabled ? "pending capture expired" : "capture disabled");
+            return;
+        }
+    }
+    if (!capture_upload_may_run()) {
+        s_capture_idle_since_us = 0;
         return;
     }
-#else
-    (void)task_with_caps;
+    if (!s_capture_idle_since_us) {
+        s_capture_idle_since_us = now;
+    }
+    if (!request || s_capture_upload_running.load(std::memory_order_acquire)
+        || now - std::max(s_capture_idle_since_us, request->queued_us) < kCaptureUploadIdleUs
+        || now < s_capture_retry_after_us) {
+        return;
+    }
+    // Leave headroom for internal-only task/network bookkeeping. Optional
+    // training must wait instead of taking the last usable internal block.
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < 4096
+        || heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 2048) {
+        return;
+    }
+    s_capture_upload_running.store(true, std::memory_order_release);
+    request = s_pending_capture_upload.exchange(nullptr, std::memory_order_acq_rel);
+    BaseType_t created = pdFAIL;
+#if (configSUPPORT_STATIC_ALLOCATION == 1)
+    request->task_with_caps = true;
+    created = xTaskCreatePinnedToCoreWithCaps(
+        capture_upload_task, "wake_capture_up", 8192, request, 3, NULL, 0,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
 #endif
-    vTaskDelete(nullptr);
+    if (created != pdPASS) {
+        // No internal-stack fallback: retain one clip and retry from idle.
+        if (!requeue_capture_upload(request)) {
+            free_capture_upload(request);
+        }
+        s_capture_retry_after_us = now + kCaptureUploadRetryUs;
+        s_capture_upload_deferred++;
+        set_capture_last_error("upload PSRAM task create deferred");
+        s_capture_upload_running.store(false, std::memory_order_release);
+    }
 }
 
 void queue_capture_upload(
@@ -1666,8 +1775,10 @@ void queue_capture_upload(
     if (std::strcmp(event_type, "wake_detected") != 0 && !settings->capture_close_misses) {
         return;
     }
-    if (s_capture_upload_running) {
-        ESP_LOGW(TAG, "trainer capture upload already running; skipped event=%s", event_type);
+    if (s_capture_upload_running.load(std::memory_order_acquire)
+        || s_pending_capture_upload.load(std::memory_order_acquire)) {
+        s_capture_upload_skipped++;
+        ESP_LOGW(TAG, "trainer capture already pending or uploading; skipped event=%s", event_type);
         return;
     }
 
@@ -1688,7 +1799,7 @@ void queue_capture_upload(
     }
 
     CaptureUploadRequest *request = static_cast<CaptureUploadRequest *>(
-        heap_caps_calloc(1, sizeof(CaptureUploadRequest), MALLOC_CAP_8BIT)
+        heap_caps_calloc(1, sizeof(CaptureUploadRequest), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     );
     if (!request) {
         heap_caps_free(pcm_data);
@@ -1698,6 +1809,7 @@ void queue_capture_upload(
     }
 
     request->pcm_data = pcm_data;
+    request->queued_us = esp_timer_get_time();
     request->byte_count = byte_count;
     std::snprintf(request->upload_url, sizeof(request->upload_url), "%s", upload_url);
     std::snprintf(request->source_device, sizeof(request->source_device), "%s", tater_protocol_device_name());
@@ -1723,32 +1835,12 @@ void queue_capture_upload(
     request->active_window_count = active_window_count;
     request->min_active_windows = min_active_windows;
 
-    s_capture_upload_running = true;
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-    request->task_with_caps = true;
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
-        capture_upload_task,
-        "wake_capture_up",
-        8192,
-        request,
-        3,
-        NULL,
-        0,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-    );
-#else
-    BaseType_t created = pdFAIL;
-#endif
-    if (created != pdPASS) {
-        request->task_with_caps = false;
-        created = xTaskCreatePinnedToCore(capture_upload_task, "wake_capture_up", 8192, request, 3, NULL, 0);
-    }
-    if (created != pdPASS) {
-        s_capture_upload_running = false;
-        heap_caps_free(request->pcm_data);
-        heap_caps_free(request);
-        set_capture_last_error("upload task create failed");
-        ESP_LOGW(TAG, "trainer capture upload task create failed");
+    // Preserve the wake clip now, before the rolling buffer changes, but do
+    // not create an HTTP client or task until the complete voice turn is idle.
+    if (s_capture_upload_running.load(std::memory_order_acquire)
+        || !requeue_capture_upload(request)) {
+        free_capture_upload(request);
+        s_capture_upload_skipped++;
     }
 }
 
@@ -2335,15 +2427,7 @@ void wake_sound_download_task(void *arg)
         heap_caps_free(data);
     }
     set_wake_sound_download_running(false, "");
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-    if (task_with_caps) {
-        vTaskDeleteWithCaps(NULL);
-        return;
-    }
-#else
-    (void)task_with_caps;
-#endif
-    vTaskDelete(NULL);
+    tater_task_delete_current(task_with_caps);
 }
 
 BaseType_t create_wake_sound_download_task(WakeSoundDownloadRequest *request)
@@ -2795,15 +2879,7 @@ void boundary_session_task(void *arg)
 
     s_boundary_reset_pending.store(true, std::memory_order_release);
     s_boundary_session_running.store(false, std::memory_order_release);
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-    if (task_with_caps) {
-        vTaskDeleteWithCaps(nullptr);
-        return;
-    }
-#else
-    (void)task_with_caps;
-#endif
-    vTaskDelete(nullptr);
+    tater_task_delete_current(task_with_caps);
 }
 
 BaseType_t create_boundary_session_task(BoundarySessionRequest *request)
@@ -3286,15 +3362,7 @@ done:
         heap_caps_free(model.boundary_data);
     }
     set_custom_download_running(false, "", request_generation);
-#if (configSUPPORT_STATIC_ALLOCATION == 1)
-    if (task_with_caps) {
-        vTaskDeleteWithCaps(NULL);
-        return;
-    }
-#else
-    (void)task_with_caps;
-#endif
-    vTaskDelete(NULL);
+    tater_task_delete_current(task_with_caps);
 }
 
 void consume_pending_custom_model(const tater_live_settings_t *settings)
@@ -4059,6 +4127,7 @@ extern "C" void tater_wake_engine_poll(void)
     // Keep timeout handling independent of microphone reads, playback, model
     // loading, and wake inference without adding another FreeRTOS task.
     poll_wake_verification_timeout();
+    poll_capture_upload();
 }
 
 extern "C" void tater_wake_engine_note_audio(const int16_t *pcm, size_t sample_count)
@@ -4246,9 +4315,12 @@ extern "C" void tater_wake_engine_add_status(cJSON *payload)
     cJSON_AddStringToObject(verifier, "last_reason", verifier_reason);
     cJSON_AddItemToObject(wake, "verifier", verifier);
     cJSON *capture = cJSON_CreateObject();
-    cJSON_AddBoolToObject(capture, "upload_running", s_capture_upload_running);
-    cJSON_AddNumberToObject(capture, "uploads", s_capture_upload_count);
-    cJSON_AddNumberToObject(capture, "upload_failures", s_capture_upload_failures);
+    cJSON_AddBoolToObject(capture, "upload_running", s_capture_upload_running.load());
+    cJSON_AddBoolToObject(capture, "upload_pending", s_pending_capture_upload.load() != nullptr);
+    cJSON_AddNumberToObject(capture, "upload_deferred", s_capture_upload_deferred.load());
+    cJSON_AddNumberToObject(capture, "upload_skipped", s_capture_upload_skipped.load());
+    cJSON_AddNumberToObject(capture, "uploads", s_capture_upload_count.load());
+    cJSON_AddNumberToObject(capture, "upload_failures", s_capture_upload_failures.load());
     cJSON_AddStringToObject(capture, "last_event_type", s_capture_last_event_type);
     cJSON_AddStringToObject(capture, "last_error", s_capture_last_error);
     size_t capture_samples = capture_audio_sample_count();

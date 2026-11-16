@@ -15,6 +15,7 @@
 #include "playback.h"
 #include "provisioning.h"
 #include "sendspin_player.h"
+#include "task_cleanup.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include "tater_config.h"
@@ -122,6 +123,8 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    // Reserve cleanup resources before audio/network workers consume the heap.
+    ESP_ERROR_CHECK(tater_task_cleanup_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(tater_cache_init());
 
     ESP_ERROR_CHECK(tater_config_load(&s_config));
