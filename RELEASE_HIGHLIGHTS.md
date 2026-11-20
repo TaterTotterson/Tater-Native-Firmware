@@ -1,17 +1,12 @@
-- Releases native firmware `0.6.5` for Voice PE, Satellite1, ReSpeaker XVF3800,
+- Releases native firmware `0.6.6` for Voice PE, Satellite1, ReSpeaker XVF3800,
   and ESP32-S3-BOX-3.
-- Addresses internal-memory exhaustion and reboot risks with Send Good Wakes
-  and Close Misses enabled, reported in
-  [issue #25](https://github.com/TaterTotterson/Tater-Native-Firmware/issues/25).
-- Keeps wake captures immediate, but holds one bounded PSRAM snapshot and waits
-  until the full voice turn, reply playback, and other audio activity finish
-  before uploading it to the trainer. New voice activity preempts an upload;
-  disabled or stale pending captures are discarded safely.
-- Places optional capture requests and audio snapshots explicitly in PSRAM,
-  sizes HTTP buffers to prefer PSRAM, and avoids internal-stack upload fallback.
-  Task-creation failures defer optional uploads rather than exhausting voice RAM.
-- Reserves a reusable cleanup worker at startup. Playback, wake verification,
-  wake-boundary processing, wake downloads, and Sendspin startup cleanup no
-  longer allocate a temporary self-deletion task when internal RAM is low.
-- Adds host regressions for upload deferral, foreground preemption, bounded
-  capture ownership, allocation failures, and cleanup with allocations disabled.
+- Change the satellite name and room live from Tater 3.0.4, Home Assistant bridge
+  1.4.18, or Home Assistant's device editor through that bridge. No factory reset,
+  reboot, or re-pairing is required; an empty room clears the assignment.
+- Validate and persist both values together before confirming a change. Failed
+  saves retain the previous name and room, while reconnects report the saved
+  identity. Preserve Wi-Fi, pairing credentials, stable IDs, and other settings.
+- Advertise live identity support so older controllers remain compatible and
+  updated controllers only offer editing when the satellite supports it.
+- Add host regressions using the production persistence code, including storage
+  failures, room clearing, restart restoration, and credential preservation.

@@ -69,6 +69,9 @@ negotiation and a safe 5V amplifier fallback.
 - Tater server URL setup
 - Add Satellite pairing code setup
 - Device name and room setup
+- Live name and room changes from Tater, the HA bridge, or HA's device editor
+  through the updated bridge. Changes persist together in NVS without resetting
+  Wi-Fi, pairing, or the hardware-derived device ID.
 - Persistent device credential saved after pairing
 - Unpaired native satellites rejected by Tater by default
 - Saved Wi-Fi credentials are preserved through temporary outages

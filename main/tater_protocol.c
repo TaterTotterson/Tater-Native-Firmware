@@ -27,6 +27,7 @@
 #include "audio_i2s.h"
 #include "ble_scanner.h"
 #include "native_settings.h"
+#include "native_identity.h"
 #include "network_recovery.h"
 #include "ota_update.h"
 #include "playback.h"
@@ -2270,6 +2271,7 @@ static void send_hello(void)
     cJSON_AddNumberToObject(caps, "wake_boundary_version", 1);
     cJSON_AddNumberToObject(caps, "wake_bundle_version", 4);
     cJSON_AddBoolToObject(caps, "live_settings", true);
+    cJSON_AddBoolToObject(caps, "identity_update", true);
     cJSON_AddBoolToObject(caps, "setup_mode", true);
     cJSON_AddBoolToObject(caps, "continued_chat_reopen", true);
     cJSON_AddBoolToObject(caps, "barge_in", true);
@@ -2736,6 +2738,30 @@ static void handle_text_message(const char *data, int len)
         ESP_ERROR_CHECK_WITHOUT_ABORT(tater_config_clear());
         vTaskDelay(pdMS_TO_TICKS(500));
         esp_restart();
+    } else if (strcmp(type, "identity.set") == 0) {
+        const cJSON *name_item = cJSON_GetObjectItemCaseSensitive(payload, "device_name");
+        const cJSON *room_item = cJSON_GetObjectItemCaseSensitive(payload, "room");
+        char name[TATER_CFG_DEVICE_NAME_LEN] = {0};
+        char room[TATER_CFG_ROOM_LEN] = {0};
+        const char *error = NULL;
+        if (!cJSON_IsString(name_item) || !cJSON_IsString(room_item)
+            || !native_identity_text(name_item->valuestring, name, sizeof(name), true)
+            || !native_identity_text(room_item->valuestring, room, sizeof(room), false)) {
+            error = "Name must be 1-63 bytes and room at most 63 bytes, without control characters";
+        } else if (tater_config_save_identity(name, room) != ESP_OK) {
+            error = "Could not save satellite name and room";
+        } else {
+            strlcpy(s_config.device_name, name, sizeof(s_config.device_name));
+            strlcpy(s_config.room, room, sizeof(s_config.room));
+        }
+        cJSON *response = new_envelope("identity.result");
+        cJSON *result = cJSON_GetObjectItem(response, "payload");
+        cJSON_AddStringToObject(result, "reply_to", request_id);
+        cJSON_AddBoolToObject(result, "ok", error == NULL);
+        cJSON_AddStringToObject(result, "device_name", s_config.device_name);
+        cJSON_AddStringToObject(result, "room", s_config.room);
+        if (error) cJSON_AddStringToObject(result, "error", error);
+        send_json(response);
     } else if (strcmp(type, "settings") == 0 && cJSON_IsObject(payload)) {
         tater_live_settings_apply_json(payload);
     } else if (strcmp(type, "error") == 0) {

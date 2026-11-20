@@ -9,6 +9,11 @@
 static const char *TAG = "tater_config";
 static const char *NVS_NAMESPACE = "tater";
 
+typedef struct {
+    char name[TATER_CFG_DEVICE_NAME_LEN];
+    char room[TATER_CFG_ROOM_LEN];
+} saved_identity_t;
+
 static void safe_copy(char *dst, size_t dst_len, const char *src)
 {
     if (!dst || dst_len == 0) {
@@ -59,6 +64,16 @@ esp_err_t tater_config_load(tater_config_t *config)
     load_string(nvs, "token", config->token, sizeof(config->token));
     load_string(nvs, "name", config->device_name, sizeof(config->device_name));
     load_string(nvs, "room", config->room, sizeof(config->room));
+    saved_identity_t identity = {0};
+    size_t identity_size = sizeof(identity);
+    bool identity_loaded = nvs_get_blob(nvs, "identity", &identity, &identity_size) == ESP_OK
+        && identity_size == sizeof(identity) && identity.name[0]
+        && memchr(identity.name, '\0', sizeof(identity.name))
+        && memchr(identity.room, '\0', sizeof(identity.room));
+    if (identity_loaded) {
+        safe_copy(config->device_name, sizeof(config->device_name), identity.name);
+        safe_copy(config->room, sizeof(config->room), identity.room);
+    }
     nvs_close(nvs);
 
     config->provisioned = strlen(config->wifi_ssid) > 0;
@@ -68,7 +83,7 @@ esp_err_t tater_config_load(tater_config_t *config)
     if (strlen(config->device_name) == 0) {
         safe_copy(config->device_name, sizeof(config->device_name), TATER_DEFAULT_DEVICE_NAME);
 #if !TATER_BOARD_VOICE_PE
-    } else if (strcmp(config->device_name, "Tater Voice PE") == 0) {
+    } else if (!identity_loaded && strcmp(config->device_name, "Tater Voice PE") == 0) {
         /*
          * Early multi-board images accidentally persisted the VoicePE default
          * on every board. Correct that known default without touching a name
@@ -94,7 +109,29 @@ esp_err_t tater_config_save(const tater_config_t *config)
     ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_str(nvs, "token", config->token));
     ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_str(nvs, "name", config->device_name));
     ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_str(nvs, "room", config->room));
+    saved_identity_t identity = {0};
+    safe_copy(identity.name, sizeof(identity.name), config->device_name);
+    safe_copy(identity.room, sizeof(identity.room), config->room);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_blob(nvs, "identity", &identity, sizeof(identity)));
     esp_err_t err = nvs_commit(nvs);
+    nvs_close(nvs);
+    return err;
+}
+
+esp_err_t tater_config_save_identity(const char *name, const char *room)
+{
+    ESP_RETURN_ON_FALSE(name && room && name[0], ESP_ERR_INVALID_ARG, TAG, "invalid identity");
+    ESP_RETURN_ON_FALSE(strlen(name) < TATER_CFG_DEVICE_NAME_LEN
+        && strlen(room) < TATER_CFG_ROOM_LEN, ESP_ERR_INVALID_ARG, TAG, "identity too long");
+    saved_identity_t identity = {0};
+    safe_copy(identity.name, sizeof(identity.name), name);
+    safe_copy(identity.room, sizeof(identity.room), room);
+    nvs_handle_t nvs = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs), TAG, "nvs open failed");
+    esp_err_t err = nvs_set_blob(nvs, "identity", &identity, sizeof(identity));
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
     nvs_close(nvs);
     return err;
 }
