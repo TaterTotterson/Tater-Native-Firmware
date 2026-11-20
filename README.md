@@ -250,12 +250,17 @@ follow the same timeline.
 - Native intercom/push-to-talk hooks through the same satellite transport
 - Broadcast/intercom routing is handled by Tater so room targeting can happen on
   the server side
-- Always-on passive BLE observation using the ESP32-S3 radio. Native satellites
-  batch nearby advertisements to Tater for presence, sensor decoding, and
-  automations. The scanner starts automatically, uses bounded buffers, and pauses
-  during critical voice/playback activity. Audio preroll and network
-  allocations use PSRAM so the Bluetooth controller retains enough internal
-  memory on all four supported board families, including Voice PE.
+- On-demand BLE discovery and an Echo-compatible GATT proxy on all four board
+  families, including Voice PE. Bluetooth starts only for an explicit device
+  scan or a device operation; discovery times out and pauses during listening,
+  thinking, and playback. One active connection, such as Meshtastic, keeps the
+  radio enabled until disconnected. Saved bonds remain in NVS and do not start
+  scanning. The proxy supports services, reads, writes, notifications, and secure
+  six-digit PIN pairing. Bluetooth and Wi-Fi share airtime; enabling Bluetooth
+  does not disconnect Wi-Fi. Broadcast-only sensors are not monitored continuously.
+  Discovery trees and request buffers use PSRAM, while the Bluetooth host task
+  retains an internal stack for flash/NVS operations. Failed radio startup leaves
+  voice service available.
 
 ### Board-Specific Hardware
 

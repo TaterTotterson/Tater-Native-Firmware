@@ -47,3 +47,10 @@ bool tater_ble_scanner_supported(void);
 void tater_ble_scanner_init(tater_ble_batch_callback_t batch_callback);
 void tater_ble_scanner_poll(bool audio_busy);
 void tater_ble_scanner_get_stats(tater_ble_scanner_stats_t *stats);
+
+/* Stack lifetime is owned by the on-demand proxy worker. */
+esp_err_t tater_ble_stack_start(void);
+esp_err_t tater_ble_stack_stop(void);
+void tater_ble_scanner_discover(uint32_t duration_ms);
+void tater_ble_scanner_hold(bool hold);
+bool tater_ble_scanner_requested(void);

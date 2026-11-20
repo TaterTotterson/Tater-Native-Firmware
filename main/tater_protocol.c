@@ -26,6 +26,7 @@
 #include "audio_aec.h"
 #include "audio_i2s.h"
 #include "ble_scanner.h"
+#include "ble_proxy.h"
 #include "native_settings.h"
 #include "native_identity.h"
 #include "network_recovery.h"
@@ -148,6 +149,7 @@ static void timer_monitor_task(void *arg);
 static void continued_reopen_watchdog_task(void *arg);
 static cJSON *new_envelope(const char *type);
 static int send_json(cJSON *root);
+static void ble_proxy_send(const char *type, cJSON *payload);
 
 typedef struct {
     bool initialized;
@@ -526,6 +528,7 @@ static void mark_link_down(const char *detail)
     int64_t now_us = esp_timer_get_time();
     s_last_link_down_us = now_us;
     snprintf(s_last_link_down_detail, sizeof(s_last_link_down_detail), "%s", detail ? detail : "disconnected");
+    tater_ble_proxy_reset();
     s_connected = false;
     s_hello_acked = false;
     s_voice_active = false;
@@ -2283,6 +2286,12 @@ static void send_hello(void)
     cJSON_AddBoolToObject(caps, "aec", true);
     cJSON_AddBoolToObject(caps, "ble_advertisements", tater_ble_scanner_supported());
     cJSON_AddNumberToObject(caps, "ble_advertisements_version", 1);
+    cJSON_AddBoolToObject(caps, "ble_gatt", tater_ble_scanner_supported());
+    cJSON_AddNumberToObject(caps, "ble_gatt_version", 1);
+    cJSON_AddBoolToObject(caps, "ble_gatt_pairing", tater_ble_scanner_supported());
+    cJSON_AddNumberToObject(caps, "ble_gatt_pairing_version", 1);
+    cJSON_AddBoolToObject(caps, "ble_on_demand", tater_ble_scanner_supported());
+    cJSON_AddNumberToObject(caps, "ble_on_demand_version", 1);
     cJSON_AddBoolToObject(caps, "audio_scenes", true);
     cJSON_AddBoolToObject(caps, "audio_ducking", true);
     cJSON_AddBoolToObject(caps, "looping_background_audio", true);
@@ -2738,6 +2747,8 @@ static void handle_text_message(const char *data, int len)
         ESP_ERROR_CHECK_WITHOUT_ABORT(tater_config_clear());
         vTaskDelay(pdMS_TO_TICKS(500));
         esp_restart();
+    } else if (strcmp(type, "ble.gatt") == 0 && cJSON_IsObject(payload)) {
+        tater_ble_proxy_request(request_id, payload);
     } else if (strcmp(type, "identity.set") == 0) {
         const cJSON *name_item = cJSON_GetObjectItemCaseSensitive(payload, "device_name");
         const cJSON *room_item = cJSON_GetObjectItemCaseSensitive(payload, "room");
@@ -2979,6 +2990,7 @@ void tater_protocol_init(
     }
     s_state_cb = state_cb;
     s_play_url_cb = play_url_cb;
+    tater_ble_proxy_init(ble_proxy_send);
     s_play_tone_cb = play_tone_cb;
     s_ota_url_cb = ota_url_cb;
     tater_live_settings_init_defaults();
@@ -3071,6 +3083,7 @@ bool tater_protocol_timer_is_active(void)
 bool tater_protocol_audio_busy(void)
 {
     return s_voice_active
+        || s_current_state == TATER_STATE_THINKING
         || s_current_state == TATER_STATE_LISTENING
         || s_current_state == TATER_STATE_SPEAKING
         || s_current_state == TATER_STATE_TOOL_CALL
@@ -3893,4 +3906,11 @@ void tater_protocol_send_ota_status(const char *status, int progress, const char
     cJSON_AddNumberToObject(payload, "progress", progress);
     cJSON_AddStringToObject(payload, "message", message ? message : "");
     send_json(root);
+}
+
+static void ble_proxy_send(const char *type, cJSON *payload)
+{
+    cJSON *message = new_envelope(type);
+    cJSON_ReplaceItemInObject(message, "payload", payload);
+    send_json(message);
 }

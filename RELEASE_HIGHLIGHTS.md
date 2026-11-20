@@ -1,12 +1,7 @@
-- Releases native firmware `0.6.6` for Voice PE, Satellite1, ReSpeaker XVF3800,
-  and ESP32-S3-BOX-3.
-- Change the satellite name and room live from Tater 3.0.4, Home Assistant bridge
-  1.4.18, or Home Assistant's device editor through that bridge. No factory reset,
-  reboot, or re-pairing is required; an empty room clears the assignment.
-- Validate and persist both values together before confirming a change. Failed
-  saves retain the previous name and room, while reconnects report the saved
-  identity. Preserve Wi-Fi, pairing credentials, stable IDs, and other settings.
-- Advertise live identity support so older controllers remain compatible and
-  updated controllers only offer editing when the satellite supports it.
-- Add host regressions using the production persistence code, including storage
-  failures, room clearing, restart restoration, and credential preservation.
+- Releases native firmware `0.6.7` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Replace automatic room presence scanning with explicit, time-limited Bluetooth discovery. Bluetooth stays off until a scan or device operation is requested, and powers down when unused.
+- Add an Echo-compatible GATT proxy with one active connection, service discovery, reads, writes, notifications, indications, and authenticated six-digit PIN pairing. Retain saved bond keys in NVS.
+- Keep an active device connection, such as Meshtastic, open when discovery stops. Pause discovery during listening, thinking, tool calls, and playback without disconnecting Wi-Fi.
+- Bound request queues, values, discovery trees, and notification buffers. Handle failed radio/task startup and retire stale operations after a controller disconnect or Bluetooth reset.
+- Update the connected controller to Tater 3.0.5 or Home Assistant bridge 1.4.19 for the discovery controls; Meshtastic Core 0.3.6 starts its own bounded scan. Preserve existing pairing, Wi-Fi, identity, and other settings.
+- This on-demand proxy does not continuously monitor broadcast-only sensors or provide Bluetooth speaker audio. Firmware builds and host regressions pass; physical pairing, reconnection, and voice coexistence testing remain pending.

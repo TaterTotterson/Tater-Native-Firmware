@@ -1,4 +1,5 @@
 #include "ble_scanner.h"
+#include "ble_proxy.h"
 
 #include <limits.h>
 #include <stdlib.h>
@@ -8,6 +9,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
 #include "host/ble_gap.h"
@@ -18,6 +21,11 @@
 #endif
 
 static const char *TAG = "tater_ble";
+static StaticSemaphore_t s_stack_lock_storage;
+static SemaphoreHandle_t s_stack_lock;
+static StaticSemaphore_t s_host_exited_storage;
+static SemaphoreHandle_t s_host_exited;
+static TaskHandle_t s_host_task;
 
 #define TATER_BLE_DEDUPE_ENTRIES 48
 #define TATER_BLE_RSSI_DELTA_DB 3
@@ -45,6 +53,9 @@ static volatile bool s_initialized;
 static volatile bool s_synced;
 static volatile bool s_scanning;
 static volatile bool s_paused_for_audio;
+static volatile bool s_connection_hold;
+static uint32_t s_scan_started_ms;
+static uint32_t s_scan_duration_ms;
 static tater_ble_advert_t s_batch[TATER_BLE_BATCH_MAX];
 static size_t s_batch_count;
 static uint32_t s_batch_id;
@@ -229,6 +240,7 @@ static void on_reset(int reason)
     s_stats.controller_resets++;
     s_stats.last_error = reason;
     portEXIT_CRITICAL(&s_ble_lock);
+    tater_ble_proxy_host_reset();
     ESP_LOGW(TAG, "NimBLE host reset reason=%d", reason);
 }
 
@@ -250,13 +262,14 @@ static void host_task(void *param)
 {
     (void)param;
     nimble_port_run();
-    nimble_port_freertos_deinit();
+    xSemaphoreGive(s_host_exited);
+    vTaskSuspend(NULL);
 }
 
-static void start_stack(void)
+static esp_err_t start_stack(void)
 {
     if (s_initialized) {
-        return;
+        return ESP_OK;
     }
     uint32_t before = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     esp_err_t err = nimble_port_init();
@@ -268,24 +281,34 @@ static void start_stack(void)
          * with very little internal heap after audio and Wi-Fi start.  Do not
          * retry every poll in that condition: repeated controller setup can
          * starve the WebSocket task and disconnect the satellite.
-         * A reboot clears this latch and lets the always-on scanner retry from
-         * a clean controller state.
+         * A later explicit operation can retry; the main voice loop never
+         * attempts Bluetooth initialization automatically.
          */
         s_requested_enabled = false;
         s_stats.last_error = err;
         portEXIT_CRITICAL(&s_ble_lock);
-        ESP_LOGE(TAG, "NimBLE init failed: %s; scanner disabled until reboot", esp_err_to_name(err));
-        return;
+        ESP_LOGE(TAG, "NimBLE init failed: %s", esp_err_to_name(err));
+        return err;
     }
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
+    tater_ble_proxy_host_config();
+    while (xSemaphoreTake(s_host_exited, 0) == pdTRUE) {}
+    if (xTaskCreatePinnedToCore(host_task, "nimble_host", CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE,
+                               NULL, configMAX_PRIORITIES - 4, &s_host_task, 0) != pdPASS) {
+        // SDK's convenience wrapper ignores task creation failure. Check it
+        // explicitly so low RAM produces an error instead of a stuck BT stack.
+        nimble_port_deinit();
+        s_host_task = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     s_initialized = true;
-    nimble_port_freertos_init(host_task);
     uint32_t after = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     ESP_LOGI(TAG, "NimBLE started internal_heap_before=%u after=%u delta=%d",
         (unsigned)before,
         (unsigned)after,
         (int)before - (int)after);
+    return ESP_OK;
 }
 
 static void start_scan(void)
@@ -349,30 +372,34 @@ bool tater_ble_scanner_supported(void)
 void tater_ble_scanner_init(tater_ble_batch_callback_t batch_callback)
 {
     bool supported = tater_ble_scanner_supported();
+    s_stack_lock = xSemaphoreCreateMutexStatic(&s_stack_lock_storage);
+    s_host_exited = xSemaphoreCreateBinaryStatic(&s_host_exited_storage);
     portENTER_CRITICAL(&s_ble_lock);
     s_batch_callback = batch_callback;
     s_last_flush_ms = monotonic_ms();
     memset(&s_stats, 0, sizeof(s_stats));
     s_stats.supported = supported;
-    s_requested_enabled = supported;
+    s_requested_enabled = false;
     portEXIT_CRITICAL(&s_ble_lock);
 }
 
 void tater_ble_scanner_poll(bool audio_busy)
 {
     uint32_t now_ms = monotonic_ms();
-    s_paused_for_audio = s_requested_enabled && audio_busy;
+    if (s_requested_enabled && elapsed_at_least(now_ms, s_scan_started_ms, s_scan_duration_ms)) {
+        s_requested_enabled = false;
+    }
+    s_paused_for_audio = s_requested_enabled && (audio_busy || s_connection_hold);
 
 #if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
-    if (s_requested_enabled && !s_initialized) {
-        start_stack();
-    }
-    bool want_scan = s_requested_enabled && s_synced && !audio_busy;
+    if (xSemaphoreTake(s_stack_lock, 0) != pdTRUE) return;
+    bool want_scan = s_initialized && s_requested_enabled && s_synced && !audio_busy && !s_connection_hold;
     if (want_scan) {
         start_scan();
     } else if (s_scanning || (s_initialized && ble_gap_disc_active())) {
         stop_scan();
     }
+    xSemaphoreGive(s_stack_lock);
 #endif
 
     if (audio_busy || !elapsed_at_least(now_ms, s_last_flush_ms, TATER_BLE_BATCH_FLUSH_MS)) {
@@ -425,3 +452,55 @@ void tater_ble_scanner_get_stats(tater_ble_scanner_stats_t *stats)
     stats->internal_heap_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     stats->internal_heap_min = (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
+
+esp_err_t tater_ble_stack_start(void)
+{
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    xSemaphoreTake(s_stack_lock, portMAX_DELAY);
+    esp_err_t result = start_stack();
+    xSemaphoreGive(s_stack_lock);
+    return result;
+#else
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+esp_err_t tater_ble_stack_stop(void)
+{
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED
+    xSemaphoreTake(s_stack_lock, portMAX_DELAY);
+    if (!s_initialized) { xSemaphoreGive(s_stack_lock); return ESP_OK; }
+    s_requested_enabled = false;
+    stop_scan();
+    if (nimble_port_stop() != 0) { xSemaphoreGive(s_stack_lock); return ESP_FAIL; }
+    if (xSemaphoreTake(s_host_exited, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        xSemaphoreGive(s_stack_lock);
+        return ESP_ERR_TIMEOUT;
+    }
+    vTaskDelete(s_host_task);
+    s_host_task = NULL;
+    esp_err_t err = nimble_port_deinit();
+    if (err == ESP_OK) {
+        s_initialized = false;
+        s_synced = false;
+        s_scanning = false;
+    }
+    xSemaphoreGive(s_stack_lock);
+    return err;
+#else
+    return ESP_OK;
+#endif
+}
+
+void tater_ble_scanner_discover(uint32_t duration_ms)
+{
+    portENTER_CRITICAL(&s_ble_lock);
+    s_scan_started_ms = monotonic_ms();
+    s_scan_duration_ms = duration_ms <= 60000 ? duration_ms : 60000;
+    s_requested_enabled = duration_ms > 0;
+    if (!duration_ms) s_batch_count = 0;
+    portEXIT_CRITICAL(&s_ble_lock);
+}
+
+void tater_ble_scanner_hold(bool hold) { s_connection_hold = hold; }
+bool tater_ble_scanner_requested(void) { return s_requested_enabled; }

@@ -3,6 +3,7 @@ idf_component_register(
         "app_main.c"
         "audio_aec.c"
         "ble_scanner.c"
+        "ble_proxy.c"
         "boards/voice_pe/audio_voice_pe.c"
         "boards/sat1/audio_sat1.c"
         "boards/sat1/sat1_pd_policy.c"

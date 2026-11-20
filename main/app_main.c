@@ -2,6 +2,7 @@
 #include "board.h"
 #include "button.h"
 #include "ble_scanner.h"
+#include "ble_proxy.h"
 #include "cache_storage.h"
 #include "driver/gpio.h"
 #include "esp_err.h"
@@ -163,10 +164,8 @@ void app_main(void)
         tater_leds_set_state(TATER_STATE_DISCONNECTED);
     }
     tater_protocol_init(&s_config, on_tater_state, on_tater_play_url, on_tater_play_tone, on_tater_ota_url);
-    // Reserve the Bluetooth controller's required internal memory before the
-    // encrypted Sendspin protocol starts its worker tasks and buffers.
+    // Bluetooth remains off until an explicit discovery or proxy request.
     tater_ble_scanner_init(tater_protocol_send_ble_adverts);
-    tater_ble_scanner_poll(false);
     ESP_ERROR_CHECK_WITHOUT_ABORT(tater_sendspin_init(&s_config));
     tater_protocol_start();
     ESP_ERROR_CHECK_WITHOUT_ABORT(tater_wake_engine_init());
@@ -184,6 +183,7 @@ void app_main(void)
             continue;
         }
         service_ticks = 0;
+        tater_ble_proxy_poll();
         tater_ble_scanner_poll(tater_protocol_audio_busy());
         if (++heartbeat_ticks < 20) {
             continue;
