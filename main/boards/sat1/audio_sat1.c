@@ -77,7 +77,9 @@ extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_zlib_end[] asm("_binary
 #define SAT1_XMOS_FLASH_WEL_BIT 0x02
 #define SAT1_XMOS_FLASH_WRITE_TIMEOUT_MS 100
 #define SAT1_XMOS_FLASH_ERASE_TIMEOUT_MS 2000
-#define SAT1_MIC_GAIN_Q8 2048
+/* XMOS channel 0 already has AGC; only the non-AGC speech channel needs gain. */
+#define SAT1_WAKE_MIC_GAIN_Q8 256
+#define SAT1_STREAM_MIC_GAIN_Q8 2048
 #define SAT1_AUDIO_TASK_STACK_BYTES (16U * 1024U)
 #define SAT1_XMOS_WAKE_CHANNEL 0
 #define SAT1_XMOS_STREAM_CHANNEL 1
@@ -1695,10 +1697,10 @@ static int16_t clamp_s16(int32_t value)
     return (int16_t)value;
 }
 
-static int16_t pcm32_to_pcm16_gain(int32_t sample)
+static int16_t pcm32_to_pcm16_gain(int32_t sample, uint16_t gain_q8)
 {
     int32_t v = sample >> 16;
-    v = (v * SAT1_MIC_GAIN_Q8) / 256;
+    v = (v * gain_q8) / 256;
     return clamp_s16(v);
 }
 
@@ -1708,9 +1710,12 @@ static int16_t sat1_xmos_channel_48k_to_16k(const int32_t *samples, size_t sourc
     if (channel >= TATER_MIC_SOURCE_CHANNELS) {
         channel = 0;
     }
+    const uint16_t gain_q8 = channel == SAT1_XMOS_WAKE_CHANNEL
+        ? SAT1_WAKE_MIC_GAIN_Q8
+        : SAT1_STREAM_MIC_GAIN_Q8;
     for (size_t frame = 0; frame < 3; frame++) {
         size_t base = (source_frame + frame) * TATER_MIC_SOURCE_CHANNELS;
-        sum += pcm32_to_pcm16_gain(samples[base + channel]);
+        sum += pcm32_to_pcm16_gain(samples[base + channel], gain_q8);
     }
     return clamp_s16(sum / 3);
 }
@@ -1897,11 +1902,13 @@ static void audio_task(void *arg)
                     && now_us - last_wake_diag_us >= SAT1_WAKE_DIAG_INTERVAL_US) {
                 ESP_LOGD(
                     TAG,
-                    "sat1 wake mic levels agc_peak=%u agc_mean=%u ns_peak=%u ns_mean=%u selected=%s",
+                    "sat1 wake mic levels agc_peak=%u agc_mean=%u ns_peak=%u ns_mean=%u wake_gain_q8=%u stream_gain_q8=%u selected=%s",
                     (unsigned)agc_peak,
                     (unsigned)agc_mean,
                     (unsigned)ns_peak,
                     (unsigned)ns_mean,
+                    (unsigned)SAT1_WAKE_MIC_GAIN_Q8,
+                    (unsigned)SAT1_STREAM_MIC_GAIN_Q8,
                     "wake_aec_ns_agc"
                 );
                 last_wake_diag_us = now_us;
@@ -1922,19 +1929,20 @@ static void audio_task(void *arg)
                 mic_level_stats(mono_stream, out_frames, &peak, &mean);
                 ESP_LOGI(
                     TAG,
-                    "sat1 mic chunk %u frames=%u source_frames=%u bytes=%u peak=%u mean=%u gain_q8=%u leveler_q8=%u leveler_in_peak=%u xmos_channel=%s agc_peak=%u ns_peak=%u",
+                    "sat1 mic chunk %u frames=%u source_frames=%u bytes=%u peak=%u mean=%u gain_q8=%u leveler_q8=%u leveler_in_peak=%u xmos_channel=%s agc_peak=%u ns_peak=%u wake_gain_q8=%u",
                     (unsigned)(active_chunks + 1),
                     (unsigned)out_frames,
                     (unsigned)source_frames,
                     (unsigned)bytes_read,
                     (unsigned)peak,
                     (unsigned)mean,
-                    (unsigned)SAT1_MIC_GAIN_Q8,
+                    (unsigned)SAT1_STREAM_MIC_GAIN_Q8,
                     (unsigned)stream_leveler_gain_q8,
                     (unsigned)stream_peak_before,
                     "aec_ns_no_agc",
                     (unsigned)agc_peak,
-                    (unsigned)ns_peak
+                    (unsigned)ns_peak,
+                    (unsigned)SAT1_WAKE_MIC_GAIN_Q8
                 );
             }
             active_chunks++;

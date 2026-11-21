@@ -1,7 +1,6 @@
-- Releases native firmware `0.6.7` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
-- Replace automatic room presence scanning with explicit, time-limited Bluetooth discovery. Bluetooth stays off until a scan or device operation is requested, and powers down when unused.
-- Add an Echo-compatible GATT proxy with one active connection, service discovery, reads, writes, notifications, indications, and authenticated six-digit PIN pairing. Retain saved bond keys in NVS.
-- Keep an active device connection, such as Meshtastic, open when discovery stops. Pause discovery during listening, thinking, tool calls, and playback without disconnecting Wi-Fi.
-- Bound request queues, values, discovery trees, and notification buffers. Handle failed radio/task startup and retire stale operations after a controller disconnect or Bluetooth reset.
-- Update the connected controller to Tater 3.0.5 or Home Assistant bridge 1.4.19 for the discovery controls; Meshtastic Core 0.3.6 starts its own bounded scan. Preserve existing pairing, Wi-Fi, identity, and other settings.
-- This on-demand proxy does not continuously monitor broadcast-only sensors or provide Bluetooth speaker audio. Firmware builds and host regressions pass; physical pairing, reconnection, and voice coexistence testing remain pending.
+- Releases native firmware `0.6.8` for Voice PE, Satellite1, ReSpeaker XVF3800, and ESP32-S3-BOX-3.
+- Preserve the start of commands spoken immediately after the wake word. Select the leading threshold crossing of the strongest boundary-confidence run instead of its later peak or plateau.
+- Apply the boundary correction to the shared wake engine on all four targets, with both Tater and the Home Assistant bridge. Retain the existing threshold, search window, endpoint offset, 80 ms guard, and fallback; no additional host padding or fixed wait is introduced.
+- Correct Satellite1's wake audio gain: use unity gain on the XMOS channel that already includes AGC, avoiding the extra 8x software amplification that clipped wake detection, boundary estimation, verification, buffered audio, and trainer recordings. Keep the separate live speech channel's 8x gain and leveler unchanged. Other boards' microphone gains are unchanged.
+- Add host regressions for rising/plateauing confidence, separate weaker events, equal peaks, window limits, and Satellite1's two-channel conversion. The gain test checks every PCM16 value and preserves the live speech conversion.
+- Satellite1 testing captured complete immediate questions with the revised boundary policy and quieter wake audio. Testing on the other three boards remains pending. Normal OTA updates preserve pairing, Wi-Fi, identity, and saved settings.

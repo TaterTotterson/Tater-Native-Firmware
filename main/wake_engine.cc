@@ -39,6 +39,7 @@ extern "C" {
 #include "playback.h"
 #include "tater_protocol.h"
 #include "task_cleanup.h"
+#include "wake_boundary_policy.h"
 #include "wake_detection_policy.h"
 #include "wake_model_assets.h"
 #include "wake_model_policy.h"
@@ -2693,8 +2694,7 @@ BoundaryPreroll estimate_wake_boundary()
     int8_t feature_history[kWakeInputElements] = {0};
     size_t feature_frames = 0;
     size_t score_count = 0;
-    float best_score = 0.0f;
-    uint64_t best_sample = 0;
+    tater_wake_boundary_policy_t selection = {};
     uint64_t audio_start_sample = audio_end_sample >= captured_samples
         ? audio_end_sample - captured_samples
         : 0;
@@ -2745,13 +2745,14 @@ BoundaryPreroll estimate_wake_boundary()
             + (uint64_t)((kFeatureDurationMs + (kWakeInputFeatureFrames - 1) * kFeatureStepMs) * 16)
             + (uint64_t)(score_count * kWakeInputFeatureFrames * kFeatureStepMs * 16);
         score_count++;
-        if (score_sample >= window_start && score_sample <= window_end
-                && score >= s_boundary_threshold && score > best_score) {
-            best_score = score;
-            best_sample = score_sample;
-        }
+        tater_wake_boundary_note(
+            &selection, score_sample, score, s_boundary_threshold,
+            window_start, window_end
+        );
     }
 
+    const uint64_t best_sample = selection.endpoint_sample;
+    const float best_score = selection.peak_score;
     if (best_sample == 0) {
         ESP_LOGW(TAG, "wake boundary produced no threshold-valid endpoint");
         heap_caps_free(captured);
@@ -2781,7 +2782,7 @@ BoundaryPreroll estimate_wake_boundary()
     int64_t elapsed_ms = (esp_timer_get_time() - estimate_started_us) / 1000;
     ESP_LOGI(
         TAG,
-        "wake boundary estimated score=%.3f offset_ms=%ld guard_ms=%d preroll=%u boundary=%u post_boundary=%u replay_ms=%d elapsed_ms=%ld",
+        "wake boundary estimated score=%.3f offset_ms=%ld guard_ms=%d preroll=%u boundary=%u post_boundary=%u replay_ms=%d elapsed_ms=%ld peak_offset_ms=%lld",
         (double)best_score,
         (long)s_last_boundary_offset_ms,
         kBoundaryCommandGuardMs,
@@ -2789,7 +2790,9 @@ BoundaryPreroll estimate_wake_boundary()
         (unsigned)result.boundary_sample,
         (unsigned)(result.sample_count - result.boundary_sample),
         replay_ms,
-        (long)elapsed_ms
+        (long)elapsed_ms,
+        (long long)((static_cast<int64_t>(selection.peak_sample)
+            - static_cast<int64_t>(s_last_detection_sample)) / 16)
     );
     return result;
 }
