@@ -500,13 +500,32 @@ Board folders hold only physical hardware differences. Shared behavior such as
 Wi-Fi, provisioning, WebSocket protocol, OTA, settings, wake assets, wake engine,
 playback, AEC, timers, and logs stays in the shared root.
 
-### Experimental USB Ethernet
+### USB Ethernet and PoE
 
-Opt-in SAT1 and Voice PE prototypes add USB Ethernet for the powered RTL8152 adapter used
-with Echo. Initial Ethernet, voice, download, and cold-start checks pass on both
-boards; extended validation remains. These builds are excluded from production releases.
-See [USB Ethernet prototype](docs/usb-ethernet.md) for the build,
-USB console recovery, setup, and hardware test checklist.
+Native firmware **0.7.0** includes USB Ethernet in the standard **SAT1** and
+**Voice PE** images. Both boards passed Ethernet voice requests, downloaded
+speech playback, cold starts, and both USB-C plug orientations using the powered
+[UCTRONICS B0B9ZLVGJ4 (U6113) adapter](https://www.amazon.com/dp/B0B9ZLVGJ4),
+the same adapter tested with Tater Echo Firmware. ReSpeaker XVF3800 and S3 Box
+remain Wi-Fi-only in this release.
+
+Use a **data-capable Micro-USB female → USB-C male converter** between this
+adapter and the board's ESP32 USB port (not SAT1's XMOS USB port). Connect the
+adapter to a compatible PoE switch/injector, then cold boot the board through
+it. The adapter supplies 5 V power and USB Ethernet data. Saved Wi-Fi remains
+available as fallback; Ethernet takes priority after DHCP succeeds.
+
+Other powered adapters **may** work if they expose the same USB `0bda:8152`
+identity and RTL8152 CDC-ECM configuration 2, but have not been tested. Other USB
+chipsets and power-only PoE splitters are not supported by this firmware.
+More wattage or a USB-C plug alone does not establish compatibility. Use a
+supply suitable for the board and speaker volume; this 5 V setup does not
+provide SAT1's higher-voltage amplifier modes.
+
+Tater **3.0.8** displays the current network and wake readiness on each satellite's
+normal refresh. USB serial is preserved when booting directly on a computer;
+Ethernet requires a new boot through the adapter. Read the
+[setup, recovery, compatibility, and test details](docs/usb-ethernet.md).
 
 ### Build With PlatformIO
 

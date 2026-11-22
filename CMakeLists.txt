@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-option(TATER_USB_ETHERNET "Build the experimental USB Ethernet prototype" OFF)
+option(TATER_USB_ETHERNET "Build RTL8152 USB Ethernet support" OFF)
 if(TATER_USB_ETHERNET)
     if(NOT SDKCONFIG_DEFAULTS)
         set(SDKCONFIG_DEFAULTS "${CMAKE_SOURCE_DIR}/sdkconfig.defaults")
