@@ -36,6 +36,7 @@ extern "C" {
 #include "tater_protocol.h"
 #include "task_cleanup.h"
 #include "wifi_station.h"
+#include "network_manager.h"
 }
 
 namespace {
@@ -288,7 +289,7 @@ tater_playback_channel_t playback_channel() {
 class TaterNetworkProvider final : public SendspinNetworkProvider {
 public:
     bool is_network_ready() override {
-        return tater_wifi_is_connected();
+        return tater_network_is_connected();
     }
 };
 
@@ -345,12 +346,12 @@ public:
     }
 
     void on_request_high_performance() override {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+        if (tater_wifi_is_connected()) ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
     }
 
     void on_release_high_performance() override {
         // Native voice transport also needs low-latency Wi-Fi, so leave power save off.
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+        if (tater_wifi_is_connected()) ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
     }
 };
 
@@ -905,7 +906,21 @@ void sendspin_task(void *arg) {
 
     bool mdns_started = false;
     bool native_state_reported = false;
+#if CONFIG_TATER_USB_ETHERNET
+    tater_network_state_t network;
+    tater_network_snapshot(&network);
+    uint32_t network_generation = network.generation;
+#endif
     while (true) {
+#if CONFIG_TATER_USB_ETHERNET
+        tater_network_snapshot(&network);
+        if (network.generation != network_generation) {
+            network_generation = network.generation;
+            // Drop sockets bound to the old IP. The wildcard listener remains
+            // available; the server can reconnect using mDNS on the new link.
+            client.disconnect(SendspinGoodbyeReason::RESTART);
+        }
+#endif
         client.loop();
         if (!render_feedback_started) {
             player_listener.poll_render_clock();
@@ -933,7 +948,7 @@ void sendspin_task(void *arg) {
                 player.update_volume(s_desired_volume.load(std::memory_order_acquire));
             }
         }
-        if (!mdns_started && tater_wifi_is_connected()) {
+        if (!mdns_started && tater_network_is_connected()) {
             mdns_started = start_mdns_advertisement();
         }
         vTaskDelay(SENDSPIN_LOOP_TICKS);

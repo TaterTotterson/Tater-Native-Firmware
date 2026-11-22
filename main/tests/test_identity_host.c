@@ -9,6 +9,8 @@
 static unsigned char committed[128], pending[128];
 static bool has_committed, has_pending, fail_write, fail_commit;
 static int string_writes;
+static char saved_wired[16];
+static bool no_wifi;
 
 esp_err_t nvs_open(const char *name, int mode, nvs_handle_t *handle)
 { (void)name; (void)mode; *handle = 1; return ESP_OK; }
@@ -16,7 +18,8 @@ void nvs_close(nvs_handle_t handle) { (void)handle; has_pending = false; }
 esp_err_t nvs_get_str(nvs_handle_t handle, const char *key, char *out, size_t *size)
 {
     (void)handle;
-    const char *value = strcmp(key, "ssid") == 0 ? "wifi-kept"
+    const char *value = strcmp(key, "wired") == 0 ? saved_wired
+        : strcmp(key, "ssid") == 0 ? (no_wifi ? "" : "wifi-kept")
         : strcmp(key, "pass") == 0 ? "password-kept"
         : strcmp(key, "server") == 0 ? "http://ha.test"
         : strcmp(key, "token") == 0 ? "token-kept"
@@ -25,7 +28,12 @@ esp_err_t nvs_get_str(nvs_handle_t handle, const char *key, char *out, size_t *s
     strcpy(out, value); return ESP_OK;
 }
 esp_err_t nvs_set_str(nvs_handle_t handle, const char *key, const char *value)
-{ (void)handle; (void)key; (void)value; ++string_writes; return ESP_OK; }
+{
+    (void)handle;
+    if (strcmp(key, "wired") == 0) strcpy(saved_wired, value);
+    if (strcmp(key, "ssid") == 0) no_wifi = !value[0];
+    ++string_writes; return ESP_OK;
+}
 esp_err_t nvs_get_blob(nvs_handle_t handle, const char *key, void *out, size_t *size)
 {
     (void)handle; assert(strcmp(key, "identity") == 0);
@@ -46,7 +54,13 @@ esp_err_t nvs_commit(nvs_handle_t handle)
     return ESP_OK;
 }
 esp_err_t nvs_erase_all(nvs_handle_t handle) { (void)handle; has_committed = false; return ESP_OK; }
-esp_err_t nvs_erase_key(nvs_handle_t handle, const char *key) { (void)handle; (void)key; return ESP_OK; }
+esp_err_t nvs_erase_key(nvs_handle_t handle, const char *key)
+{
+    (void)handle;
+    if (strcmp(key, "wired") == 0) saved_wired[0] = 0;
+    if (strcmp(key, "ssid") == 0) no_wifi = true;
+    return ESP_OK;
+}
 
 int main(void)
 {
@@ -84,6 +98,27 @@ int main(void)
     assert(tater_config_save_identity("Tater Voice PE", "Studio") == ESP_OK);
     assert(tater_config_load(&config) == ESP_OK);
     assert(strcmp(config.device_name, "Tater Voice PE") == 0);
-    puts("Native identity persistence and validation passed");
+    assert(tater_config_has_network(&config));
+    config.wifi_ssid[0] = 0;
+    assert(!tater_config_has_network(&config));
+    assert(tater_config_save(&config) == ESP_ERR_INVALID_ARG);
+    config.ethernet_only = true;
+#if CONFIG_TATER_USB_ETHERNET
+    assert(tater_config_has_network(&config));
+    config.token[0] = 0;
+    assert(!tater_config_has_network(&config));
+    strcpy(config.token, "token-kept");
+    assert(tater_config_save(&config) == ESP_OK);
+    assert(tater_config_load(&config) == ESP_OK);
+    assert(config.ethernet_only && config.provisioned && !tater_config_has_wifi(&config));
+    assert(tater_config_forget_wifi() == ESP_OK);
+    assert(tater_config_load(&config) == ESP_OK);
+    assert(!config.ethernet_only && !tater_config_has_network(&config));
+    assert(strcmp(config.token, "token-kept") == 0);
+#else
+    assert(!tater_config_has_network(&config));
+    assert(tater_config_save(&config) == ESP_ERR_INVALID_ARG);
+#endif
+    puts("Native identity persistence and network setup validation passed");
     return 0;
 }

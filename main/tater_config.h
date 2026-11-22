@@ -19,6 +19,7 @@ typedef struct {
     char device_name[TATER_CFG_DEVICE_NAME_LEN];
     char room[TATER_CFG_ROOM_LEN];
     bool provisioned;
+    bool ethernet_only;
 } tater_config_t;
 
 void tater_config_defaults(tater_config_t *config);
@@ -29,3 +30,4 @@ esp_err_t tater_config_save_identity(const char *name, const char *room);
 esp_err_t tater_config_clear(void);
 esp_err_t tater_config_forget_wifi(void);
 bool tater_config_has_wifi(const tater_config_t *config);
+bool tater_config_has_network(const tater_config_t *config);

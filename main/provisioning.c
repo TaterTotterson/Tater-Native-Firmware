@@ -1,3 +1,4 @@
+#include "network_manager.h"
 #include "provisioning.h"
 
 #include <ctype.h>
@@ -195,6 +196,15 @@ static esp_err_t root_get_handler(httpd_req_t *req)
     html_escape_attr(name, sizeof(name), s_initial.device_name);
     html_escape_attr(room, sizeof(room), s_initial.room);
 
+#if CONFIG_TATER_USB_ETHERNET
+    const char *network_help = "Use wired Ethernet or add Wi-Fi as a fallback.";
+    const char *ssid_required = "";
+    const char *ssid_help = "Optional when using the powered USB Ethernet adapter.";
+#else
+    const char *network_help = "Connect to Wi-Fi and link to your Tater server.";
+    const char *ssid_required = "required";
+    const char *ssid_help = "Your normal home Wi-Fi network.";
+#endif
     char *page = calloc(1, 12000);
     if (!page) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
@@ -207,11 +217,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         12000,
         "%s"
         "<div class=top><div class=brand><div class=mark>T</div><div><div class=kicker>Tater Native</div><h1>Satellite Setup</h1></div></div>"
-        "<p>Connect this %s to Wi-Fi and link it to your Tater server.</p></div>"
+        "<p>%s</p></div>"
         "<div class=body>"
         "<div class=status><div class=chip><b>Setup Network</b><span>%s</span></div><div class=chip><b>Setup Address</b><span>192.168.4.1</span></div><div class=chip><b>Board</b><span>%s</span></div></div>"
         "<form method=post action=/save>"
-        "<div class=field><label for=ssid>Wi-Fi SSID</label><input id=ssid name=ssid value=\"%s\" autocomplete=off autocapitalize=none required><div class=hint>Your normal home Wi-Fi network.</div></div>"
+        "<div class=field><label for=ssid>Wi-Fi SSID</label><input id=ssid name=ssid value=\"%s\" autocomplete=off autocapitalize=none %s><div class=hint>%s</div></div>"
         "<div class=field><label for=password>Wi-Fi Password</label><input id=password name=password type=password autocomplete=current-password><div class=hint>Leave blank only for open networks.</div></div>"
         "<div class=field><label for=server>Tater Server</label><input id=server name=server value=\"%s\" placeholder=\"http://10.4.20.210:8501\" autocapitalize=none required><div class=hint>Paste the Tater address. HTTP(S), WS(S), and the full native WebSocket URL are accepted.</div></div>"
         "<div class=grid><div class=field><label for=token>Pairing Code / Token</label><input id=token name=token value=\"\" autocapitalize=none autocomplete=one-time-code placeholder=\"123 456\" required><div class=hint>Open Tater Satellites, tap Add Satellite, then enter the code shown there.</div></div>"
@@ -221,10 +231,12 @@ static esp_err_t root_get_handler(httpd_req_t *req)
         "<div class=foot>After saving, this setup network will disappear. Reconnect your phone or computer to your normal Wi-Fi, then open Tater to confirm the satellite is connected.</div>"
         "</form></div></section></main></body></html>",
         HTML_HEAD,
-        TATER_BOARD_DISPLAY_NAME,
+        network_help,
         s_ap_ssid,
         TATER_BOARD_DISPLAY_NAME,
         ssid,
+        ssid_required,
+        ssid_help,
         server,
         room,
         name,
@@ -336,8 +348,11 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     parse_form(body, &cfg);
     free(body);
 
-    if (!tater_config_has_wifi(&cfg) || strlen(cfg.server_url) == 0 || strlen(cfg.token) == 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Wi-Fi SSID, Tater server, and pairing code are required");
+#if CONFIG_TATER_USB_ETHERNET
+    cfg.ethernet_only = !tater_config_has_wifi(&cfg);
+#endif
+    if (!tater_config_has_network(&cfg) || strlen(cfg.server_url) == 0 || strlen(cfg.token) == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Network settings, Tater server, and pairing code are required");
         return ESP_OK;
     }
 
@@ -417,8 +432,7 @@ esp_err_t tater_provisioning_start(const tater_config_t *initial)
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf(s_ap_ssid, sizeof(s_ap_ssid), "Tater-Setup-%02X%02X", mac[4], mac[5]);
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_ERROR_CHECK(tater_network_init());
     esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
     esp_netif_ip_info_t ip_info = {0};
     if (ap_netif && esp_netif_get_ip_info(ap_netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {

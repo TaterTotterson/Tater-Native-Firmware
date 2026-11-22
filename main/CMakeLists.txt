@@ -1,3 +1,8 @@
+set(TATER_USB_REQUIRES "")
+if(CONFIG_TATER_USB_ETHERNET)
+    list(APPEND TATER_USB_REQUIRES usb esp_driver_usb_serial_jtag iot_usbh_ecm)
+endif()
+
 idf_component_register(
     SRCS
         "app_main.c"
@@ -21,6 +26,9 @@ idf_component_register(
         "doa_direction_memory.c"
         "native_settings.c"
         "network_recovery.c"
+        "network_state.c"
+        "network_manager.c"
+        "usb_ethernet.c"
         "ota_family.c"
         "ota_update.c"
         "playback.c"
@@ -43,6 +51,7 @@ idf_component_register(
         "xmos_update.c"
     INCLUDE_DIRS "."
     REQUIRES
+        ${TATER_USB_REQUIRES}
         driver
         app_update
         bt

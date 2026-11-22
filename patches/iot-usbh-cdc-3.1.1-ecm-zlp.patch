@@ -1,0 +1,13 @@
+--- a/iot_usbh_cdc.c
++++ b/iot_usbh_cdc.c
+@@ -713,6 +713,10 @@
+             cdc_port->data.out_xfer->context = cdc_port;
+             cdc_port->data.out_xfer->num_bytes = out_buf_len;
+             cdc_port->data.out_xfer->callback = out_xfer_cb;
++#if CONFIG_TATER_USB_ETHERNET
++            // CDC ECM frames must end in a short packet, including aligned frames.
++            cdc_port->data.out_xfer->flags |= USB_TRANSFER_FLAG_ZERO_PACK;
++#endif
+         }
+     }
+     return ret;

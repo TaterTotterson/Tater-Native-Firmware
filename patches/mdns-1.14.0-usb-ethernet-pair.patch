@@ -1,0 +1,29 @@
+--- a/mdns_netif.c
++++ b/mdns_netif.c
+@@ -74,6 +74,26 @@
+  */
+ mdns_if_t mdns_priv_netif_get_other_interface(mdns_if_t tcpip_if)
+ {
++#if CONFIG_TATER_USB_ETHERNET
++    // Our custom ECM netif and STA can hear each other's hostname probes on
++    // the same LAN. Treat them like the built-in ETH/STA pair, not strangers.
++    // Resolve the pair under the service lock on each call so unregistering
++    // the custom netif cannot leave a stale duplicate-interface index.
++    mdns_if_t wifi_if = MDNS_MAX_INTERFACES;
++    mdns_if_t usb_if = MDNS_MAX_INTERFACES;
++    for (mdns_if_t i = 0; i < MDNS_MAX_INTERFACES; ++i) {
++        if (s_esp_netifs[i].predefined && s_esp_netifs[i].predef_if == MDNS_IF_STA) {
++            wifi_if = i;
++        } else if (!s_esp_netifs[i].predefined && s_esp_netifs[i].netif &&
++                   strcmp(esp_netif_get_ifkey(s_esp_netifs[i].netif), "TATER_USB_ETH") == 0) {
++            usb_if = i;
++        }
++    }
++    if (wifi_if != MDNS_MAX_INTERFACES && usb_if != MDNS_MAX_INTERFACES) {
++        if (tcpip_if == wifi_if) return usb_if;
++        if (tcpip_if == usb_if) return wifi_if;
++    }
++#endif
+     if (tcpip_if < MDNS_MAX_INTERFACES) {
+         return s_esp_netifs[tcpip_if].duplicate;
+     }

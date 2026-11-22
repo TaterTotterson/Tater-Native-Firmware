@@ -74,9 +74,11 @@ esp_err_t tater_config_load(tater_config_t *config)
         safe_copy(config->device_name, sizeof(config->device_name), identity.name);
         safe_copy(config->room, sizeof(config->room), identity.room);
     }
+    char wired[16] = {0};
+    load_string(nvs, "wired", wired, sizeof(wired));
+    config->ethernet_only = strcmp(wired, "ethernet") == 0;
     nvs_close(nvs);
 
-    config->provisioned = strlen(config->wifi_ssid) > 0;
     if (strlen(config->server_url) == 0) {
         safe_copy(config->server_url, sizeof(config->server_url), CONFIG_TATER_SERVER_URL);
     }
@@ -92,17 +94,20 @@ esp_err_t tater_config_load(tater_config_t *config)
         safe_copy(config->device_name, sizeof(config->device_name), TATER_DEFAULT_DEVICE_NAME);
 #endif
     }
+    config->provisioned = tater_config_has_network(config);
     return ESP_OK;
 }
 
 esp_err_t tater_config_save(const tater_config_t *config)
 {
     ESP_RETURN_ON_FALSE(config, ESP_ERR_INVALID_ARG, TAG, "config is null");
-    ESP_RETURN_ON_FALSE(strlen(config->wifi_ssid) > 0, ESP_ERR_INVALID_ARG, TAG, "ssid is empty");
+    ESP_RETURN_ON_FALSE(tater_config_has_network(config), ESP_ERR_INVALID_ARG, TAG, "network config is empty");
     ESP_RETURN_ON_FALSE(strlen(config->server_url) > 0, ESP_ERR_INVALID_ARG, TAG, "server url is empty");
 
     nvs_handle_t nvs = 0;
     ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs), TAG, "nvs open failed");
+    esp_err_t wired_err = nvs_set_str(nvs, "wired", config->ethernet_only ? "ethernet" : "");
+    if (wired_err != ESP_OK) { nvs_close(nvs); return wired_err; }
     ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_str(nvs, "ssid", config->wifi_ssid));
     ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_str(nvs, "pass", config->wifi_password));
     ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_set_str(nvs, "server", config->server_url));
@@ -173,6 +178,7 @@ esp_err_t tater_config_forget_wifi(void)
         return ESP_OK;
     }
     ESP_RETURN_ON_ERROR(err, TAG, "nvs open failed");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_erase_key(nvs, "wired"));
     ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_erase_key(nvs, "ssid"));
     ESP_ERROR_CHECK_WITHOUT_ABORT(nvs_erase_key(nvs, "pass"));
     err = nvs_commit(nvs);
@@ -183,4 +189,14 @@ esp_err_t tater_config_forget_wifi(void)
 bool tater_config_has_wifi(const tater_config_t *config)
 {
     return config && strlen(config->wifi_ssid) > 0;
+}
+
+bool tater_config_has_network(const tater_config_t *config)
+{
+    if (tater_config_has_wifi(config)) return true;
+#if CONFIG_TATER_USB_ETHERNET
+    return config && config->ethernet_only && config->server_url[0] && config->token[0];
+#else
+    return false;
+#endif
 }

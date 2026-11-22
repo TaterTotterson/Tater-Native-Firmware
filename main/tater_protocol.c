@@ -30,6 +30,9 @@
 #include "native_settings.h"
 #include "native_identity.h"
 #include "network_recovery.h"
+#include "network_manager.h"
+#include "usb_ethernet.h"
+#include "esp_netif.h"
 #include "ota_update.h"
 #include "playback.h"
 #include "playback_wake_policy.h"
@@ -69,6 +72,7 @@ static const char *TAG = "tater_proto";
 
 static esp_websocket_client_handle_t s_client;
 static SemaphoreHandle_t s_send_lock;
+static SemaphoreHandle_t s_ws_lifecycle_lock;
 static bool s_connected;
 static bool s_voice_active;
 static tater_state_callback_t s_state_cb;
@@ -604,11 +608,11 @@ static esp_err_t create_websocket_client(void)
     return ESP_OK;
 }
 
-static esp_err_t refresh_websocket_auth_client(void)
+static esp_err_t refresh_websocket_client(const char *reason)
 {
     s_ws_lifecycle_restart = true;
     s_ws_restart_count++;
-    mark_link_down("websocket auth refresh");
+    mark_link_down(reason);
 
     /*
      * Stop new sends through websocket_ready(), then briefly acquire the send
@@ -663,7 +667,9 @@ static void websocket_auth_refresh_task(void *arg)
     /* Leave the hello callback before stopping the client that delivered it. */
     vTaskDelay(pdMS_TO_TICKS(250));
     ESP_LOGI(TAG, "refreshing websocket client with saved device credential");
-    esp_err_t refresh_err = refresh_websocket_auth_client();
+    if (s_ws_lifecycle_lock) xSemaphoreTake(s_ws_lifecycle_lock, portMAX_DELAY);
+    esp_err_t refresh_err = refresh_websocket_client("websocket auth refresh");
+    if (s_ws_lifecycle_lock) xSemaphoreGive(s_ws_lifecycle_lock);
     if (refresh_err != ESP_OK) {
         s_ws_restart_failures++;
         ESP_LOGE(TAG, "websocket auth refresh failed: %s", esp_err_to_name(refresh_err));
@@ -672,6 +678,33 @@ static void websocket_auth_refresh_task(void *arg)
     }
     vTaskDelete(NULL);
 }
+
+#if CONFIG_TATER_USB_ETHERNET
+static uint32_t s_transport_network_generation;
+
+static void network_monitor_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        tater_network_state_t network;
+        tater_network_snapshot(&network);
+        if (network.active == TATER_NETWORK_NONE
+            || network.generation == s_transport_network_generation) continue;
+        xSemaphoreTake(s_ws_lifecycle_lock, portMAX_DELAY);
+        ESP_LOGI(TAG, "network changed to %s; reconnecting Tater transport",
+                 tater_network_interface_name(network.active));
+        esp_err_t err = refresh_websocket_client("network interface or address changed");
+        if (err == ESP_OK) {
+            s_transport_network_generation = network.generation;
+        } else {
+            s_ws_restart_failures++;
+            ESP_LOGW(TAG, "network reconnect failed: %s", esp_err_to_name(err));
+        }
+        xSemaphoreGive(s_ws_lifecycle_lock);
+    }
+}
+#endif
 
 static esp_err_t audio_tx_init(void)
 {
@@ -2996,6 +3029,7 @@ void tater_protocol_init(
     tater_live_settings_init_defaults();
     audio_preroll_init();
     s_send_lock = xSemaphoreCreateMutex();
+    s_ws_lifecycle_lock = xSemaphoreCreateMutex();
     s_timer_lock = xSemaphoreCreateMutex();
     esp_err_t audio_tx_err = audio_tx_init();
     if (audio_tx_err != ESP_OK) {
@@ -3011,6 +3045,11 @@ void tater_protocol_init(
 void tater_protocol_start(void)
 {
     audio_tx_start_task();
+#if CONFIG_TATER_USB_ETHERNET
+    tater_network_state_t network;
+    tater_network_snapshot(&network);
+    s_transport_network_generation = network.generation;
+#endif
 
     esp_err_t websocket_start_err = ESP_ERR_INVALID_ARG;
     if (s_ws_url[0]) {
@@ -3020,9 +3059,19 @@ void tater_protocol_start(void)
         }
     }
     if (websocket_start_err != ESP_OK) {
+#if CONFIG_TATER_USB_ETHERNET
+        --s_transport_network_generation; // Let the monitor retry a failed initial allocation.
+#endif
         ESP_LOGE(TAG, "websocket startup failed: %s", esp_err_to_name(websocket_start_err));
         emit_state(TATER_STATE_ERROR, s_ws_url[0] ? "websocket startup failed" : "invalid server URL");
     }
+
+#if CONFIG_TATER_USB_ETHERNET
+    if (!s_ws_lifecycle_lock
+        || xTaskCreate(network_monitor_task, "tater_net", 4096, NULL, 4, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "network monitor unavailable; transport will use normal socket recovery");
+    }
+#endif
 
     if (!s_timer_monitor_task) {
         BaseType_t timer_task_ok = pdFAIL;
@@ -3232,6 +3281,21 @@ void tater_protocol_send_status(const char *state)
         cJSON_AddStringToObject(payload, "last_link_down", s_last_link_down_detail);
         cJSON_AddNumberToObject(payload, "last_link_down_age_ms", (esp_timer_get_time() - s_last_link_down_us) / 1000);
     }
+    tater_network_state_t network_state;
+    tater_network_snapshot(&network_state);
+    cJSON *network = cJSON_CreateObject();
+    cJSON_AddStringToObject(network, "active_interface", tater_network_interface_name(network_state.active));
+    cJSON_AddStringToObject(network, "usb_ethernet_state", tater_usb_ethernet_status());
+    cJSON_AddBoolToObject(network, "ethernet_link", network_state.ethernet_link);
+    cJSON_AddNumberToObject(network, "generation", network_state.generation);
+    esp_ip4_addr_t wifi_ip = { .addr = network_state.wifi_ip };
+    esp_ip4_addr_t ethernet_ip = { .addr = network_state.ethernet_ip };
+    char ip_text[16];
+    snprintf(ip_text, sizeof(ip_text), IPSTR, IP2STR(&wifi_ip));
+    cJSON_AddStringToObject(network, "wifi_ip", ip_text);
+    snprintf(ip_text, sizeof(ip_text), IPSTR, IP2STR(&ethernet_ip));
+    cJSON_AddStringToObject(network, "ethernet_ip", ip_text);
+    cJSON_AddItemToObject(payload, "network", network);
     cJSON *transport = cJSON_CreateObject();
     cJSON_AddNumberToObject(transport, "audio_send_failures", s_audio_send_failures);
     cJSON_AddNumberToObject(transport, "audio_send_failure_total", s_audio_send_failure_total);

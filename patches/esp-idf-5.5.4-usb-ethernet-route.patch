@@ -1,0 +1,21 @@
+--- a/ip4.c
++++ b/ip4.c
+@@ -166,6 +166,18 @@
+ 
+   /* bug #54569: in case LWIP_SINGLE_NETIF=1 and LWIP_DEBUGF() disabled, the following loop is optimized away */
+   LWIP_UNUSED_ARG(dest);
++
++#if CONFIG_TATER_USB_ETHERNET
++  /* Prefer the selected default on a shared subnet. Otherwise the first
++     matching netif (often fallback Wi-Fi) wins even with Ethernet selected.
++     Explicit source routing and multicast selection have already run. */
++  netif = netif_default;
++  if ((netif != NULL) && netif_is_up(netif) && netif_is_link_up(netif) &&
++      !ip4_addr_isany_val(*netif_ip4_addr(netif)) && !ip4_addr_isloopback(dest) &&
++      ip4_addr_net_eq(dest, netif_ip4_addr(netif), netif_ip4_netmask(netif))) {
++    return netif;
++  }
++#endif
+ 
+   /* iterate through netifs */
+   NETIF_FOREACH(netif) {

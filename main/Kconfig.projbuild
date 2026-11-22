@@ -1,5 +1,14 @@
 menu "Tater Native Satellite"
 
+config TATER_USB_ETHERNET
+    bool "Experimental RTL8152 USB Ethernet host"
+    default n
+    depends on IDF_TARGET_ESP32S3
+    help
+        Test firmware for a powered 0bda:8152 ECM adapter on the ESP USB port.
+        Shares the internal PHY with USB Serial/JTAG. A PC detected at startup
+        retains the console for that boot. No eFuses or USB power GPIOs change.
+
 config TATER_WIFI_SSID
     string "Wi-Fi SSID"
     default ""

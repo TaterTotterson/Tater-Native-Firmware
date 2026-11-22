@@ -1,0 +1,7 @@
+CONFIG_TATER_USB_ETHERNET=y
+CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK=y
+CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=512
+# Keep each interface's DHCP DNS so fallback can restore its resolver.
+CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF=y
+# Reserve the third mDNS slot for our custom USB netif, after STA and AP.
+CONFIG_MDNS_PREDEF_NETIF_ETH=n

@@ -19,10 +19,13 @@
 #include "task_cleanup.h"
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 #include "tater_config.h"
 #include "tater_protocol.h"
 #include "wake_engine.h"
 #include "wifi_station.h"
+#include "network_manager.h"
+#include "usb_ethernet.h"
 
 #include <inttypes.h>
 
@@ -132,8 +135,14 @@ void app_main(void)
     ESP_ERROR_CHECK(tater_leds_init());
     ESP_ERROR_CHECK(tater_button_init());
 
-    if (!tater_config_has_wifi(&s_config)) {
-        ESP_LOGW(TAG, "no Wi-Fi config; starting provisioning");
+    ESP_ERROR_CHECK(tater_network_init());
+    esp_err_t usb_err = tater_usb_ethernet_start();
+    ESP_ERROR_CHECK_WITHOUT_ABORT(usb_err);
+    bool wired_setup_unavailable = !tater_config_has_wifi(&s_config)
+        && (usb_err != ESP_OK || strcmp(tater_usb_ethernet_status(), "console_preserved") == 0);
+
+    if (!tater_config_has_network(&s_config) || wired_setup_unavailable) {
+        ESP_LOGW(TAG, "network setup required; starting provisioning (usb=%s)", tater_usb_ethernet_status());
         tater_leds_set_state(TATER_STATE_PROVISIONING);
         ESP_ERROR_CHECK(tater_provisioning_start(&s_config));
         int tick = 0;
@@ -154,7 +163,7 @@ void app_main(void)
     ESP_ERROR_CHECK(tater_audio_i2s_init());
     ESP_ERROR_CHECK(tater_playback_init());
 
-    err = tater_wifi_connect(&s_config);
+    err = tater_config_has_wifi(&s_config) ? tater_wifi_connect(&s_config) : ESP_OK;
     if (err != ESP_OK) {
         ESP_LOGW(
             TAG,

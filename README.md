@@ -500,6 +500,14 @@ Board folders hold only physical hardware differences. Shared behavior such as
 Wi-Fi, provisioning, WebSocket protocol, OTA, settings, wake assets, wake engine,
 playback, AEC, timers, and logs stays in the shared root.
 
+### Experimental USB Ethernet
+
+Opt-in SAT1 and Voice PE prototypes add USB Ethernet for the powered RTL8152 adapter used
+with Echo. Initial Ethernet, voice, download, and cold-start checks pass on both
+boards; extended validation remains. These builds are excluded from production releases.
+See [USB Ethernet prototype](docs/usb-ethernet.md) for the build,
+USB console recovery, setup, and hardware test checklist.
+
 ### Build With PlatformIO
 
 Build the default target:

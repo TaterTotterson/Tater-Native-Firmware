@@ -32,5 +32,6 @@ esp_err_t nvs_erase_key(nvs_handle_t, const char *);
 ''')
     executable = root / "test-identity"
     (root / "compat.h").write_text('#include <string.h>\nstatic inline size_t test_strlcpy(char *out, const char *in, size_t size) { size_t n = strlen(in); if (size) { size_t copy = n < size - 1 ? n : size - 1; memcpy(out, in, copy); out[copy] = 0; } return n; }\n#undef strlcpy\n#define strlcpy test_strlcpy\n')
-    subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror", "-include", str(root / "compat.h"), "-I", str(root), str(root / "tater_config.c"), str(MAIN / "tests/test_identity_host.c"), "-o", str(executable)], check=True)
-    subprocess.run([str(executable)], check=True)
+    for usb_enabled in (0, 1):
+        subprocess.run([os.environ.get("CC", "cc"), "-std=c11", "-Wall", "-Wextra", "-Werror", f"-DCONFIG_TATER_USB_ETHERNET={usb_enabled}", "-include", str(root / "compat.h"), "-I", str(root), str(root / "tater_config.c"), str(MAIN / "tests/test_identity_host.c"), "-o", str(executable)], check=True)
+        subprocess.run([str(executable)], check=True)
