@@ -587,63 +587,6 @@ Tater OTA uses the GitHub Release `ota` artifacts. USB recovery and first flash
 use the GitHub Release `factory` artifacts, or a local factory image passed
 directly to the USB flash script.
 
-### Release Tags
-
-Firmware releases are built by GitHub Actions when a `native-*` tag is pushed.
-Board headers normally share the same numeric version. A board-only update can
-append `-revN` (for example, `native-satellite1-0.3.3-rev1`) without bumping
-unaffected boards. The combined release tag uses the newest board version, so
-that example is released as `native-0.3.3-rev1`. Tater compares both the shared
-three-part version and the board revision.
-
-When publishing a follow-up package without changing any embedded board
-versions, append a descriptive suffix to the existing release version, such as
-`native-0.3.14-hotfix`. This creates a new immutable release tag while every
-board and the combined manifest continue to report firmware version `0.3.14`.
-
-Example:
-
-```sh
-git tag native-0.1.33
-git push origin native-0.1.33
-```
-
-For a board-only revision:
-
-```sh
-git tag native-0.3.3-rev1
-git push origin native-0.3.3-rev1
-```
-
-For a same-version follow-up package:
-
-```sh
-git tag native-0.3.14-hotfix
-git push origin native-0.3.14-hotfix
-```
-
-The release workflow builds `voicepe`, `sat1`, `respeaker_xvf3800`, and
-`s3_box`, packages release assets, writes URL-backed
-manifests, and creates or updates the GitHub Release with:
-
-- `latest.json`
-- `native-x.y.z-manifest.json`
-- `native-voicepe-x.y.z-voicepe-ota.bin`
-- `native-voicepe-x.y.z-voicepe-factory.bin`
-- `native-satellite1-x.y.z-satellite1-ota.bin`
-- `native-satellite1-x.y.z-satellite1-factory.bin`
-- `native-respeaker-xvf3800-x.y.z-respeaker_xvf3800-ota.bin`
-- `native-respeaker-xvf3800-x.y.z-respeaker_xvf3800-factory.bin`
-- `native-s3-box-x.y.z-s3_box-ota.bin`
-- `native-s3-box-x.y.z-s3_box-factory.bin`
-- `RELEASE_NOTES.md`
-
-The release title is:
-
-```text
-Tater Firmware x.y.z
-```
-
 ### Voice PE XMOS Firmware
 
 The embedded Voice PE XMOS update image lives at:
