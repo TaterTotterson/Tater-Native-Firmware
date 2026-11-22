@@ -62,7 +62,7 @@ negotiation and a safe 5V amplifier fallback.
 
 ### USB Ethernet and PoE
 
-Native firmware **0.7.0** (release build `native-0.7.0-rev1`) includes USB
+Native firmware **0.7.0** includes USB
 Ethernet in all four standard images: **SAT1**, **Voice PE**, **ReSpeaker
 XVF3800**, and **ESP32-S3-BOX-3**. The shared ESP32-S3 USB host implementation
 is enabled for each board; hardware testing is tracked separately:

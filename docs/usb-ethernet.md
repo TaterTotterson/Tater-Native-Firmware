@@ -1,6 +1,6 @@
 # USB Ethernet and PoE
 
-Native firmware **0.7.0**, release build **`native-0.7.0-rev1`**, includes USB
+Native firmware **0.7.0** includes USB
 Ethernet in all four standard images: SAT1, Voice PE, ReSpeaker XVF3800, and
 ESP32-S3-BOX-3. SAT1 and Voice PE have passed the hardware checks below.
 ReSpeaker and S3 Box include the same shared driver but have not yet been
