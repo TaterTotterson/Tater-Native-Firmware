@@ -3,9 +3,6 @@
 Native firmware **0.7.0** includes USB
 Ethernet in all four standard images: SAT1, Voice PE, ReSpeaker XVF3800, and
 ESP32-S3-BOX-3. SAT1 and Voice PE have passed the hardware checks below.
-ReSpeaker and S3 Box include the same shared driver but have not yet been
-tested with the adapter; their USB wiring, power delivery, and voice behavior
-remain unverified on hardware.
 
 ## Tested adapter and alternatives
 
@@ -15,8 +12,7 @@ For these USB-C boards, use a **data-capable Micro-USB female → USB-C male con
 The adapter supplies both 5 V power and Ethernet data over USB. A compatible
 PoE switch/injector powers it; its separate power input can also power the adapter.
 Use the board's **ESP32 USB port** (the XIAO USB port on ReSpeaker), not a
-separate XMOS USB audio port. Check the exact board's connector and power
-requirements before trying an untested setup.
+separate XMOS USB audio port.
 
 The current firmware accepts only USB VID:PID **`0bda:8152`**, selecting its
 **CDC-ECM configuration 2**. Other powered RTL8152 adapters exposing that same
