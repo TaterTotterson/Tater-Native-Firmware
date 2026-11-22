@@ -62,12 +62,22 @@ negotiation and a safe 5V amplifier fallback.
 
 ### USB Ethernet and PoE
 
-Native firmware **0.7.0** includes USB Ethernet in the standard **SAT1** and
-**Voice PE** images. Both boards passed Ethernet voice requests, downloaded
-speech playback, cold starts, and both USB-C plug orientations using the powered
-[UCTRONICS B0B9ZLVGJ4 (U6113) adapter](https://www.amazon.com/dp/B0B9ZLVGJ4),
-the same adapter tested with Tater Echo Firmware. ReSpeaker XVF3800 and S3 Box
-remain Wi-Fi-only in this release.
+Native firmware **0.7.0** (release build `native-0.7.0-rev1`) includes USB
+Ethernet in all four standard images: **SAT1**, **Voice PE**, **ReSpeaker
+XVF3800**, and **ESP32-S3-BOX-3**. The shared ESP32-S3 USB host implementation
+is enabled for each board; hardware testing is tracked separately:
+
+| Board | USB Ethernet included | Hardware verification |
+| --- | --- | --- |
+| SAT1 | Yes | Voice requests, downloaded speech, cold starts, and both USB-C orientations passed. |
+| Voice PE | Yes | Voice requests, downloaded speech, cold starts, and both USB-C orientations passed. |
+| ReSpeaker XVF3800 | Yes | Not yet tested with the adapter. |
+| ESP32-S3-BOX-3 | Yes | Not yet tested with the adapter. |
+
+The tested powered adapter is the
+[UCTRONICS B0B9ZLVGJ4 (U6113)](https://www.amazon.com/dp/B0B9ZLVGJ4),
+the same adapter tested with Tater Echo Firmware. Including support does not
+confirm each board's USB wiring, power delivery, or voice performance with it.
 
 Use a **data-capable Micro-USB female → USB-C male converter** between this
 adapter and the board's ESP32 USB port (not SAT1's XMOS USB port). Connect the

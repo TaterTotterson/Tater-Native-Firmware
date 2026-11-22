@@ -1,17 +1,22 @@
 # USB Ethernet and PoE
 
-Native firmware **0.7.0** includes USB Ethernet in the standard SAT1 and Voice PE
-release images. ReSpeaker XVF3800 and ESP32-S3-BOX-3 remain Wi-Fi-only; their USB
-wiring, power roles, and audio performance have not been qualified with this adapter.
+Native firmware **0.7.0**, release build **`native-0.7.0-rev1`**, includes USB
+Ethernet in all four standard images: SAT1, Voice PE, ReSpeaker XVF3800, and
+ESP32-S3-BOX-3. SAT1 and Voice PE have passed the hardware checks below.
+ReSpeaker and S3 Box include the same shared driver but have not yet been
+tested with the adapter; their USB wiring, power delivery, and voice behavior
+remain unverified on hardware.
 
 ## Tested adapter and alternatives
 
 Use the powered [UCTRONICS B0B9ZLVGJ4 (U6113)](https://www.amazon.com/dp/B0B9ZLVGJ4),
 the same adapter tested with [Tater Echo Firmware](https://github.com/TaterTotterson/Tater-Echo-Firmware#usb-ethernet-adapters).
-For SAT1 and Voice PE, add a **data-capable Micro-USB female → USB-C male converter**.
+For these USB-C boards, use a **data-capable Micro-USB female → USB-C male converter**.
 The adapter supplies both 5 V power and Ethernet data over USB. A compatible
 PoE switch/injector powers it; its separate power input can also power the adapter.
-Use the board's **ESP32 USB port**, not SAT1's separate XMOS USB port.
+Use the board's **ESP32 USB port** (the XIAO USB port on ReSpeaker), not a
+separate XMOS USB audio port. Check the exact board's connector and power
+requirements before trying an untested setup.
 
 The current firmware accepts only USB VID:PID **`0bda:8152`**, selecting its
 **CDC-ECM configuration 2**. Other powered RTL8152 adapters exposing that same
@@ -99,7 +104,7 @@ platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
 for test in main/scripts/test_*_host.sh; do bash "$test"; done
 ```
 
-SAT1 and Voice PE enable `TATER_USB_ETHERNET=ON` and the SDK defaults overlay.
+All four standard environments enable `TATER_USB_ETHERNET=ON` and the SDK defaults overlay.
 Development aliases `sat1_usb_ethernet` and `voicepe_usb_ethernet` inherit the
 same release configuration. Board identity, flash layout, audio, and XMOS
 payload remain specific to each target.
