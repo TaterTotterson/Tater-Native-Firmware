@@ -16,16 +16,16 @@
 
 # Tater Native Satellite Firmware
 
-Native firmware for Tater-managed voice satellites.
+Native firmware for voice satellites managed through Tater or the Home Assistant bridge.
 
 The goal is to make satellites behave like dedicated Tater appliances instead
 of configurable ESPHome nodes:
 
 - no YAML
 - no firmware editing by the user
-- setup and settings managed from Tater
+- setup and settings managed from Tater or the Home Assistant bridge
 - official release images for supported hardware
-- Tater handles the intelligence; firmware handles the hardware
+- the connected controller handles the intelligence; firmware handles the hardware
 
 Wake-word models now live in the
 [Tater Wake Words](https://github.com/TaterTotterson/Tater-Wake-Words) repo.
@@ -118,7 +118,7 @@ Ethernet requires a new boot through the adapter. Read the
 - Uses a single-owner WebSocket lifecycle watchdog that destroys the previous
   client before reconnecting, preventing overlapping connections while still
   recovering a stuck client without deadlocking an in-flight hello or audio send
-- Supports native firmware OTA commands from Tater
+- Supports native firmware OTA commands from Tater or the Home Assistant bridge
 - Sends logs, OTA status, playback-finished events, timer events, and trainer
   feedback events
 
@@ -157,7 +157,7 @@ same wake phrase. Dual mode is recommended on hardware that supports it.
 - On S3 Box, playback-time wake remains opt-in through barge-in until its
   firmware AEC path is ready for production use
 - Firmware-side adaptive AEC with live strength and delay settings
-- Server-driven playback from Tater
+- Server-driven playback from Tater or the Home Assistant bridge
 - WAV streaming playback
 - MP3 streaming decode/playback
 - FLAC streaming decode/playback
@@ -328,8 +328,8 @@ Satellite1 / Sat1:
 - Lab-only four-channel raw USB microphone capture image for independent mic
   measurement; this diagnostic image is not embedded in normal Sat1 firmware
 - Automatic 3.5 mm jack detection plus live Internal, AUX, or Both output
-  selection in Tater; AUX is line-level and expects powered speakers or an
-  external amplifier
+  selection in Tater or the HA bridge; AUX is line-level and expects powered
+  speakers or an external amplifier
 
 ReSpeaker XVF3800:
 
@@ -461,13 +461,14 @@ Tater-Setup-XXXX
 http://192.168.4.1
 ```
 
-3. In Tater, go to Satellites and choose Add Satellite.
-4. Enter the pairing code shown by Tater into the setup page.
+3. In Tater, open **Voice & devices → Satellites → Add Satellite**. In Home
+   Assistant, open **Tater Satellites → Add satellite** in the bridge instead.
+4. Enter the pairing code from your chosen controller into the setup page.
 5. Fill in:
 
 - Wi-Fi SSID
 - Wi-Fi password
-- Tater server URL, for example `http://192.168.1.20:8501`
+- Server URL shown by Tater or the HA bridge; for Tater, for example `http://192.168.1.20:8501`
 - pairing code
 - device name
 - room
@@ -522,7 +523,7 @@ main/
   playback.c                  WAV/MP3/FLAC playback and tones
   sendspin_player.cpp         Sendspin discovery, timing, decode, and I2S bridge
   wake_engine.cc              microWakeWord integration
-  native_settings.c           Live settings from Tater
+  native_settings.c           Live settings from Tater or the HA bridge
   audio_aec.c                 Firmware-side adaptive AEC
   provisioning.c              Setup AP, captive DNS, setup web UI
   boards/
