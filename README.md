@@ -62,6 +62,11 @@ negotiation and a safe 5V amplifier fallback.
 
 ### USB Ethernet and PoE
 
+Satellite1 **0.7.0-r1** adds the tested XMOS 1.2.0-dev.1 pipeline and GPIO
+diagnostic cleanup. Its calibrated four-microphone beam remains before AEC,
+with stereo echo references. Voice PE, ReSpeaker XVF3800, and ESP32-S3-BOX-3
+retain **0.7.0**; Tater compares each board's version independently.
+
 Native firmware **0.7.0** includes USB Ethernet in all four standard images:
 **SAT1**, **Voice PE**, **ReSpeaker XVF3800**, and **ESP32-S3-BOX-3**.
 

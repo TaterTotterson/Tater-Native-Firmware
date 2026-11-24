@@ -1,17 +1,18 @@
 # Sat1 XMOS integration candidate
 
-This branch is for bench evaluation. The normal `sat1` PlatformIO environment
-still embeds production XMOS 1.1.1. On November 24, 2026, both four-mic AEC
+The normal `sat1` PlatformIO environment in native **0.7.0-r1** now embeds the
+tested XMOS **1.2.0-dev.1** image. On November 24, 2026, both four-mic AEC
 candidates failed the physical startup test: their DSP frame counters froze and
 the wake microphone repeated a constant sample. **Do not promote dev.2 or dev.3.**
-The legacy topology with the new library/protocol passed a basic voice check;
-its wider qualification remains pending. See [HARDWARE-VALIDATION.md](HARDWARE-VALIDATION.md).
+The legacy topology with the new library/protocol passed microphone/direction
+liveness, voice, buttons, and LED checks after the native GPIO cleanup. Its
+wider qualification remains pending. See [HARDWARE-VALIDATION.md](HARDWARE-VALIDATION.md).
 
 ## Images
 
 | Native environment | XMOS identity | Processing |
 | --- | --- | --- |
-| `sat1` | 1.1.1 | Existing production image and rollback |
+| `sat1` | 1.2.0-dev.1 | Release default: original pre-AEC beam, stereo echo references, new library/protocol |
 | `sat1_xmos_legacy` | 1.2.0-dev.1 | fwk_voice 0.9.0 and protocol 0x11, retaining the pre-AEC beam and two stereo echo references |
 | `sat1_xmos_aec4` | 1.2.0-dev.2 | Individual four-mic AEC, mono echo reference, residual averaging; raw DoA/health telemetry |
 | `sat1_xmos_aec4_beam` | 1.2.0-dev.3 | Individual four-mic AEC followed by our calibrated, steered residual beam |
@@ -30,8 +31,8 @@ preserves upstream's unweighted mixing. Mic exclusion and gain compensation
 apply in the beam variant. The four-mic variants downmix stereo echo references
 to mono; stereo AUX/Both output needs its own measurements.
 
-The candidate DoA resource is **233**, reserving FPH's speaker/EQ resource 231
-and mic-input settings resource 232. Production 1.1.1 remains on resource 231;
+The current DoA resource is **233**, reserving FPH's speaker/EQ resource 231
+and mic-input settings resource 232. The older 1.1.1 image uses resource 231;
 the ESP environment selects the matching resource and image together.
 The native reader handles old 0x10 and new 0x11 read framing, validates handler
 status, drains write acknowledgments, retries default-buffer responses with a
@@ -85,7 +86,8 @@ Native binaries and the corresponding bootloader/partition files are in
 `.pio/build/<environment>/`. `firmware.bin` is the application; `firmware.factory.bin`
 is the merged USB installation image at address 0. Check the actual generated
 filename before flashing. The embedded XMOS image installs on first boot.
-Returning to the standard `sat1` native firmware reinstalls XMOS 1.1.1.
+For rollback to XMOS 1.1.1, install the published `native-0.7.0` Sat1 image;
+the current standard `sat1` target installs the working dev.1 image.
 
 ## Bench validation before release or upstream PRs
 

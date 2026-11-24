@@ -110,3 +110,27 @@ functional check, not completion of the wider qualification listed above.
 No release was published. Private artifact records, status snapshots, and logs
 are retained in the ignored
 `release_assets/sat1-xmos-integration/hardware/2026-11-24-gpio-cleanup/` directory.
+
+## Native release target 0.7.0-r1
+
+The standard `sat1` target now selects the same dev.1 XMOS payload. Only the
+Satellite1 native version advances to `native-satellite1-0.7.0-r1`; the other
+three board versions remain 0.7.0. The actual Tater version comparator was
+checked against these four headers: it offers an update only to Satellite1.
+The combined manifest and all eight OTA/factory artifact checksums passed.
+All four standard native builds and the complete host regression set passed.
+
+The standard Sat1 OTA application is 2,804,048 bytes, SHA-256
+`d3fd81854ff1dbe5df8f4ba7455efa6a9651bc91c6259d555762c80278743818`.
+Its compressed XMOS payload is identical to dev.1, and neither failed AEC4
+payload is embedded. After OTA, the board reported the new native identity,
+a fresh connection/uptime, and unchanged XMOS `1.2.0-dev.1`. Three fresh
+snapshots showed the frame counter advancing from 571 to 1,244, changing
+processed mic samples, four healthy mics, and a ready wake engine without a
+coredump. The first local HTTP attempt failed to connect before the temporary
+server was ready; retrying delivered the verified application successfully.
+
+This standard release image remains installed. These checks retain the same
+limits as the earlier functional checks; no additional acoustic or repeated
+cold-boot qualification is claimed. Local records are in the ignored
+`release_assets/sat1-r1-checks/` directory.
