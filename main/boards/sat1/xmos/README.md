@@ -1,16 +1,21 @@
 # Sat1 XMOS Firmware
 
-The standard native `sat1` environment in **0.7.0-r1** embeds
-`sat1_xmos_1_2_0_dev1_factory.bin.zlib` and installs XMOS **1.2.0-dev.1** when
-another version is present. This is the exact working legacy-topology image
-tested on the bench; its development identity is retained to preserve the
-tested binary. The uncompressed image and MD5 are included alongside it.
+The standard native `sat1` environment in **0.7.0-r2** embeds
+`sat1_xmos_1_2_0_dev8_factory.bin.zlib` and installs XMOS **1.2.0-dev.8** when
+another version is present. The same uncompressed image is bundled by RPi
+Sat1 **0.1.19**.
 
-It combines fwk_voice 0.9.0 and protocol 0x11 with Tater's calibrated four-mic
-beam before AEC and stereo echo references. The failed dev.2/dev.3 four-mic AEC
-experiments remain explicit test targets and are excluded from release images.
-See [INTEGRATION.md](INTEGRATION.md) for provenance, builds and hardware results.
-The previous 1.1.1 factory image remains available for rollback.
+The signal path is four raw microphones → calibrated steered beam plus omni →
+stereo-reference 2Y2X AEC → **IC/VNR enabled** → noise suppression → AGC.
+It retains fwk_voice 0.9.0, protocol 0x11, DoA resource 233, microphone health
+and calibration, and Tater's buttons, LED feedback and steering controls.
+The IC-bypassed dev.1 image remains available for comparison/recovery; failed
+dev.2/dev.3 four-mic AEC experiments are excluded from release images.
+
+See [IC-VNR-UPDATE.md](IC-VNR-UPDATE.md) for the dev.8 identity and verification,
+and [INTEGRATION.md](INTEGRATION.md) for the historical integration variants.
+The IC-enabled FPH ESPHome topology was tested earlier; Tater-host hardware
+checks follow these builds.
 
 The lab-only `sat1_xmos_1_1_0_raw4_usb_factory.bin` exposes the physical
 microphones independently and remains outside ESP firmware payloads. Rebuilding

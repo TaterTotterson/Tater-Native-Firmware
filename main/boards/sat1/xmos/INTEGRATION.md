@@ -1,18 +1,21 @@
-# Sat1 XMOS integration candidate
+# Sat1 XMOS integration
 
-The normal `sat1` PlatformIO environment in native **0.7.0-r1** now embeds the
-tested XMOS **1.2.0-dev.1** image. On November 24, 2026, both four-mic AEC
-candidates failed the physical startup test: their DSP frame counters froze and
-the wake microphone repeated a constant sample. **Do not promote dev.2 or dev.3.**
-The legacy topology with the new library/protocol passed microphone/direction
-liveness, voice, buttons, and LED checks after the native GPIO cleanup. Its
-wider qualification remains pending. See [HARDWARE-VALIDATION.md](HARDWARE-VALIDATION.md).
+The normal `sat1` PlatformIO environment in native **0.7.0-r2** embeds XMOS
+**1.2.0-dev.8**. It enables IC/VNR after the existing calibrated pre-AEC beam
+and stereo-reference 2Y2X AEC, following the IC-enabled topology tested in the
+FPH companion dev.4 build. The new native/RPi host builds require their own
+physical follow-up checks; earlier dev.1 observations do not qualify dev.8.
+
+The IC-bypassed **1.2.0-dev.1** remains an explicit comparison/recovery image.
+The earlier four-mic AEC dev.2/dev.3 candidates failed startup/liveness checks
+and remain excluded from releases. See [HARDWARE-VALIDATION.md](HARDWARE-VALIDATION.md)
+for the historical observations and [IC-VNR-UPDATE.md](IC-VNR-UPDATE.md) for dev.8.
 
 ## Images
 
 | Native environment | XMOS identity | Processing |
 | --- | --- | --- |
-| `sat1` | 1.2.0-dev.1 | Release default: original pre-AEC beam, stereo echo references, new library/protocol |
+| `sat1`, `sat1_xmos_beam_ic` | 1.2.0-dev.8 | Release default: calibrated pre-AEC beam, stereo-reference 2Y2X AEC, IC/VNR, NS and AGC |
 | `sat1_xmos_legacy` | 1.2.0-dev.1 | fwk_voice 0.9.0 and protocol 0x11, retaining the pre-AEC beam and two stereo echo references |
 | `sat1_xmos_aec4` | 1.2.0-dev.2 | Individual four-mic AEC, mono echo reference, residual averaging; raw DoA/health telemetry |
 | `sat1_xmos_aec4_beam` | 1.2.0-dev.3 | Individual four-mic AEC followed by our calibrated, steered residual beam |
@@ -64,11 +67,12 @@ aside because 0.9.0 generates the model in its build directory.
 Build **sequentially**: the version generator writes a shared header.
 
 ```sh
+SAT1_XMOS_PIPELINE=beam_ic SAT1_XMOS_RUN_SIM_TESTS=1 bash main/boards/sat1/xmos/source/build_sat1_fixed_delay.sh
 SAT1_XMOS_PIPELINE=legacy SAT1_XMOS_RUN_SIM_TESTS=1 bash main/boards/sat1/xmos/source/build_sat1_fixed_delay.sh
 SAT1_XMOS_PIPELINE=aec4 SAT1_XMOS_RUN_SIM_TESTS=1 bash main/boards/sat1/xmos/source/build_sat1_fixed_delay.sh
 SAT1_XMOS_PIPELINE=aec4_beam SAT1_XMOS_RUN_SIM_TESTS=1 bash main/boards/sat1/xmos/source/build_sat1_fixed_delay.sh
-python3 main/boards/sat1/xmos/source/scripts/package_candidates.py legacy aec4 aec4_beam
-pio run -e sat1_xmos_legacy -e sat1_xmos_aec4 -e sat1_xmos_aec4_beam
+python3 main/boards/sat1/xmos/source/scripts/package_candidates.py beam_ic legacy aec4 aec4_beam
+pio run -e sat1_xmos_beam_ic -e sat1_xmos_legacy -e sat1_xmos_aec4 -e sat1_xmos_aec4_beam
 ```
 
 Each XMOS configuration has its own `build_<variant>` directory. Use
@@ -87,7 +91,7 @@ Native binaries and the corresponding bootloader/partition files are in
 is the merged USB installation image at address 0. Check the actual generated
 filename before flashing. The embedded XMOS image installs on first boot.
 For rollback to XMOS 1.1.1, install the published `native-0.7.0` Sat1 image;
-the current standard `sat1` target installs the working dev.1 image.
+the current standard `sat1` target installs the IC-enabled dev.8 image.
 
 ## Bench validation before release or upstream PRs
 

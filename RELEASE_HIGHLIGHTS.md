@@ -1,5 +1,4 @@
-- **Satellite1 update: 0.7.0-r1.** Voice PE, ReSpeaker XVF3800, and ESP32-S3-BOX-3 retain version 0.7.0; Tater offers this update to Satellite1 without prompting unaffected boards.
-- Bundles the hardware-tested XMOS **1.2.0-dev.1** image with fwk_voice 0.9.0, protocol 0x11, and upstream flash/DFU improvements. Its development identity is retained so the released payload exactly matches the tested image.
-- Preserves Tater’s four-microphone direction finding, calibration, steered beam before AEC, stereo echo references, noise suppression, and AGC.
-- Removes the unused direct GPIO diagnostic request while retaining the tested status-register volume/mute controls and LED feedback.
-- Verified native builds, protocol checks, OTA restart, live microphone/direction data, volume and mute controls, LEDs, and clear wake-and-time voice replies on one Satellite1. The four-microphone AEC experiments are excluded from this release; broader acoustic and repeated cold-boot qualification remains pending.
+- **Satellite1 update: 0.7.0-r2.** Voice PE, ReSpeaker XVF3800, and ESP32-S3-BOX-3 retain version 0.7.0; only Satellite1 receives a new board revision.
+- Enables XMOS interference cancellation and voice/noise-ratio estimation in the calibrated pre-AEC beam pipeline, using the new **1.2.0-dev.8** Tater image.
+- Retains all four physical microphones, direction finding, calibration/health, stereo-reference 2Y2X AEC, noise suppression, AGC, buttons, and directional LEDs.
+- Shares the exact XMOS payload with the RPi Sat1 0.1.19 release. The IC-enabled topology passed the FPH ESPHome bench checks; Tater-host hardware testing follows these builds.

@@ -6,10 +6,11 @@ XTC_DIR="${XMOS_TOOL_PATH:-/Applications/XMOS_XTC_15.3.1}"
 CMAKE_BIN="${CMAKE_BIN:-/opt/homebrew/opt/cmake/bin/cmake}"
 NINJA_BIN="${NINJA_BIN:-/opt/homebrew/opt/ninja/bin/ninja}"
 PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/bin/python3.11}"
-VENV_DIR="${ROOT_DIR}/.venv"
-PIPELINE="${SAT1_XMOS_PIPELINE:-legacy}"
+VENV_DIR="${SAT1_XMOS_VENV_DIR:-${ROOT_DIR}/.venv}"
+PIPELINE="${SAT1_XMOS_PIPELINE:-beam_ic}"
 BUILD_DIR="${ROOT_DIR}/build_${PIPELINE}"
 case "${PIPELINE}" in
+  beam_ic) FW_VERSION=v1.2.0-dev.8 ;;
   legacy) FW_VERSION=v1.2.0-dev.1 ;;
   aec4) FW_VERSION=v1.2.0-dev.2 ;;
   aec4_beam) FW_VERSION=v1.2.0-dev.3 ;;
@@ -38,7 +39,7 @@ if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
   "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 fi
 
-"${VENV_DIR}/bin/pip" install -r "${ROOT_DIR}/requirements.txt"
+"${VENV_DIR}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt"
 
 export XMOS_TOOL_PATH="${XTC_DIR}"
 export XMOS_HOME="${XMOS_HOME:-${HOME}/.xmos}"
@@ -85,7 +86,7 @@ echo "Built ${BUILD_DIR}/${TARGET}.factory.bin"
 echo "MD5  ${BUILD_DIR}/${TARGET}.factory.md5"
 
 if [[ "${SAT1_XMOS_RUN_SIM_TESTS:-0}" == "1" ]]; then
-  if [[ "${PIPELINE}" == "legacy" ]]; then
+  if [[ "${PIPELINE}" == "legacy" || "${PIPELINE}" == "beam_ic" ]]; then
     SIM_TARGETS=(voice_compat_test)
   else
     SIM_TARGETS=(fph_aec_4y_init_canary_test sat1_aec_beam_test)

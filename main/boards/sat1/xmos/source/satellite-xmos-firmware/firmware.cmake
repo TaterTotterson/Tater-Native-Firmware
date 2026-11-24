@@ -2,12 +2,12 @@
 # Gather Sources
 #**********************
 
-set(SAT1_XMOS_PIPELINE "legacy" CACHE STRING "legacy, aec4, or aec4_beam")
-set_property(CACHE SAT1_XMOS_PIPELINE PROPERTY STRINGS legacy aec4 aec4_beam)
-if(NOT SAT1_XMOS_PIPELINE MATCHES "^(legacy|aec4|aec4_beam)$")
+set(SAT1_XMOS_PIPELINE "beam_ic" CACHE STRING "beam_ic, legacy, aec4, or aec4_beam")
+set_property(CACHE SAT1_XMOS_PIPELINE PROPERTY STRINGS beam_ic legacy aec4 aec4_beam)
+if(NOT SAT1_XMOS_PIPELINE MATCHES "^(beam_ic|legacy|aec4|aec4_beam)$")
     message(FATAL_ERROR "Invalid SAT1_XMOS_PIPELINE: ${SAT1_XMOS_PIPELINE}")
 endif()
-set(SAT1_XMOS_VERSION "v1.2.0-dev.1" CACHE STRING "Candidate firmware identity")
+set(SAT1_XMOS_VERSION "v1.2.0-dev.8" CACHE STRING "Candidate firmware identity")
 
 file(GLOB_RECURSE APP_SOURCES   ${CMAKE_CURRENT_LIST_DIR}/src/*.c)
 

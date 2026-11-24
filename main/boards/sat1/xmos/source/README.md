@@ -1,10 +1,10 @@
 # Sat1 XMOS Firmware Source
 
-This folder is the Git-trackable source copy for the Satellite1 XMOS firmware used by the Sat1 ESPHome package.
+This folder is the Git-trackable source copy for the Satellite1 XMOS firmware used by Tater Native and the Sat1 RPi appliance.
 
 This branch also contains isolated integration configurations. See
 [../INTEGRATION.md](../INTEGRATION.md) for version identities and bench testing.
-The normal native `sat1` target continues to embed the released 1.1.1 image.
+The normal native `sat1` target embeds the IC-enabled 1.2.0-dev.8 image.
 
 ## What Is Included
 
@@ -82,7 +82,14 @@ The source now uses fwk_voice 0.9.0 and device-control protocol 0x11. The
 delays to AEC residuals while estimating direction and microphone health from
 raw capture. The newer source uses DoA resource 233.
 
-The wrapper defaults to building the legacy integration candidate in
-`build_legacy/`, with version 1.2.0-dev.1. Explicit `SAT1_XMOS_PIPELINE=aec4` and
-`aec4_beam` builds use their own directories and dev identities. They do not
-replace the production embedded payload automatically.
+The wrapper defaults to `beam_ic` in `build_beam_ic/`, version 1.2.0-dev.8.
+It retains the calibrated pre-AEC beam and stereo-reference 2Y2X AEC while
+explicitly enabling IC/VNR, matching the processing stages exercised by the
+FPH companion's calibrated-beam dev.4 candidate. Tater's application glue,
+buttons, LEDs and host controls remain in this source tree.
+
+`SAT1_XMOS_PIPELINE=legacy` retains the IC-bypassed dev.1 comparison. Explicit
+`aec4` and `aec4_beam` builds retain their separate, failed integration identities.
+Builds do not replace embedded payloads automatically; package and select the
+verified image before building the host firmware. `SAT1_XMOS_VENV_DIR` can select
+a fresh Python environment when a local checkout has moved.

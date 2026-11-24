@@ -11,7 +11,7 @@ clone_checkout() {
   local dest="${ROOT_DIR}/${path}"
 
   if [[ -d "${dest}/.git" ]]; then
-    git -C "${dest}" fetch --tags --force
+    git -C "${dest}" fetch --tags --force --recurse-submodules=no
   elif [[ -e "${dest}" ]]; then
     echo "Refusing to replace existing non-git path: ${dest}" >&2
     echo "Move it aside, then rerun this script." >&2

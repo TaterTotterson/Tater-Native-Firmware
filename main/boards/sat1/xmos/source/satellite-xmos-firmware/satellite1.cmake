@@ -14,7 +14,6 @@ foreach(FFVA_AP ${FFVA_PIPELINES_INT})
         appconfI2S_MODE=appconfI2S_MODE_MASTER
         appconfI2S_AUDIO_SAMPLE_RATE=48000
         appconfDEVICE_CTRL_SPI=1
-        appconfAUDIO_PIPELINE_SKIP_IC_AND_VNR=1
     )
 
     if(${FFVA_AP} STREQUAL bypass )
@@ -25,7 +24,15 @@ foreach(FFVA_AP ${FFVA_PIPELINES_INT})
       list(APPEND FFVA_INT_COMPILE_DEFINITIONS appconfPIPELINE_BYPASS=0)
     endif()
 
-    if(NOT SAT1_XMOS_PIPELINE STREQUAL "legacy" AND PL_NAME STREQUAL "fixed_delay")
+    # Match the IC-enabled pre-AEC beam topology tested in the FPH companion.
+    # Keep the legacy and four-mic AEC comparison images bypassed.
+    if(SAT1_XMOS_PIPELINE STREQUAL "beam_ic" AND PL_NAME STREQUAL "fixed_delay")
+        list(APPEND FFVA_INT_COMPILE_DEFINITIONS appconfAUDIO_PIPELINE_SKIP_IC_AND_VNR=0)
+    else()
+        list(APPEND FFVA_INT_COMPILE_DEFINITIONS appconfAUDIO_PIPELINE_SKIP_IC_AND_VNR=1)
+    endif()
+
+    if(SAT1_XMOS_PIPELINE MATCHES "^(aec4|aec4_beam)$" AND PL_NAME STREQUAL "fixed_delay")
         set(SAT1_AEC4_TARGET 1)
         list(APPEND FFVA_INT_COMPILE_DEFINITIONS appconfSAT1_AEC4=1)
         if(SAT1_XMOS_PIPELINE STREQUAL "aec4_beam")

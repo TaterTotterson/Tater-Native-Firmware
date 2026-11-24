@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package explicitly built integration images without replacing production 1.1.1."""
+"""Verify and package explicitly built Sat1 XMOS profiles."""
 import argparse
 import hashlib
 import json
@@ -11,7 +11,7 @@ from pathlib import Path
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSIONS = {"legacy": 1, "aec4": 2, "aec4_beam": 3}
+VERSIONS = {"beam_ic": 8, "legacy": 1, "aec4": 2, "aec4_beam": 3}
 
 def linked_versions(executable):
     """Read the DFU identity from linked ELF symbols, not the shared source header."""
@@ -99,7 +99,8 @@ def main():
             "factory_md5": md5, "factory_sha256": hashlib.sha256(data).hexdigest(),
             "compressed_sha256": hashlib.sha256(compressed).hexdigest(),
             "upstream_develop": "ace8050265f134c1e0442661c8a16866467c9e53",
-            "compact_frames_pr132": None if variant == "legacy" else "208e0d3ea07c3d61ae306b0ddd980b45977b2a76",
+            "ic_vnr_enabled": variant == "beam_ic",
+            "compact_frames_pr132": None if variant in ("legacy", "beam_ic") else "208e0d3ea07c3d61ae306b0ddd980b45977b2a76",
             "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
             "protocol": "0x11", "doa_resource": 233,
             "hardware_validated": False,

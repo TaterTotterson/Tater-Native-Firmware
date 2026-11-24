@@ -169,7 +169,7 @@ target_link_libraries(empty_2mic_2ref
 ##*********************************************
 
 add_library(fph::ffva::ap::adec_altarch ALIAS adec_altarch_aec_ic_ns_agc_2mic_2ref)
-if(SAT1_XMOS_PIPELINE STREQUAL "legacy")
+if(SAT1_XMOS_PIPELINE MATCHES "^(legacy|beam_ic)$")
     add_library(fph::ffva::ap::fixed_delay ALIAS fixed_delay_aec_ic_ns_agc_2mic_2ref)
 else()
     add_library(fph::ffva::ap::fixed_delay ALIAS fixed_delay_4mic_1ref)
