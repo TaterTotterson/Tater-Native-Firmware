@@ -1,6 +1,6 @@
 # IC/VNR-enabled Tater Sat1 update
 
-Native Satellite1 **0.7.0-r2** and RPi Sat1 **0.1.19** select the same XMOS
+Native Satellite1 **0.7.0-r3** and RPi Sat1 **0.1.19** select the same XMOS
 **1.2.0-dev.8** factory image. The update enables IC/VNR in Tater's own
 pre-AEC beam pipeline, following the processing topology exercised in the
 FPH ESPHome dev.4 companion. This is a newly built Tater image, retaining
@@ -38,10 +38,10 @@ are retained. The earlier failed dev.2/dev.3 four-mic AEC images are excluded.
 - Sat1 alone changes to `native-satellite1-0.7.0-r2`; the other three native
   board versions remain `0.7.0`.
 
-Tater-host physical tests follow the tagged firmware/image builds: installed
-identity, wake/reply, playback interruption, direction LEDs, volume/mute and
-restart recovery. The earlier FPH ESPHome dev.4 observations and dev.1 native
-checks are recorded separately and do not qualify this new image.
+Tater-host physical checks were scheduled after the IC/VNR release builds.
+Results for the Native recognition-input correction are recorded below.
+The earlier FPH ESPHome dev.4 observations and dev.1 native checks are
+recorded separately.
 
 ## Rebuild
 
@@ -79,5 +79,9 @@ On November 24, the candidate was installed on the same Sat1. We confirmed
 clear replies from opposite sides and another clear reply after a full power
 cycle, with no Tater setting changes. Runtime status after that restart reports
 `native-satellite1-0.7.0-r3-dev`, XMOS `1.2.0-dev.8`, reset reason `poweron`,
-and no core dump. The candidate remains unpublished. Its OTA image SHA-256 is
+and no core dump. Its OTA image SHA-256 is
 `6773533501beaba729a7637630067f78c0c353ba8cf1732bbdde6f53ba3d9094`.
+
+Native Satellite1 **0.7.0-r3** promotes this recognition-input correction to
+the stable board revision. IC/VNR and the dev.8 XMOS payload remain enabled.
+The other native board versions remain **0.7.0**.
