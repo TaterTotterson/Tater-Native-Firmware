@@ -107,21 +107,6 @@ Ethernet requires a new boot through the adapter. Read the
 - Physical setup reset gesture on boards with a center/action button: 5 quick
   clicks, then hold the sixth press for 5 seconds
 
-### Native Tater Connection
-
-- Connects to Tater at `/api/tater/satellite/v1/ws`
-- Sends board, firmware, capabilities, diagnostics, live settings, wake state,
-  timer state, AEC state, XMOS status, and DoA telemetry
-- Streams mic audio as 16 kHz, 16-bit, mono PCM binary WebSocket frames
-- Uses an audio transmit queue and reconnect-aware send path to reduce random
-  voice-session disconnects
-- Uses a single-owner WebSocket lifecycle watchdog that destroys the previous
-  client before reconnecting, preventing overlapping connections while still
-  recovering a stuck client without deadlocking an in-flight hello or audio send
-- Supports native firmware OTA commands from Tater or the Home Assistant bridge
-- Sends logs, OTA status, playback-finished events, timer events, and trainer
-  feedback events
-
 ### Voice And Audio
 
 **Speak without pausing:** a matching wake-boundary model helps preserve the
