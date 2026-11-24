@@ -54,3 +54,10 @@ void sat1_beamformer_process_frame(
 void sat1_beamformer_reset(sat1_beamformer_t *beamformer);
 void sat1_beamformer_get_diagnostics(
     sat1_beamformer_diagnostics_t *diagnostics);
+
+/* Split raw-level health calibration from processing echo-cancelled microphones. */
+void sat1_beamformer_analyze_frame(sat1_beamformer_t *beamformer,
+                                  const int32_t *microphones[4], size_t frame_count);
+void sat1_beamformer_process_calibrated_frame(sat1_beamformer_t *beamformer,
+    int32_t *output, const int32_t *microphones[4], size_t frame_count,
+    const doa_estimator_state_t *direction);

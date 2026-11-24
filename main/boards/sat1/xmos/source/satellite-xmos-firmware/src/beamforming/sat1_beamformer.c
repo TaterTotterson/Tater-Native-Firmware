@@ -338,7 +338,29 @@ void sat1_beamformer_reset(sat1_beamformer_t *beamformer)
     publish_diagnostics(beamformer);
 }
 
-void sat1_beamformer_process_frame(
+void sat1_beamformer_analyze_frame(sat1_beamformer_t *beamformer,
+                                  const int32_t *microphones[4], size_t frame_count)
+{
+    if (beamformer == NULL || microphones == NULL || frame_count == 0) return;
+    for (size_t mic = 0; mic < 4; ++mic) if (microphones[mic] == NULL) return;
+    if (!beamformer->initialized) sat1_beamformer_reset(beamformer);
+    update_mic_calibration(beamformer, microphones, frame_count);
+    publish_diagnostics(beamformer);
+}
+
+void sat1_beamformer_process_frame(sat1_beamformer_t *beamformer,
+                                  int32_t *output, const int32_t *microphones[4],
+                                  size_t frame_count, const doa_estimator_state_t *direction)
+{
+    if (output == NULL) {
+        return;
+    }
+    sat1_beamformer_analyze_frame(beamformer, microphones, frame_count);
+    sat1_beamformer_process_calibrated_frame(beamformer, output, microphones,
+                                            frame_count, direction);
+}
+
+void sat1_beamformer_process_calibrated_frame(
     sat1_beamformer_t *beamformer,
     int32_t *output,
     const int32_t *microphones[SAT1_BEAMFORMER_MIC_COUNT],
@@ -359,7 +381,6 @@ void sat1_beamformer_process_frame(
         sat1_beamformer_reset(beamformer);
     }
 
-    update_mic_calibration(beamformer, microphones, frame_count);
 
     int16_t target_delay_q8[SAT1_BEAMFORMER_MIC_COUNT];
     select_target_delays(beamformer, target_delay_q8, direction);

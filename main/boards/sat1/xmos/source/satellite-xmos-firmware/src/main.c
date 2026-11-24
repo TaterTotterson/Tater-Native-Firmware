@@ -12,6 +12,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "stream_buffer.h"
+#include "semphr.h"
 #include "queue.h"
 
 /* Library headers */
@@ -27,6 +28,7 @@
 #include "usb_audio.h"
 #include "usb_cdc.h"
 #include "audio_pipeline.h"
+#include "audio_pipeline_io.h"
 #include "speaker_pipeline.h"
 #include "dfu_servicer.h"
 #include "gpio/gpio_servicer.h"
@@ -44,6 +46,8 @@ volatile int aec_ref_source = appconfAEC_REF_DEFAULT;
 
 #define APP_I2S_STEREO_CHANNELS 2
 
+#define DEVICE_STATUS_READY_REGISTER_IDX   0
+#define DEVICE_STATUS_READY_VALUE          1
 
 #if ON_TILE(SPEAKER_PIPELINE_TILE_NO)
 rtos_osal_queue_t *ref_input_queue;
@@ -51,7 +55,7 @@ rtos_osal_queue_t *ref_input_queue;
 
 #if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && \
     appconfAUDIO_PIPELINE_CHANNELS >= 2 && \
-    appconfAUDIO_PIPELINE_CHANNELS < MIC_ARRAY_CONFIG_MIC_COUNT
+    (appconfAUDIO_PIPELINE_CHANNELS < MIC_ARRAY_CONFIG_MIC_COUNT || appconfSAT1_AEC4)
 static int32_t saturate_i32_from_i64(int64_t value)
 {
     if (value > INT32_MAX) {
@@ -64,6 +68,9 @@ static int32_t saturate_i32_from_i64(int64_t value)
 }
 
 static sat1_beamformer_t sat1_beamformer;
+#if appconfSAT1_AEC4
+static SemaphoreHandle_t sat1_beam_mutex;
+#endif
 
 static void mix_four_mics_for_pipeline(
         int32_t *pipeline_mic_ptr,
@@ -247,11 +254,23 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
 #if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS >= 4
     if (received == frame_count) {
         int32_t *pipeline_mic_ptr = (int32_t *)pipeline_mic_frames;
+#if appconfSAT1_AEC4
+        const int32_t *raw_mics[4] = {
+            pipeline_mic_ptr, pipeline_mic_ptr + frame_count,
+            pipeline_mic_ptr + 2 * frame_count, pipeline_mic_ptr + 3 * frame_count
+        };
+        xSemaphoreTake(sat1_beam_mutex, portMAX_DELAY);
+        sat1_beamformer_analyze_frame(&sat1_beamformer, raw_mics, frame_count);
+        doa_estimator_set_mic_health(sat1_beamformer.active_mic_mask);
+#endif
         doa_estimator_process_frame_4(&pipeline_mic_ptr[0],
                                       &pipeline_mic_ptr[frame_count],
                                       &pipeline_mic_ptr[2 * frame_count],
                                       &pipeline_mic_ptr[3 * frame_count],
                                       frame_count);
+#if appconfSAT1_AEC4
+        xSemaphoreGive(sat1_beam_mutex);
+#endif
     }
 #elif appconfAUDIO_PIPELINE_CHANNELS >= 2
     if (received == frame_count) {
@@ -266,6 +285,92 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
 }
 
 
+
+#if appconfSAT1_AEC4
+#if ON_TILE(SPEAKER_PIPELINE_TILE_NO)
+void audio_pipeline_capture(void *mic_samples, int32_t *reference_left,
+                            int32_t *reference_right, size_t frame_count)
+{
+    static int flushed;
+    int32_t **mic_ptr = mic_samples;
+    /* Drain driver startup frames without running the estimator or calibration. */
+    while (!flushed) {
+        if (rtos_mic_array_rx(mic_array_ctx, mic_ptr, frame_count, 0) == 0) {
+            rtos_mic_array_rx(mic_array_ctx, mic_ptr, frame_count, portMAX_DELAY);
+            flushed = 1;
+        }
+    }
+    void *reference;
+    rtos_osal_queue_receive(ref_input_queue, &reference, RTOS_OSAL_WAIT_FOREVER);
+    const int32_t *ref = reference;
+    for (size_t i = 0; i < frame_count; ++i) {
+        reference_left[i] = ref[2 * i];
+        reference_right[i] = ref[2 * i + 1];
+    }
+    rtos_osal_free(reference);
+    size_t received = receive_mic_array_frame(mic_ptr, frame_count, portMAX_DELAY);
+    xassert(received == frame_count);
+}
+
+#endif
+
+int audio_pipeline_output_channels(const int32_t *processed_samples,
+                                   const int32_t *ns_samples,
+                                   size_t frame_count)
+{
+#if appconfI2S_ENABLED
+    xassert(frame_count == appconfAUDIO_PIPELINE_FRAME_ADVANCE);
+    /* I2S expects sample channel format */
+    int32_t tmp[appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE][1][appconfMIC_PIPELINE_OUT_CHANNELS];
+
+    if (appconfI2S_AUDIO_SAMPLE_RATE == 3 * appconfAUDIO_PIPELINE_SAMPLE_RATE) {
+        /* Repeat each 16 kHz sample three times for 48 kHz output. */
+        for (size_t in_frame = 0, out_frame = 0; in_frame < frame_count; ++in_frame, out_frame += 3) {
+            int32_t smpl_ch0 = processed_samples[in_frame];
+            int32_t smpl_ch1 = ns_samples[in_frame];
+
+            tmp[out_frame][0][0] = smpl_ch0;
+            tmp[out_frame][0][1] = smpl_ch1;
+            tmp[out_frame+1][0][0] = smpl_ch0;
+            tmp[out_frame+1][0][1] = smpl_ch1;
+            tmp[out_frame+2][0][0] = smpl_ch0;
+            tmp[out_frame+2][0][1] = smpl_ch1;
+        }
+    } else {
+        for (size_t i = 0; i < frame_count; ++i) {
+            tmp[i][0][0] = processed_samples[i];
+            tmp[i][0][1] = ns_samples[i];
+        }
+    }
+
+    rtos_i2s_tx(i2s_ctx,
+                (int32_t*) tmp,
+                appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE,
+                portMAX_DELAY);
+#else
+    (void) processed_samples;
+    (void) ns_samples;
+    (void) frame_count;
+#endif
+
+    return AUDIO_PIPELINE_FREE_FRAME;
+}
+
+#if ON_TILE(SPEAKER_PIPELINE_TILE_NO)
+void sat1_post_aec_beam(int32_t samples[4][240])
+{
+    int32_t output[240];
+    const int32_t *microphones[4] = {samples[0], samples[1], samples[2], samples[3]};
+    doa_estimator_state_t direction;
+    xSemaphoreTake(sat1_beam_mutex, portMAX_DELAY);
+    doa_estimator_get_state(&direction);
+    sat1_beamformer_process_calibrated_frame(&sat1_beamformer, output,
+                                            microphones, 240, &direction);
+    memcpy(samples[0], output, sizeof(output));
+    xSemaphoreGive(sat1_beam_mutex);
+}
+#endif
+#endif
 
 void audio_pipeline_input(void *input_app_data,
                         int32_t **input_audio_frames,
@@ -417,10 +522,33 @@ static void mem_analysis(void)
 	}
 }
 
+#if ON_TILE(0) && appconfDEVICE_CTRL_SPI
+static void device_control_ready_task(void *arg)
+{
+    device_control_t *device_control_ctx = arg;
+
+    xassert(device_control_ctx != NULL);
+
+    while (device_control_ctx->status_buffer == NULL) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    device_control_set_resource_status(device_control_ctx,
+                                       DEVICE_STATUS_READY_REGISTER_IDX,
+                                       DEVICE_STATUS_READY_VALUE);
+
+    vTaskDelete(NULL);
+}
+#endif
+
 void startup_task(void *arg)
 {
     rtos_printf("Startup task running from tile %d on core %d\n", THIS_XCORE_TILE, portGET_CORE_ID());
     platform_start();
+#if appconfSAT1_AEC4 && ON_TILE(SPEAKER_PIPELINE_TILE_NO)
+    sat1_beam_mutex = xSemaphoreCreateMutex();
+    xassert(sat1_beam_mutex != NULL);
+#endif
 
 
 #if appconfDEVICE_CTRL_SPI
@@ -444,6 +572,15 @@ void startup_task(void *arg)
         "dfu servicer",
         RTOS_THREAD_STACK_SIZE(dfu_servicer),
         &dfu_servicer_reg_ctx,
+        appconfDEVICE_CONTROL_SPI_PRIORITY,
+        NULL
+    );
+
+    xTaskCreate(
+        device_control_ready_task,
+        "dc ready",
+        RTOS_THREAD_STACK_SIZE(device_control_ready_task),
+        device_control_spi_ctx,
         appconfDEVICE_CONTROL_SPI_PRIORITY,
         NULL
     );

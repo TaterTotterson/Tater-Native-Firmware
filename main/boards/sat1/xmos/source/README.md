@@ -2,17 +2,9 @@
 
 This folder is the Git-trackable source copy for the Satellite1 XMOS firmware used by the Sat1 ESPHome package.
 
-The ignored local build workspace remains:
-
-```bash
-sat1/xmos_firmware/
-```
-
-Use that ignored folder for local experiments and builds. When an XMOS change is proven good, sync the source change back into this folder and copy the resulting factory binary into:
-
-```bash
-sat1/firmware/xmos/
-```
+This branch also contains isolated integration configurations. See
+[../INTEGRATION.md](../INTEGRATION.md) for version identities and bench testing.
+The normal native `sat1` target continues to embed the released 1.1.1 image.
 
 ## What Is Included
 
@@ -71,7 +63,7 @@ This source started from `FutureProofHomes/Satellite1-XMOS` at:
 86cf1ee Merge pull request #106 from FutureProofHomes/align_branches
 ```
 
-Version 1.1.1 includes the Sat1 four-microphone DoA estimator, host-controlled
+The released version 1.1.1 includes the Sat1 four-microphone DoA estimator, host-controlled
 steering modes, a four-tap fractional-delay beamformer, slow per-microphone gain
 calibration, failed/noisy/clipping microphone fallback, and extended device
 control diagnostics. Production firmware continuously follows valid talker
@@ -79,3 +71,18 @@ directions and requests omni steering while speaker playback is active. The
 steered beam is generated before the existing two-channel AEC because the
 bundled XMOS voice library supports at most two microphone channels; its second
 microphone-side channel remains an omni mix.
+
+
+## Integration source
+
+The source now uses fwk_voice 0.9.0 and device-control protocol 0x11. The
+`legacy` configuration retains the two-channel AEC topology above; `aec4` and
+`aec4_beam` use the separately retained four-mic compact-frame pipeline under
+`audio_pipelines/reference/fixed_delay4/`. The beam variant applies calibrated
+delays to AEC residuals while estimating direction and microphone health from
+raw capture. The newer source uses DoA resource 233.
+
+The wrapper defaults to building the legacy integration candidate in
+`build_legacy/`, with version 1.2.0-dev.1. Explicit `SAT1_XMOS_PIPELINE=aec4` and
+`aec4_beam` builds use their own directories and dev identities. They do not
+replace the production embedded payload automatically.

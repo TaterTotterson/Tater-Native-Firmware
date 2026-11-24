@@ -391,7 +391,7 @@ def get_version(args: argparse.Namespace) -> XMOSVersion:
         with version_file.open("r") as f:
             vstr = f.readline()
     else:
-        vstr = args.version
+        vstr = args.version[0] if isinstance(args.version, list) else args.version
     
     if not vstr == "dev":
         return XMOSVersion.from_string(vstr)

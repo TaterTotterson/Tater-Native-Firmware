@@ -5,9 +5,16 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 XTC_DIR="${XMOS_TOOL_PATH:-/Applications/XMOS_XTC_15.3.1}"
 CMAKE_BIN="${CMAKE_BIN:-/opt/homebrew/opt/cmake/bin/cmake}"
 NINJA_BIN="${NINJA_BIN:-/opt/homebrew/opt/ninja/bin/ninja}"
-PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/bin/python3.10}"
+PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/bin/python3.11}"
 VENV_DIR="${ROOT_DIR}/.venv"
-BUILD_DIR="${ROOT_DIR}/build"
+PIPELINE="${SAT1_XMOS_PIPELINE:-legacy}"
+BUILD_DIR="${ROOT_DIR}/build_${PIPELINE}"
+case "${PIPELINE}" in
+  legacy) FW_VERSION=v1.2.0-dev.1 ;;
+  aec4) FW_VERSION=v1.2.0-dev.2 ;;
+  aec4_beam) FW_VERSION=v1.2.0-dev.3 ;;
+  *) echo "Unknown SAT1_XMOS_PIPELINE: ${PIPELINE}" >&2; exit 1 ;;
+esac
 TARGET="${SAT1_XMOS_TARGET:-satellite1_firmware_fixed_delay}"
 CLEAN_BUILD="${XMOS_CLEAN_BUILD:-1}"
 
@@ -50,6 +57,7 @@ export XMOS_DOC_PATH="${XTC_DIR}/doc"
 export PYTHON_HOME="${XTC_DIR}/lib/jython"
 export PYTHONPATH="${PYTHONPATH:-}:${XTC_DIR}/lib/python"
 export PYTHON_VERBOSE="warning"
+export LC_ALL=C
 export XMOS_CACHE_PATH="${XMOS_HOME}/cache"
 export XMOS_REPO_PATH="${XMOS_HOME}/repos"
 export XMOS_MAKE_PATH="${XTC_DIR}/build"
@@ -65,9 +73,26 @@ fi
   -S "${ROOT_DIR}" \
   --toolchain "${ROOT_DIR}/xmos_cmake_toolchain/xs3a.cmake" \
   -DCMAKE_MAKE_PROGRAM="${NINJA_BIN}" \
-  -DPython3_EXECUTABLE="${VENV_DIR}/bin/python"
+  -DPython3_EXECUTABLE="${VENV_DIR}/bin/python" \
+  -DSAT1_XMOS_PIPELINE="${PIPELINE}" \
+  -DSAT1_XMOS_VERSION="${FW_VERSION}" \
+  -DBUILD_VOICE_COMPAT_TESTS=ON \
+  -DFPH_AEC_4Y_TESTS=ON
 
 "${CMAKE_BIN}" --build "${BUILD_DIR}" --target "create_flash_img_${TARGET}"
 
 echo "Built ${BUILD_DIR}/${TARGET}.factory.bin"
 echo "MD5  ${BUILD_DIR}/${TARGET}.factory.md5"
+
+if [[ "${SAT1_XMOS_RUN_SIM_TESTS:-0}" == "1" ]]; then
+  if [[ "${PIPELINE}" == "legacy" ]]; then
+    SIM_TARGETS=(voice_compat_test)
+  else
+    SIM_TARGETS=(fph_aec_4y_init_canary_test sat1_aec_beam_test)
+  fi
+  "${CMAKE_BIN}" --build "${BUILD_DIR}" --target "${SIM_TARGETS[@]}"
+  for SIM_TARGET in "${SIM_TARGETS[@]}"; do
+    SIM_IMAGE="$(find "${BUILD_DIR}" -name "${SIM_TARGET}.xe" -print -quit)"
+    "${XTC_DIR}/bin/xsim" "${SIM_IMAGE}"
+  done
+fi

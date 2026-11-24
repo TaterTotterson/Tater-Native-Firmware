@@ -1,3 +1,4 @@
+#include "sat1_control_protocol.h"
 #include "audio_i2s.h"
 
 #include <inttypes.h>
@@ -36,8 +37,21 @@
 
 static const char *TAG = "tater_audio_sat1";
 
-extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_zlib_start[] asm("_binary_sat1_xmos_1_1_1_factory_bin_zlib_start");
-extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_zlib_end[] asm("_binary_sat1_xmos_1_1_1_factory_bin_zlib_end");
+#ifdef TATER_SAT1_XMOS_CANDIDATE_HEADER
+#include TATER_SAT1_XMOS_CANDIDATE_HEADER
+#else
+#define SAT1_XMOS_ASSET "sat1_xmos_1_1_1_factory_bin_zlib"
+#define SAT1_DOA_RESOURCE_ID 231
+#define SAT1_XMOS_TARGET_MAJOR 1
+#define SAT1_XMOS_TARGET_MINOR 1
+#define SAT1_XMOS_TARGET_PATCH 1
+#define SAT1_XMOS_TARGET_PRERELEASE 0
+#define SAT1_XMOS_TARGET_COUNTER 0
+#define SAT1_XMOS_TARGET_IMAGE_SIZE 241664U
+#endif
+
+extern const uint8_t sat1_xmos_asset_start[] asm("_binary_" SAT1_XMOS_ASSET "_start");
+extern const uint8_t sat1_xmos_asset_end[] asm("_binary_" SAT1_XMOS_ASSET "_end");
 
 #define TATER_I2C_PORT I2C_NUM_0
 #define SAT1_SPI_HOST SPI2_HOST
@@ -51,7 +65,6 @@ extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_zlib_end[] asm("_binary
 #define SAT1_DFU_GET_VERSION (88 | SAT1_CONTROL_CMD_READ_BIT)
 #define SAT1_GPIO_RESOURCE_IN_A 211
 #define SAT1_GPIO_READ_PORT SAT1_CONTROL_CMD_READ_BIT
-#define SAT1_DOA_RESOURCE_ID 231
 #define SAT1_DOA_READ_STATE SAT1_CONTROL_CMD_READ_BIT
 #define SAT1_DOA_READ_DIAGNOSTICS (1 | SAT1_CONTROL_CMD_READ_BIT)
 #define SAT1_DOA_SET_CONTROL 2
@@ -62,12 +75,6 @@ extern const uint8_t _binary_sat1_xmos_1_1_1_factory_bin_zlib_end[] asm("_binary
 #define SAT1_DOA_CONTROL_FORCE_OMNI (1u << 2)
 #define SAT1_DOA_CONTROL_HEARTBEAT_US 1000000
 #define SAT1_DOA_PLAYBACK_LEVEL_THRESHOLD 0.004f
-#define SAT1_XMOS_TARGET_MAJOR 1
-#define SAT1_XMOS_TARGET_MINOR 1
-#define SAT1_XMOS_TARGET_PATCH 1
-#define SAT1_XMOS_TARGET_PRERELEASE 0
-#define SAT1_XMOS_TARGET_COUNTER 0
-#define SAT1_XMOS_TARGET_IMAGE_SIZE 241664U
 #define SAT1_XMOS_VERSION_READY_TIMEOUT_MS 8000
 #define SAT1_XMOS_VERSION_RETRY_DELAY_MS 250
 #define SAT1_XMOS_FLASH_PAGE_SIZE 256U
@@ -128,6 +135,7 @@ static i2s_chan_handle_t s_tx_chan;
 static spi_device_handle_t s_spi;
 static SemaphoreHandle_t s_i2c_mutex;
 static SemaphoreHandle_t s_spi_mutex;
+static SemaphoreHandle_t s_control_mutex;
 DMA_ATTR static uint8_t s_spi_tx_buffer[SAT1_XMOS_FLASH_PAGE_SIZE + 5];
 DMA_ATTR static uint8_t s_spi_rx_buffer[SAT1_XMOS_FLASH_PAGE_SIZE + 5];
 static bool s_speaker_ready;
@@ -186,7 +194,7 @@ static int16_t read_i16_le(const uint8_t *payload)
 
 static size_t sat1_xmos_target_compressed_size(void)
 {
-    return (size_t)(_binary_sat1_xmos_1_1_1_factory_bin_zlib_end - _binary_sat1_xmos_1_1_1_factory_bin_zlib_start);
+    return (size_t)(sat1_xmos_asset_end - sat1_xmos_asset_start);
 }
 
 static esp_err_t speaker_session_take(void)
@@ -840,6 +848,10 @@ static esp_err_t spi_init(void)
         s_spi_mutex = xSemaphoreCreateMutex();
         ESP_RETURN_ON_FALSE(s_spi_mutex, ESP_ERR_NO_MEM, TAG, "spi mutex alloc failed");
     }
+    if (!s_control_mutex) {
+        s_control_mutex = xSemaphoreCreateMutex();
+        ESP_RETURN_ON_FALSE(s_control_mutex, ESP_ERR_NO_MEM, TAG, "sat1 control mutex allocation failed");
+    }
     spi_bus_config_t bus_cfg = {
         .mosi_io_num = TATER_SAT1_SPI_MOSI,
         .miso_io_num = TATER_SAT1_SPI_MISO,
@@ -949,60 +961,37 @@ static bool sat1_control_status_snapshot(uint8_t *out, size_t len)
     return valid;
 }
 
-static bool sat1_control_transfer(uint8_t resource_id, uint8_t command, uint8_t *payload, uint8_t payload_len)
+static bool sat1_control_spi(void *context, uint8_t *frame, size_t length)
 {
-    if (!s_spi) {
-        return false;
-    }
+    (void)context;
+    return sat1_spi_transfer(frame, length) == ESP_OK;
+}
 
-    uint8_t send_recv_buf[256 + 3] = {0};
-    int status_report_dummies = SAT1_STATUS_REGISTER_LEN - payload_len - 1;
-    if (status_report_dummies < 0) {
-        status_report_dummies = 0;
-    }
+static void sat1_control_wait(void *context)
+{
+    (void)context;
+    vTaskDelay(1);
+}
 
-    int attempts = 3;
-    do {
-        memset(send_recv_buf, 0, sizeof(send_recv_buf));
-        send_recv_buf[0] = resource_id;
-        send_recv_buf[1] = command;
-        send_recv_buf[2] = payload_len + ((command & SAT1_CONTROL_CMD_READ_BIT) ? 1 : 0);
-        if (payload && payload_len > 0) {
-            memcpy(&send_recv_buf[3], payload, payload_len);
-        }
-        if (sat1_spi_transfer(send_recv_buf, payload_len + 3 + (size_t)status_report_dummies) != ESP_OK) {
-            return false;
-        }
-        sat1_capture_control_status(send_recv_buf, payload_len + 3 + (size_t)status_report_dummies);
-        vTaskDelay(1);
-    } while (send_recv_buf[0] == SAT1_CONTROL_COMMAND_IGNORED && attempts-- > 0);
+static void sat1_control_status(void *context, const uint8_t *frame, size_t length)
+{
+    (void)context;
+    sat1_capture_control_status(frame, length);
+}
 
-    if (send_recv_buf[0] == SAT1_CONTROL_COMMAND_IGNORED) {
-        return false;
-    }
-    if ((send_recv_buf[0] + send_recv_buf[1] + send_recv_buf[2]) == 0) {
-        return false;
-    }
-
-    if (command & SAT1_CONTROL_CMD_READ_BIT) {
-        attempts = 3;
-        do {
-            memset(send_recv_buf, 0, payload_len + 3);
-            if (sat1_spi_transfer(send_recv_buf, payload_len + 3) != ESP_OK) {
-                return false;
-            }
-            vTaskDelay(1);
-        } while (send_recv_buf[0] == SAT1_CONTROL_COMMAND_IGNORED && attempts-- > 0);
-
-        if (send_recv_buf[0] == SAT1_CONTROL_COMMAND_IGNORED) {
-            return false;
-        }
-        if (payload && payload_len > 0) {
-            memcpy(payload, &send_recv_buf[1], payload_len);
-        }
-    }
-
-    return true;
+static bool sat1_control_transfer(uint8_t resource_id, uint8_t command,
+                                  uint8_t *payload, uint8_t payload_len)
+{
+    if (!s_spi || !s_control_mutex) return false;
+    const sat1_control_io_t io = {
+        .transfer = sat1_control_spi,
+        .wait = sat1_control_wait,
+        .status = sat1_control_status,
+    };
+    xSemaphoreTake(s_control_mutex, portMAX_DELAY);
+    bool success = sat1_control_exchange(&io, resource_id, command, payload, payload_len);
+    xSemaphoreGive(s_control_mutex);
+    return success;
 }
 
 esp_err_t tater_audio_sat1_read_buttons(uint8_t *buttons)
@@ -1025,9 +1014,8 @@ esp_err_t tater_audio_sat1_read_buttons(uint8_t *buttons)
     }
 
     uint8_t direct_payload[2] = {0};
-    bool direct_valid = sat1_control_transfer(SAT1_GPIO_RESOURCE_IN_A, SAT1_GPIO_READ_PORT, direct_payload, sizeof(direct_payload))
-        && direct_payload[0] == 0;
-    uint8_t direct_port = direct_payload[1];
+    bool direct_valid = sat1_control_transfer(SAT1_GPIO_RESOURCE_IN_A, SAT1_GPIO_READ_PORT, direct_payload, sizeof(direct_payload));
+    uint8_t direct_port = direct_payload[0];
     uint8_t direct_high = (direct_port >> 4) & 0x0f;
     uint8_t direct_low = direct_port & 0x0f;
     uint8_t direct_buttons = (direct_high != 0 || direct_low == 0) ? direct_high : direct_low;
@@ -1399,7 +1387,7 @@ static esp_err_t sat1_xmos_flash_target_image(void)
 {
     uint8_t *image = NULL;
     esp_err_t err = tater_compressed_asset_expand(
-        _binary_sat1_xmos_1_1_1_factory_bin_zlib_start,
+        sat1_xmos_asset_start,
         sat1_xmos_target_compressed_size(),
         SAT1_XMOS_TARGET_IMAGE_SIZE,
         &image

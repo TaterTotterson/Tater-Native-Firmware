@@ -2,11 +2,19 @@
 # Gather Sources
 #**********************
 
+set(SAT1_XMOS_PIPELINE "legacy" CACHE STRING "legacy, aec4, or aec4_beam")
+set_property(CACHE SAT1_XMOS_PIPELINE PROPERTY STRINGS legacy aec4 aec4_beam)
+if(NOT SAT1_XMOS_PIPELINE MATCHES "^(legacy|aec4|aec4_beam)$")
+    message(FATAL_ERROR "Invalid SAT1_XMOS_PIPELINE: ${SAT1_XMOS_PIPELINE}")
+endif()
+set(SAT1_XMOS_VERSION "v1.2.0-dev.1" CACHE STRING "Candidate firmware identity")
+
 file(GLOB_RECURSE APP_SOURCES   ${CMAKE_CURRENT_LIST_DIR}/src/*.c)
 
 set(APP_INCLUDES
     ${CMAKE_CURRENT_LIST_DIR}/src
     ${CMAKE_CURRENT_LIST_DIR}/src/control
+    ${CMAKE_CURRENT_LIST_DIR}/audio_pipelines
     ${CMAKE_CURRENT_LIST_DIR}/src/dfu_int
     ${CMAKE_CURRENT_LIST_DIR}/src/usb
 )
@@ -47,6 +55,7 @@ set(APP_LINK_OPTIONS
 set(APP_COMMON_LINK_LIBRARIES
     rtos::freertos_usb
     fph::device_control
+    fph::qspi_flash_ext
     lib_src
     lib_sw_pll
 )

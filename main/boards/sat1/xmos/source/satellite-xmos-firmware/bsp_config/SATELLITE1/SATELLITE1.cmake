@@ -19,6 +19,7 @@ target_link_libraries(fph_ffva_board_support_satellite1
         rtos::drivers::general
         rtos::drivers::usb
         rtos::drivers::dfu_image
+        fph::qspi_flash_ext
         fph::rtos_mic_array
         fph::i2s_sync
         fph::rtos_ws2812
@@ -60,7 +61,7 @@ target_compile_definitions(fph_ffva_board_support_satellite1
         MIC_ARRAY_CONFIG_MIC_INPUT=8
         MIC_ARRAY_CONFIG_MIC_COUNT=4
         MIC_ARRAY_CONFIG_INPUT_MAPPING={${MIC_MAPPING}}
-        appconfAUDIO_PIPELINE_CHANNELS=2
+        appconfAUDIO_PIPELINE_CHANNELS=$<IF:$<BOOL:$<TARGET_PROPERTY:SAT1_AEC4>>,4,2>
         
         MIC_ARRAY_CONFIG_CLOCK_BLOCK_A=XS1_CLKBLK_1
         MIC_ARRAY_CONFIG_CLOCK_BLOCK_B=XS1_CLKBLK_2

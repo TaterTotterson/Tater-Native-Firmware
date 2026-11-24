@@ -11,6 +11,7 @@ idf_component_register(
         "ble_proxy.c"
         "boards/voice_pe/audio_voice_pe.c"
         "boards/sat1/audio_sat1.c"
+        "boards/sat1/sat1_control_protocol.c"
         "boards/sat1/sat1_pd_policy.c"
         "boards/sat1/sat1_power_delivery.c"
         "boards/respeaker_xvf3800/audio_respeaker_xvf3800.c"
@@ -82,7 +83,17 @@ target_add_binary_data(${COMPONENT_LIB} "models/stop.tflite" BINARY)
 if(TATER_NATIVE_BUILD_ENV STREQUAL "voicepe")
     target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin.zlib" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "sat1")
-    target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin.zlib" BINARY)
+    if(DEFINED TATER_SAT1_XMOS_VARIANT AND NOT TATER_SAT1_XMOS_VARIANT STREQUAL "")
+        if(NOT TATER_SAT1_XMOS_VARIANT MATCHES "^(legacy|aec4|aec4_beam)$")
+            message(FATAL_ERROR "Unknown Sat1 XMOS candidate: ${TATER_SAT1_XMOS_VARIANT}")
+        endif()
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE
+            TATER_SAT1_XMOS_CANDIDATE_HEADER="xmos/candidates/${TATER_SAT1_XMOS_VARIANT}.h")
+        target_add_binary_data(${COMPONENT_LIB}
+            "boards/sat1/xmos/candidates/sat1_xmos_${TATER_SAT1_XMOS_VARIANT}.bin.zlib" BINARY)
+    else()
+        target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/sat1_xmos_1_1_1_factory.bin.zlib" BINARY)
+    endif()
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "respeaker_xvf3800")
     target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin.zlib" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "s3_box")

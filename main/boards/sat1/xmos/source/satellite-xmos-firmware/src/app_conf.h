@@ -19,6 +19,13 @@
 #define FS_TILE_NO                      FLASH_TILE_NO //currently not used, is it?
 
 
+#ifndef appconfSAT1_AEC4
+#define appconfSAT1_AEC4 0
+#endif
+#ifndef appconfSAT1_POST_AEC_BEAM
+#define appconfSAT1_POST_AEC_BEAM 0
+#endif
+
 /* Audio Pipeline Configuration */
 #define appconfAUDIO_CLOCK_FREQUENCY            MIC_ARRAY_CONFIG_MCLK_FREQ
 #define appconfPDM_CLOCK_FREQUENCY              MIC_ARRAY_CONFIG_PDM_FREQ

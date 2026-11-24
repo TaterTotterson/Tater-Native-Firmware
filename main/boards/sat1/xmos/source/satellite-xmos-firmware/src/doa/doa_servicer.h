@@ -2,7 +2,7 @@
 
 #include "servicer.h"
 
-#define DOA_SERVICER_RESID      (231)
+#define DOA_SERVICER_RESID      (233)
 #define NUM_RESOURCES_DOA       (1)
 
 void doa_servicer(void *args);

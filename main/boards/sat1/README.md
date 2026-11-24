@@ -107,3 +107,8 @@ The bundled XMOS source and factory image live in:
 ```text
 main/boards/sat1/xmos/
 ```
+
+
+Experimental XMOS library/protocol and four-mic AEC comparisons are documented
+in [xmos/INTEGRATION.md](xmos/INTEGRATION.md). They use separate PlatformIO
+environments and do not replace the normal `sat1` production image.

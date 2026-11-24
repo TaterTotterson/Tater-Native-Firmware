@@ -25,13 +25,22 @@ foreach(FFVA_AP ${FFVA_PIPELINES_INT})
       list(APPEND FFVA_INT_COMPILE_DEFINITIONS appconfPIPELINE_BYPASS=0)
     endif()
 
-    # message(${FFVA_INT_COMPILE_DEFINITIONS})
+    if(NOT SAT1_XMOS_PIPELINE STREQUAL "legacy" AND PL_NAME STREQUAL "fixed_delay")
+        set(SAT1_AEC4_TARGET 1)
+        list(APPEND FFVA_INT_COMPILE_DEFINITIONS appconfSAT1_AEC4=1)
+        if(SAT1_XMOS_PIPELINE STREQUAL "aec4_beam")
+            list(APPEND FFVA_INT_COMPILE_DEFINITIONS appconfSAT1_POST_AEC_BEAM=1)
+        endif()
+    else()
+        set(SAT1_AEC4_TARGET 0)
+    endif()
     
     #**********************
     # Tile Targets
     #**********************
     set(TARGET_NAME tile0_satellite1_firmware_${FFVA_AP})
     add_executable(${TARGET_NAME} EXCLUDE_FROM_ALL)
+    set_property(TARGET ${TARGET_NAME} PROPERTY SAT1_AEC4 ${SAT1_AEC4_TARGET})
     target_sources(${TARGET_NAME} PUBLIC ${APP_SOURCES})
     target_include_directories(${TARGET_NAME} PUBLIC ${APP_INCLUDES})
     target_compile_definitions(${TARGET_NAME}
@@ -52,6 +61,7 @@ foreach(FFVA_AP ${FFVA_PIPELINES_INT})
 
     set(TARGET_NAME tile1_satellite1_firmware_${FFVA_AP})
     add_executable(${TARGET_NAME} EXCLUDE_FROM_ALL)
+    set_property(TARGET ${TARGET_NAME} PROPERTY SAT1_AEC4 ${SAT1_AEC4_TARGET})
     target_sources(${TARGET_NAME} PUBLIC ${APP_SOURCES})
     target_include_directories(${TARGET_NAME} PUBLIC ${APP_INCLUDES})
     target_compile_definitions(${TARGET_NAME}
@@ -73,7 +83,7 @@ foreach(FFVA_AP ${FFVA_PIPELINES_INT})
     #*********************
     # Create version.h
     #*********************
-    SET(VERSIONING_CMD "build")
+    SET(VERSIONING_CMD "--version" "${SAT1_XMOS_VERSION}" "build")
     if(USE_DEV_TRACKING)
         list(APPEND VERSIONING_CMD "--track")
     endif()

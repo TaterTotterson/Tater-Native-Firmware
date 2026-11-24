@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "beamforming/sat1_beamformer.h"
 
@@ -304,6 +305,31 @@ static void expect_failed_mic_fallback(void)
     }
 }
 
+static void expect_cleaned_audio_does_not_change_calibration(void)
+{
+    sat1_beamformer_t beamformer = {0};
+    const int32_t *raw[4] = {microphone_audio[0], microphone_audio[1],
+                              microphone_audio[2], microphone_audio[3]};
+    int32_t cleaned[4][FRAME_SAMPLES] = {{0}};
+    const int32_t *cleaned_mics[4] = {cleaned[0], cleaned[1], cleaned[2], cleaned[3]};
+    int32_t output[FRAME_SAMPLES];
+    for (size_t frame = 0; frame < 80; ++frame)
+        sat1_beamformer_analyze_frame(&beamformer, raw, FRAME_SAMPLES);
+    sat1_beamformer_t calibrated = beamformer;
+    for (size_t frame = 0; frame < 80; ++frame)
+        sat1_beamformer_process_calibrated_frame(&beamformer, output, cleaned_mics,
+                                                 FRAME_SAMPLES, NULL);
+    if (beamformer.calibration_frames != calibrated.calibration_frames ||
+        memcmp(beamformer.mic_level_ema, calibrated.mic_level_ema,
+               sizeof(beamformer.mic_level_ema)) != 0 ||
+        memcmp(beamformer.mic_gain_q15, calibrated.mic_gain_q15,
+               sizeof(beamformer.mic_gain_q15)) != 0 ||
+        beamformer.active_mic_mask != calibrated.active_mic_mask) {
+        fprintf(stderr, "Echo-cancelled silence changed raw microphone calibration\n");
+        exit(1);
+    }
+}
+
 int main(void)
 {
     build_directional_audio();
@@ -312,6 +338,7 @@ int main(void)
     expect_cubic_fractional_interpolation();
     expect_direction_hold_and_release();
     expect_failed_mic_fallback();
+    expect_cleaned_audio_does_not_change_calibration();
     puts("Sat1 beamformer host tests passed.");
     return 0;
 }

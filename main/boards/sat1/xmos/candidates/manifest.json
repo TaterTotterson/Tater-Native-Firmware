@@ -1,0 +1,68 @@
+{
+  "aec4": {
+    "compact_frames_pr132": "208e0d3ea07c3d61ae306b0ddd980b45977b2a76",
+    "compressed_bytes": 137483,
+    "compressed_sha256": "a04caa94fa3975587da904f6bb7a764e4e6bbccd9a09d4a8fbb017f3e1f43ea2",
+    "doa_resource": 233,
+    "factory_bytes": 245760,
+    "factory_md5": "ef3f451ab0169de190b757db48551142",
+    "factory_sha256": "a5535f1a1ec08963b393535c32e6a2b6fbaf2a913be4c480830617f039006ff0",
+    "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
+    "hardware_validated": false,
+    "linked_version": [
+      1,
+      2,
+      0,
+      4,
+      2
+    ],
+    "local_source_sha256": "9d21d47acfa840f0da634193b4e52e553212bfc380a08e9b4aef53c023819139",
+    "protocol": "0x11",
+    "upstream_develop": "ace8050265f134c1e0442661c8a16866467c9e53",
+    "version": "1.2.0-dev.2"
+  },
+  "aec4_beam": {
+    "compact_frames_pr132": "208e0d3ea07c3d61ae306b0ddd980b45977b2a76",
+    "compressed_bytes": 138594,
+    "compressed_sha256": "1088f93b766520fdece5688957a7ad0a4a669ab8c30f1ad2dc74ec618c7a0899",
+    "doa_resource": 233,
+    "factory_bytes": 245760,
+    "factory_md5": "0cd2790acd4871e720d75b8d95a2e31e",
+    "factory_sha256": "73c5e633954ba034b793938251ceb8b091c0dd74c628f89945dd759b7a25591d",
+    "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
+    "hardware_validated": false,
+    "linked_version": [
+      1,
+      2,
+      0,
+      4,
+      3
+    ],
+    "local_source_sha256": "9d21d47acfa840f0da634193b4e52e553212bfc380a08e9b4aef53c023819139",
+    "protocol": "0x11",
+    "upstream_develop": "ace8050265f134c1e0442661c8a16866467c9e53",
+    "version": "1.2.0-dev.3"
+  },
+  "legacy": {
+    "compact_frames_pr132": null,
+    "compressed_bytes": 134447,
+    "compressed_sha256": "efbfcf5f3c99f5624f854fbeca8bac1a7552608c43e4a482f413493f4f31c239",
+    "doa_resource": 233,
+    "factory_bytes": 241664,
+    "factory_md5": "6ccfbce2e189d7b3b0f5cc1d2dec0c0d",
+    "factory_sha256": "e5ad83ffd66f03b3ddba1dfef14d9829d15ead9fab0dc416f8a57f0cdf69ec88",
+    "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
+    "hardware_validated": false,
+    "linked_version": [
+      1,
+      2,
+      0,
+      4,
+      1
+    ],
+    "local_source_sha256": "9d21d47acfa840f0da634193b4e52e553212bfc380a08e9b4aef53c023819139",
+    "protocol": "0x11",
+    "upstream_develop": "ace8050265f134c1e0442661c8a16866467c9e53",
+    "version": "1.2.0-dev.1"
+  }
+}
