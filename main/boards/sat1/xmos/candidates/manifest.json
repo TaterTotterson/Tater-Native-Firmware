@@ -70,7 +70,14 @@
     "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
     "hardware_smoke_test": {
       "date": "2026-11-24",
-      "remaining_issue": "Optional direct GPIO read diagnostic fails while status-register button read succeeds",
+      "original_native_diagnostic": "Optional direct GPIO read diagnostic failed while status-register button read succeeded; removed in the native cleanup follow-up",
+      "native_gpio_cleanup": {
+        "date": "2026-11-24",
+        "native_application_sha256": "9809b4e82c412a97f01e5829341bab1c0f218cc5985d91f1cc26164a87571dd5",
+        "result": "basic_liveness_buttons_leds_and_voice_pass",
+        "xmos_payload_unchanged": true,
+        "user_observation": "Volume controls, mute lights, and wake-and-time response work normally"
+      },
       "report": "../HARDWARE-VALIDATION.md",
       "result": "basic_liveness_and_voice_pass",
       "user_observation": "Answered the wake-and-time query clearly"

@@ -33,8 +33,8 @@ read diagnostics while the status-register button read succeeds. The new
 exchange helper strips handler status, and the GPIO servicer declares one data
 byte. A trial changing the caller from two data bytes to one passed the host
 framing test but lost DoA telemetry on production XMOS after an ESP restart.
-That change was reverted. Direct GPIO/control compatibility needs further
-hardware investigation before the migrated native reader is promoted.
+That change was reverted. The follow-up below removes this unused diagnostic
+request; it does not establish compatibility of the separate direct GPIO API.
 
 ## Tested artifact identities
 
@@ -62,12 +62,51 @@ Measure per-stage progress, worst-case processing time, free heap and stack
 headroom on the physical RTOS pipeline. Resolve the four-mic stall and repeat
 the same liveness/playback check before acoustic comparisons or upstream PRs.
 Qualify the newer library and protocol independently using the working legacy
-topology, including the direct GPIO read discrepancy.
+topology. The diagnostic cleanup and its limited hardware checks are recorded
+below.
 
 The final rollback uses the published `native-0.7.0` Satellite1 OTA application,
 matching the native version observed before testing. Its SHA-256 is
 `d11f0528fe3b92ac8862a0d90b79c6290b40b40df22a528783b469f809e65f48`,
 verified against GitHub's release asset digest. The application contains the
 unchanged production XMOS 1.1.1 payload. Local native trial builds are not the
-final installed image. Published native 0.7.0 / XMOS 1.1.1 is restored; microphone
+final installed image for that initial evaluation. Published native 0.7.0 / XMOS
+1.1.1 was restored; microphone
 liveness, playback start/stop and continued connection were verified afterward.
+
+## Working dev.1 follow-up and GPIO diagnostic cleanup
+
+The original dev.1 native image was subsequently reinstalled at the user's
+request. The user confirmed clear voice replies and normal operation during
+additional use. The dev.2/dev.3 failures remain unresolved.
+
+The native button reader now omits its redundant resource-211 direct GPIO
+request. That request only supplied diagnostic logging; the returned button
+state already came from the status register. The status-register button path,
+volume/mute handling, LED controls, and XMOS audio image are unchanged.
+
+The protocol 0x10/0x11 host checks passed. Both `sat1` and `sat1_xmos_legacy`
+native builds passed. The cleanup's legacy OTA application is 2,803,888 bytes,
+with SHA-256
+`9809b4e82c412a97f01e5829341bab1c0f218cc5985d91f1cc26164a87571dd5`.
+Its embedded XMOS compressed payload is byte-for-byte identical to the dev.1
+candidate (SHA-256
+`efbfcf5f3c99f5624f854fbeca8bac1a7552608c43e4a482f413493f4f31c239`).
+
+After installing this native cleanup over OTA, a new connection and reset
+uptime confirmed the reboot. XMOS reported installed/target `1.2.0-dev.1` and
+skipped reflashing because that image was already installed. Three fresh status
+snapshots showed the DoA frame counter advancing from 576 to 1,249, increasing
+processed microphone samples with varying min/max values, a ready wake engine,
+and all four microphones healthy. The subsequent frame counter was 3,620.
+
+Device logs confirmed volume 35% → 40% → 35%, microphones muted then unmuted,
+successful status-register reads, and a local wake detection. No `direct=`
+diagnostic appeared after reboot. The user confirmed that volume controls,
+mute lights, and the wake-and-time voice response worked normally.
+
+The cleanup image remains installed on the test Sat1. This is a limited
+functional check, not completion of the wider qualification listed above.
+No release was published. Private artifact records, status snapshots, and logs
+are retained in the ignored
+`release_assets/sat1-xmos-integration/hardware/2026-11-24-gpio-cleanup/` directory.

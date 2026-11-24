@@ -63,8 +63,6 @@ extern const uint8_t sat1_xmos_asset_end[] asm("_binary_" SAT1_XMOS_ASSET "_end"
 #define SAT1_STATUS_GPIO_IN_A 1
 #define SAT1_DFU_CONTROLLER_RESID 240
 #define SAT1_DFU_GET_VERSION (88 | SAT1_CONTROL_CMD_READ_BIT)
-#define SAT1_GPIO_RESOURCE_IN_A 211
-#define SAT1_GPIO_READ_PORT SAT1_CONTROL_CMD_READ_BIT
 #define SAT1_DOA_READ_STATE SAT1_CONTROL_CMD_READ_BIT
 #define SAT1_DOA_READ_DIAGNOSTICS (1 | SAT1_CONTROL_CMD_READ_BIT)
 #define SAT1_DOA_SET_CONTROL 2
@@ -1013,46 +1011,31 @@ esp_err_t tater_audio_sat1_read_buttons(uint8_t *buttons)
         vTaskDelay(1);
     }
 
-    uint8_t direct_payload[2] = {0};
-    bool direct_valid = sat1_control_transfer(SAT1_GPIO_RESOURCE_IN_A, SAT1_GPIO_READ_PORT, direct_payload, sizeof(direct_payload));
-    uint8_t direct_port = direct_payload[0];
-    uint8_t direct_high = (direct_port >> 4) & 0x0f;
-    uint8_t direct_low = direct_port & 0x0f;
-    uint8_t direct_buttons = (direct_high != 0 || direct_low == 0) ? direct_high : direct_low;
-
     static bool have_diag = false;
     static uint8_t last_status_buttons = 0xff;
-    static uint8_t last_direct_buttons = 0xff;
     static int64_t last_diag_us = 0;
     int64_t now_us = esp_timer_get_time();
     /*
-     * The direct SPI validity bit can flicker while the XMOS audio path is
-     * busy.  Reporting every validity transition synchronously over the
-     * control WebSocket can flood the socket during sustained playback.
-     * Report real button changes immediately and sample transport validity
-     * once per minute instead.
+     * Input A is already present in the status register used for buttons.
+     * Log button changes immediately and sample status once per minute,
+     * without issuing another GPIO transaction just for diagnostics.
      */
     bool buttons_changed =
         !have_diag
-        || status_buttons != last_status_buttons
-        || (direct_valid && direct_buttons != last_direct_buttons);
+        || status_buttons != last_status_buttons;
     if (buttons_changed || now_us - last_diag_us > 60000000) {
         char message[128] = {0};
         snprintf(
             message,
             sizeof(message),
-            "Sat1 button diag status=%s/0x%02x direct=%s/0x%02x direct_buttons=0x%02x",
+            "Sat1 button status=%s/0x%02x",
             status_valid ? "ok" : "fail",
-            status_buttons,
-            direct_valid ? "ok" : "fail",
-            direct_port,
-            direct_buttons
+            status_buttons
         );
         ESP_LOGI(TAG, "%s", message);
         tater_protocol_send_log("info", message);
         have_diag = true;
         last_status_buttons = status_buttons;
-        last_direct_buttons = direct_buttons;
         last_diag_us = now_us;
     }
 
