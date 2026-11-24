@@ -124,6 +124,19 @@ Ethernet requires a new boot through the adapter. Read the
 
 ### Voice And Audio
 
+**Speak without pausing:** a matching wake-boundary model helps preserve the
+start of commands spoken immediately after the wake word, such as
+“Hey Tater, turn on the lights.”
+
+**Recommended wake setup:** these ESP32-S3 satellites use microWakeWord only.
+Enable **STT wake verification** in Tater or the Home Assistant bridge for
+false-wake prevention. The configured STT service checks the wake phrase.
+
+For a fully on-device option, supported [Linux satellites](https://github.com/TaterTotterson/Tater-Linux-Satellite)
+and [Echo satellites](https://github.com/TaterTotterson/Tater-Echo-Firmware)
+offer **dual mode: MWW + OWW or MWW + NWW**. Both detectors must agree on the
+same wake phrase. Dual mode is recommended on hardware that supports it.
+
 - Local embedded `hey_tater` microWakeWord model
 - Embedded alarm-only `stop` model that is active only while a timer rings
 - Custom microWakeWord `.json` and `.tflite` URL support with persistent cache
