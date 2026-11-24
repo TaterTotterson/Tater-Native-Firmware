@@ -1,7 +1,11 @@
 # Sat1 XMOS integration candidate
 
 This branch is for bench evaluation. The normal `sat1` PlatformIO environment
-still embeds production XMOS 1.1.1. No device has been flashed by this work.
+still embeds production XMOS 1.1.1. On November 24, 2026, both four-mic AEC
+candidates failed the physical startup test: their DSP frame counters froze and
+the wake microphone repeated a constant sample. **Do not promote dev.2 or dev.3.**
+The legacy topology with the new library/protocol passed a basic voice check;
+its wider qualification remains pending. See [HARDWARE-VALIDATION.md](HARDWARE-VALIDATION.md).
 
 ## Images
 
@@ -93,10 +97,10 @@ and the DoA frame counter through playback and restarts.
 
 | Check | Acceptance | Result |
 | --- | --- | --- |
-| Installed identity and both mic streams | Expected dev version; live samples on both streams | Pending |
+| Installed identity and both mic streams | Expected dev version; live samples on both streams | dev.2/dev.3 fail DSP liveness; dev.1 basic voice pass |
 | Ten cold power cycles | Audio capture and playback recover every time | Pending |
 | Twenty ESP-only restarts | No stale constant mic stream or silent playback | Pending |
-| Playback starts/stops and digital silence | Both streams remain live before/during/after nonzero reference | Pending |
+| Playback starts/stops and digital silence | Both streams remain live before/during/after nonzero reference | dev.1 basic tone check passes; dev.2/dev.3 stalled before playback; wider checks pending |
 | Thirty minutes of music | No stalls, watchdog reset or degrading mic stream | Pending |
 | Wake phrase and commands at 1 m and 3 m, four directions | Record success rates and comparable audio levels | Pending |
 | Music plus barge-in | Record command intelligibility, false wakes and echo leakage | Pending |

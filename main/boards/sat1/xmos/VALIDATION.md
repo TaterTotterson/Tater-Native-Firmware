@@ -1,7 +1,10 @@
 # Sat1 XMOS integration validation
 
-Validated locally on November 24, 2026. Hardware validation remains pending.
-No device was flashed and no release or upstream PR was published.
+Software validated locally on November 24, 2026. Subsequent physical testing
+found a DSP stall in both four-mic AEC candidates; their passing simulator tests
+do not qualify them for use. The migrated legacy topology passed a basic voice
+check. See [HARDWARE-VALIDATION.md](HARDWARE-VALIDATION.md) for the measured results.
+No release or upstream PR was published.
 
 ## Automated checks
 
@@ -50,4 +53,5 @@ are in `release_assets/sat1-xmos-integration/`.
 See [INTEGRATION.md](INTEGRATION.md) for installation, rollback, the physical
 test matrix and the planned upstream contribution split. Audio quality,
 restarts, power cycles, music/barge-in, AUX stereo, and USB enumeration are
-**pending**. Passing simulation does not establish that FPH issue #129 is fixed.
+**pending**. The four-mic startup/liveness check failed on physical hardware.
+Passing simulation does not establish that FPH issue #129 is fixed.

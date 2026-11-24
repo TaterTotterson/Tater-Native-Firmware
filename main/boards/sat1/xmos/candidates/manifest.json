@@ -8,6 +8,14 @@
     "factory_md5": "ef3f451ab0169de190b757db48551142",
     "factory_sha256": "a5535f1a1ec08963b393535c32e6a2b6fbaf2a913be4c480830617f039006ff0",
     "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
+    "hardware_smoke_test": {
+      "date": "2026-11-24",
+      "frame_counter": 196,
+      "reason": "DSP frame counter stalls; wake microphone repeats a constant sample",
+      "report": "../HARDWARE-VALIDATION.md",
+      "result": "failed",
+      "wake_repeated_sample": 261
+    },
     "hardware_validated": false,
     "linked_version": [
       1,
@@ -30,6 +38,14 @@
     "factory_md5": "0cd2790acd4871e720d75b8d95a2e31e",
     "factory_sha256": "73c5e633954ba034b793938251ceb8b091c0dd74c628f89945dd759b7a25591d",
     "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
+    "hardware_smoke_test": {
+      "date": "2026-11-24",
+      "frame_counter": 12,
+      "reason": "DSP frame counter stalls; wake microphone repeats a constant sample",
+      "report": "../HARDWARE-VALIDATION.md",
+      "result": "failed",
+      "wake_repeated_sample": -3056
+    },
     "hardware_validated": false,
     "linked_version": [
       1,
@@ -52,6 +68,13 @@
     "factory_md5": "6ccfbce2e189d7b3b0f5cc1d2dec0c0d",
     "factory_sha256": "e5ad83ffd66f03b3ddba1dfef14d9829d15ead9fab0dc416f8a57f0cdf69ec88",
     "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
+    "hardware_smoke_test": {
+      "date": "2026-11-24",
+      "remaining_issue": "Optional direct GPIO read diagnostic fails while status-register button read succeeds",
+      "report": "../HARDWARE-VALIDATION.md",
+      "result": "basic_liveness_and_voice_pass",
+      "user_observation": "Answered the wake-and-time query clearly"
+    },
     "hardware_validated": false,
     "linked_version": [
       1,
