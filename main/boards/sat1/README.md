@@ -86,12 +86,13 @@ The board-specific audio implementation lives in:
 main/boards/sat1/audio_sat1.c
 ```
 
-The XMOS AEC/NS/AGC channel uses unity (1×) software gain for wake detection,
+The XMOS AEC/IC/NS/AGC channel uses unity (1×) software gain for wake detection,
 wake-boundary estimation, verification, buffered wake/command audio, and trainer
-recordings. Applying another 8× gain to this already gain-controlled channel can
-clip the signal. The separate AEC/NS speech channel retains its 8× software gain
-and existing speech leveler. Microphone diagnostics report the two gains
-separately. Wake thresholds and the existing 80 ms boundary guard are unchanged.
+recordings. Live recognition uses that same processed channel, matching the
+recognition input used by FPH ESPHome. The ESP32 adds no further speech gain or
+leveler to the XMOS AGC output. The pre-AGC signal remains available on XMOS I2S
+channel 1 but is not the recognition input. Wake thresholds and the existing
+80 ms boundary guard are unchanged.
 
 Boundary estimation uses the first threshold crossing in the model's strongest
 confidence run instead of the later confidence peak. The existing 80 ms guard

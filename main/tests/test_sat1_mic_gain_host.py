@@ -37,11 +37,9 @@ int main(void)
         /* Wake audio keeps its full dynamic range, including loud speech
          * that the former 8x gain would have saturated above +/-4096. */
         assert(sat1_xmos_channel_48k_to_16k(stereo, 0, 0) == value);
-        /* Every possible PCM16 speech sample retains the legacy result. */
-        int32_t legacy = value * 8;
-        if (legacy > INT16_MAX) legacy = INT16_MAX;
-        if (legacy < INT16_MIN) legacy = INT16_MIN;
-        assert(sat1_xmos_channel_48k_to_16k(stereo, 0, 1) == legacy);
+        /* Recognition must retain the same full dynamic range as wake audio,
+         * without amplifying an already gain-controlled XMOS signal. */
+        assert(sat1_xmos_channel_48k_to_16k(stereo, 0, SAT1_XMOS_STREAM_CHANNEL) == value);
     }
 
     /* Distinct, changing stereo channels check routing and downsampling. */
@@ -52,10 +50,18 @@ int main(void)
         2000 * 65536, -300 * 65536,
     };
     assert(sat1_xmos_channel_48k_to_16k(mixed, 0, 0) == 3000);
-    assert(sat1_xmos_channel_48k_to_16k(mixed, 0, 1) == 800);
+    assert(sat1_xmos_channel_48k_to_16k(mixed, 0, 1) == 100);
+    assert(sat1_xmos_channel_48k_to_16k(mixed, 0, SAT1_XMOS_STREAM_CHANNEL) == 3000);
     assert(sat1_xmos_channel_48k_to_16k(mixed, 1, 0) == 333);
-    assert(sat1_xmos_channel_48k_to_16k(mixed, 1, 1) == -266);
-    puts("Sat1 wake gain and all 65536 legacy speech samples passed");
+    assert(sat1_xmos_channel_48k_to_16k(mixed, 1, 1) == -33);
+    /* A quiet pre-AGC channel must not replace audible processed speech. */
+    int32_t quiet_ns[] = {
+        12000 * 65536, 0,
+        12000 * 65536, 0,
+        12000 * 65536, 0,
+    };
+    assert(sat1_xmos_channel_48k_to_16k(quiet_ns, 0, SAT1_XMOS_STREAM_CHANNEL) == 12000);
+    puts("Sat1 processed-channel routing and all 65536 unity-gain samples passed");
     return 0;
 }
 '''

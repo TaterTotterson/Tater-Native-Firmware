@@ -56,3 +56,28 @@ python3.11 main/boards/sat1/xmos/source/scripts/package_candidates.py beam_ic
 The `legacy` profile retains the IC-bypassed dev.1 comparison; it is not the
 release default. The RPi source pin and factory checksum are in that repo's
 `upstreams.toml` and `xmos_firmware.py`.
+
+## Native recognition-input correction
+
+Physical checks found a no-reply regression with Native `0.7.0-r2`: wake
+detection worked and audio reached Tater, but recognition returned empty
+transcripts. Restarting Tater did not resolve it. Reinstalling published
+`0.7.0-r1` with XMOS `1.2.0-dev.1` restored replies on the same Tater instance
+and settings.
+
+The candidate Native `0.7.0-r3-dev` retains the exact dev.8 XMOS image and uses
+its processed channel 0 for recognition, as FPH ESPHome does. The previous
+Native input selected pre-AGC channel 1 with an additional 8× software gain and
+leveler. The candidate takes channel 0 at unity gain and relies on XMOS AGC,
+keeping live recognition consistent with buffered wake/command audio. Host
+checks cover the selected channel with a silent alternate channel and the
+full PCM16 range without added gain; those checks reject the old input path.
+The Sat1 ESP32 firmware builds successfully and embeds the unchanged dev.8
+compressed payload exactly once.
+
+On November 24, the candidate was installed on the same Sat1. We confirmed
+clear replies from opposite sides and another clear reply after a full power
+cycle, with no Tater setting changes. Runtime status after that restart reports
+`native-satellite1-0.7.0-r3-dev`, XMOS `1.2.0-dev.8`, reset reason `poweron`,
+and no core dump. The candidate remains unpublished. Its OTA image SHA-256 is
+`6773533501beaba729a7637630067f78c0c353ba8cf1732bbdde6f53ba3d9094`.
