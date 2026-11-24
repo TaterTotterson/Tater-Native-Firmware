@@ -132,8 +132,9 @@ start of commands spoken immediately after the wake word, such as
 Enable **STT wake verification** in Tater or the Home Assistant bridge for
 false-wake prevention. The configured STT service checks the wake phrase.
 
-For a fully on-device option, supported [Linux satellites](https://github.com/TaterTotterson/Tater-Linux-Satellite)
-and [Echo satellites](https://github.com/TaterTotterson/Tater-Echo-Firmware)
+For a fully on-device option, supported [Linux satellites](https://github.com/TaterTotterson/Tater-Linux-Satellite),
+[Echo satellites](https://github.com/TaterTotterson/Tater-Echo-Firmware),
+and [SAT1 RPi satellites](https://github.com/TaterTotterson/Tater-SAT1-RPi)
 offer **dual mode: MWW + OWW or MWW + NWW**. Both detectors must agree on the
 same wake phrase. Dual mode is recommended on hardware that supports it.
 
