@@ -50,6 +50,7 @@
 
 extern rtos_intertile_t *intertile_ctx;
 extern rtos_intertile_t *intertile_usb_audio_ctx;
+extern rtos_intertile_t *intertile_cdc_ctx;
 extern rtos_qspi_flash_t *qspi_flash_ctx;
 extern rtos_gpio_t *gpio_ctx_t0;
 extern rtos_gpio_t *gpio_ctx_t1;

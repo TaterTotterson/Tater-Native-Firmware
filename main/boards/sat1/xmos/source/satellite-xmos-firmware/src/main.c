@@ -71,6 +71,9 @@ static int32_t saturate_i32_from_i64(int64_t value)
 static sat1_beamformer_t sat1_beamformer;
 #if appconfSAT1_AEC4
 static SemaphoreHandle_t sat1_beam_mutex;
+/* Published only after direction analysis completes. Protected with beam state;
+ * post-AEC processing must not read the estimator's in-progress fields. */
+static doa_estimator_state_t sat1_beam_direction;
 #endif
 
 static void mix_four_mics_for_pipeline(
@@ -298,16 +301,40 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
             pipeline_mic_ptr, pipeline_mic_ptr + frame_count,
             pipeline_mic_ptr + 2 * frame_count, pipeline_mic_ptr + 3 * frame_count
         };
+#if appconfSAT1_AUDIO_BENCH
+        sat1_bench_begin(SAT1_BENCH_RAW_BEAM_LOCK_WAIT);
+#endif
         xSemaphoreTake(sat1_beam_mutex, portMAX_DELAY);
+#if appconfSAT1_AUDIO_BENCH
+        sat1_bench_end(SAT1_BENCH_RAW_BEAM_LOCK_WAIT);
+#endif
         sat1_beamformer_analyze_frame(&sat1_beamformer, raw_mics, frame_count);
-        doa_estimator_set_mic_health(sat1_beamformer.active_mic_mask);
+        uint8_t active_mic_mask = sat1_beamformer.active_mic_mask;
+        xSemaphoreGive(sat1_beam_mutex);
+        doa_estimator_set_mic_health(active_mic_mask);
+#endif
+#if appconfSAT1_AUDIO_BENCH
+        sat1_bench_begin(SAT1_BENCH_DIRECTION_ANALYSIS);
 #endif
         doa_estimator_process_frame_4(&pipeline_mic_ptr[0],
                                       &pipeline_mic_ptr[frame_count],
                                       &pipeline_mic_ptr[2 * frame_count],
                                       &pipeline_mic_ptr[3 * frame_count],
                                       frame_count);
+#if appconfSAT1_AUDIO_BENCH
+        sat1_bench_end(SAT1_BENCH_DIRECTION_ANALYSIS);
+#endif
 #if appconfSAT1_AEC4
+        doa_estimator_state_t direction;
+        doa_estimator_get_state(&direction);
+#if appconfSAT1_AUDIO_BENCH
+        sat1_bench_begin(SAT1_BENCH_RAW_BEAM_LOCK_WAIT);
+#endif
+        xSemaphoreTake(sat1_beam_mutex, portMAX_DELAY);
+#if appconfSAT1_AUDIO_BENCH
+        sat1_bench_end(SAT1_BENCH_RAW_BEAM_LOCK_WAIT);
+#endif
+        sat1_beam_direction = direction;
         xSemaphoreGive(sat1_beam_mutex);
 #endif
     }
@@ -417,11 +444,21 @@ void sat1_post_aec_beam(int32_t samples[4][240])
     int32_t output[240];
     const int32_t *microphones[4] = {samples[0], samples[1], samples[2], samples[3]};
     doa_estimator_state_t direction;
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_POST_BEAM_LOCK_WAIT);
+#endif
     xSemaphoreTake(sat1_beam_mutex, portMAX_DELAY);
-    doa_estimator_get_state(&direction);
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_POST_BEAM_LOCK_WAIT);
+    sat1_bench_begin(SAT1_BENCH_POST_BEAM);
+#endif
+    direction = sat1_beam_direction;
     sat1_beamformer_process_calibrated_frame(&sat1_beamformer, output,
                                             microphones, 240, &direction);
     memcpy(samples[0], output, sizeof(output));
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_POST_BEAM);
+#endif
     xSemaphoreGive(sat1_beam_mutex);
 }
 #endif

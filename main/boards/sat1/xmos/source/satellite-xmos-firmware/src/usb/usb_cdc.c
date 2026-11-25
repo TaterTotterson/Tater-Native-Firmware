@@ -6,6 +6,9 @@
 #if appconfUSB_CDC_ENABLED
 static rtos_driver_rpc_t rpc_config_s;
 static rtos_driver_rpc_t* rpc_config = &rpc_config_s;
+/* One RPC response port is shared by all client-side printing tasks. The
+ * intertile TX lock alone does not serialize their request/response pairs. */
+static rtos_osal_mutex_t client_print_lock;
 
 
 enum {
@@ -37,6 +40,8 @@ int cdc_printf(const char *format, ...) {
     va_start(args, format);
     int len = vsnprintf(buffer, sizeof(buffer), format, args);  // Format the string
     va_end(args);
+    if (len <= 0) return 0;
+    if ((size_t)len >= sizeof(buffer)) len = sizeof(buffer) - 1;
     
     if (rpc_config->remote_client_count == 0) {
         /* This is a RPC client */
@@ -50,9 +55,11 @@ int cdc_printf(const char *format, ...) {
             RPC_PARAM_LIST_END
         };
 
+        rtos_osal_mutex_get(&client_print_lock, RTOS_OSAL_WAIT_FOREVER);
         rpc_client_call_generic(
             host_address->intertile_ctx, host_address->port, fcode_tx, rpc_param_desc,
-            &buffer, &len);    
+            &buffer, &len);
+        rtos_osal_mutex_put(&client_print_lock);
 
     } else {
         /* This is the RPC host */
@@ -185,6 +192,7 @@ void rtos_cdc_rpc_config(
 
 void rtos_cdc_rpc_client_init(rtos_intertile_t *host_intertile_ctx)
 {
+    rtos_osal_mutex_create(&client_print_lock, "cdc_print", RTOS_OSAL_NOT_RECURSIVE);
     rpc_config->rpc_host_start = NULL;
     rpc_config->remote_client_count = 0;
     rpc_config->host_task_priority = -1;

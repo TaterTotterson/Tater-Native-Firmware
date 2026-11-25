@@ -242,6 +242,89 @@ int main(void) {
                     f"-DRATE_FACTOR={rate_factor}", str(harness), "-o", str(binary)], check=True)
                 subprocess.run([str(binary)], check=True, timeout=10)
 
+    def test_post_beam_does_not_wait_for_in_progress_direction_analysis(self):
+        source = (SRC / "main.c").read_text()
+
+        def function(signature):
+            start = source.index(signature)
+            opening = source.index("{", start)
+            depth, end = 1, opening + 1
+            while depth:
+                depth += (source[end] == "{") - (source[end] == "}")
+                end += 1
+            return source[start:end]
+
+        (self.directory / "sat1_beam_callbacks.inc").write_text(
+            function("static size_t receive_mic_array_frame(") + "\n" +
+            function("void sat1_post_aec_beam("))
+        binary = self.directory / "beam_lock"
+        subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+            "-pthread", "-fsanitize=address,undefined", "-I", str(self.directory), "-I", str(SRC),
+            str(ROOT / "main/tests/test_sat1_beam_lock_host.c"), "-o", str(binary)], check=True)
+        subprocess.run([str(binary)], check=True, timeout=10)
+
+    def test_cdc_rpc_prints_are_serialized_through_the_response(self):
+        source = (SRC / "usb/usb_cdc.c").read_text()
+
+        def function(signature):
+            start = source.index(signature)
+            opening = source.index("{", start)
+            depth, end = 1, opening + 1
+            while depth:
+                depth += (source[end] == "{") - (source[end] == "}")
+                end += 1
+            return source[start:end]
+
+        (self.directory / "sat1_cdc_callbacks.inc").write_text(
+            function("int cdc_printf(") + "\n" +
+            function("void rtos_cdc_rpc_client_init("))
+        binary = self.directory / "cdc_lock"
+        subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+            "-pthread", "-fsanitize=address,undefined", "-I", str(self.directory),
+            str(ROOT / "main/tests/test_sat1_cdc_lock_host.c"), "-o", str(binary)], check=True)
+        subprocess.run([str(binary)], check=True, timeout=10)
+
+    def test_cdc_rpc_link_is_independent_of_audio_control_on_both_tiles(self):
+        platform = SRC.parent / "bsp_config/SATELLITE1/platform"
+
+        def function(path, signature):
+            source = path.read_text()
+            start = source.index(signature)
+            opening = source.index("{", start)
+            depth, end = 1, opening + 1
+            while depth:
+                depth += (source[end] == "{") - (source[end] == "}")
+                end += 1
+            return source[start:end]
+
+        source = "\n".join([
+            function(platform / "platform_init.c", "static void usb_cdc_init("),
+            function(platform / "platform_init.c", "void platform_init("),
+            function(platform / "platform_start.c", "void platform_start(")])
+        for tile in (0, 1):
+            for cdc in (0, 1):
+                for usb_audio in (0, 1):
+                    result = subprocess.run([shutil.which("cc"), "-E", "-P", "-x", "c",
+                        "-DUSB_TILE_NO=0", f"-DTILE_UNDER_TEST={tile}",
+                        "-DON_TILE(n)=((n)==TILE_UNDER_TEST)",
+                        f"-DappconfUSB_CDC_ENABLED={cdc}",
+                        f"-DappconfUSB_AUDIO_ENABLED={usb_audio}", "-"],
+                        input=source, text=True, capture_output=True, check=True).stdout
+                    compact = re.sub(r'\s+', '', result)
+                    self.assertEqual(compact.count("rtos_intertile_init(intertile_cdc_ctx,"), cdc)
+                    self.assertEqual(compact.count("rtos_intertile_start(intertile_cdc_ctx)"), cdc)
+                    self.assertIn("rtos_intertile_init(intertile_ctx,", compact)
+                    self.assertIn("rtos_intertile_start(intertile_ctx)", compact)
+                    self.assertEqual(compact.count("rtos_intertile_init(intertile_usb_audio_ctx,"), usb_audio)
+                    if cdc and tile == 0:
+                        self.assertIn("client_intertile_ctx[1]={intertile_cdc_ctx}", compact)
+                        self.assertIn("rtos_cdc_rpc_host_init(client_intertile_ctx,1)", compact)
+                    elif cdc:
+                        self.assertIn("rtos_cdc_rpc_client_init(intertile_cdc_ctx)", compact)
+                    else:
+                        self.assertNotIn("rtos_cdc_rpc_host_init(", compact)
+                        self.assertNotIn("rtos_cdc_rpc_client_init(", compact)
+
     def capture_fixture(self, name, overflow=False):
         output = self.directory / f"{name}.wav"
         manifest = self.directory / "bench-manifest.json"

@@ -231,10 +231,10 @@ static void servicer_init(void)
 static void usb_cdc_init(){
 #if appconfUSB_CDC_ENABLED
 #if ON_TILE(USB_TILE_NO)
-    rtos_intertile_t *client_intertile_ctx[1] = {intertile_ctx};
-    rtos_cdc_rpc_host_init(client_intertile_ctx,1);    
+    rtos_intertile_t *client_intertile_ctx[1] = {intertile_cdc_ctx};
+    rtos_cdc_rpc_host_init(client_intertile_ctx,1);
 #else
-    rtos_cdc_rpc_client_init(intertile_ctx);
+    rtos_cdc_rpc_client_init(intertile_cdc_ctx);
 #endif
 #endif
 }
@@ -246,6 +246,10 @@ void platform_init(chanend_t other_tile_c)
     rtos_intertile_init(intertile_ctx, other_tile_c);
 #if appconfUSB_AUDIO_ENABLED
     rtos_intertile_init(intertile_usb_audio_ctx, other_tile_c);
+#endif
+#if appconfUSB_CDC_ENABLED
+    /* Diagnostic RPC must not hold the link carrying I2S control responses. */
+    rtos_intertile_init(intertile_cdc_ctx, other_tile_c);
 #endif
     mclk_init(other_tile_c);
     gpio_init();

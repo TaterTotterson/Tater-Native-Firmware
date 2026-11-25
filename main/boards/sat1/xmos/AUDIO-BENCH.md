@@ -83,6 +83,11 @@ Opening or closing the native ESP32 Serial/JTAG port can reset the board even
 when a script does not request a reset. Keep that connection open until audio
 and stage captures have finished. A reset invalidates the current USB recording;
 record a fresh session after enumeration instead of joining it across resets.
+Both USB connectors can power the board. Reconnecting only ESP32 USB is not a
+power cycle while XMOS USB remains connected. If the native USB interface
+disappears, stop captures, disconnect both cables, and reconnect ESP32 first
+for recovery. After flashing the saved application, verify recovery through
+Tater status before reopening serial logging.
 
 Files are created without overwriting existing recordings. WAV is 16 kHz PCM32
 with twelve channels. **Do not play the complete WAV:** its final four channels
@@ -150,6 +155,10 @@ after about 42.95 seconds. Heap/minimum-ever heap and USB drops are reported.
 | 10–11 | ESP32 I2S output, USB packing/enqueue |
 | 12–13 | Speaker I2S input, reference enqueue |
 | 14 | Fixed diagnostic frame-pool wait |
+| 15 | Raw calibration/direction-publication mutex wait |
+| 16 | Four-mic direction analysis outside the beam mutex |
+| 17 | Post-AEC beam mutex wait |
+| 18 | Post-AEC beam processing and output copy |
 
 Compare several snapshots: normal waits may be active. An entered-but-not-ended
 AEC differs from advancing AEC with blocked I2S output. CDC itself shares MCU
@@ -163,13 +172,22 @@ must not free these buffers. Compile-time checks bound each profile's frame
 size. Bench-only heap budgets are 120 KiB on tile 1 and 144 KiB on tile 0;
 normal builds retain their existing heap budgets and allocation behavior.
 
-Bench DSP frames use the otherwise unused USB-audio intertile link. I2S and CDC
-RPC retain their original link. A blocked DSP send on a shared link can hold
+Bench DSP frames use the otherwise unused USB-audio intertile link. I2S RPC
+retains its original link; enabled CDC uses its own link and serializes each
+client request through receipt of its response. A blocked DSP send on a shared link can hold
 its transmit lock while tile 0 waits for an I2S reply before releasing a frame;
 the reply then waits for that same transmit lock. Separate links allow RPC to
 complete while the frame pool applies backpressure. Capture-only bench builds
 do not start a USB playback forwarding task on the reserved link. Normal
 builds retain their existing transport selection.
+
+Raw calibration and post-AEC processing share beam state, but direction
+correlation runs outside that mutex. The capture task publishes a completed
+direction snapshot under the mutex after analysis. Post-AEC beamforming reads
+that snapshot, allowing it to continue during the next direction calculation
+without reading a partially updated estimator result. Stage 15 covers both
+short raw-side acquisitions per frame; stages 16–18 separate correlation,
+post-side lock waiting and beam work from their enclosing boundaries.
 
 Bench capture increases frame size, bandwidth, memory and scheduling load. It can
 expose or change a timing fault. Reproduce a fix with instrumentation disabled
@@ -198,7 +216,7 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
 
 ## Software verification, November 25, 2026
 
-- Seventeen host tests pass, including the actual C snapshot/packing code,
+- Twenty host tests pass, including the actual C snapshot/packing code,
   counter/timer wraparound, corrupt/drop/repeat detection, host overflow,
   exclusive recording files, fixed-pool ownership, audio/RPC link selection in
   both layouts and build modes, and sanitized USB partial/empty-read handling.
@@ -208,6 +226,14 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
   Actual speaker callbacks are also checked with two/four microphones and
   16/48 kHz transport under address/undefined-behavior sanitizers: allocation
   and transfer stay stereo in every case.
+  A concurrent callback test pauses direction analysis midway through writing
+  its result: post-AEC processing must finish using the previous coherent
+  snapshot, then adopt the newly completed result. The original callbacks
+  compile but fail this regression; the revised callbacks pass under sanitizers.
+  A second concurrent test exercises the actual CDC client callbacks with eight
+  writers, checks full request/response serialization and bounded formatting,
+  and fails against the original driver. CDC wiring is also checked on both
+  tiles with USB audio and CDC independently enabled/disabled.
 - All eleven existing channel-contract tests pass, including four xcore cases.
   Direction/beam, native protocol, recognition routing, updater and playback
   wake-policy regressions pass.
@@ -289,6 +315,28 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
   needs work; do not call this a deadline-margin or release-qualification pass.
   The raw analysis and post-AEC beam paths share a mutex across direction
   analysis, making lock scope a candidate for follow-up measurement.
+- During the timing follow-up, the earlier beam image passed thirty seconds of
+  music capture and ninety seconds of speech over music; the user reported
+  answers from both positions. The latter boundary peaked at 16.94097 ms with
+  five completed calls above 15 ms. The snapshot candidate initially passed
+  thirty seconds of music capture, peaking at 14.61267 ms with post-beam lock
+  waiting below 0.137 ms. It subsequently stalled, and its attempted voice
+  capture contained only zeros. The user reported no wake response even in
+  quiet. These are not a successful acoustic comparison or a stability pass.
+- Two later diagnostic candidates also stalled. The CDC transaction mutex
+  alone did not prevent the failure. With the dedicated CDC link, twenty- and
+  five-second probes passed before progress stopped near 5,500 frames. The
+  soak monitor failed at 96.2 seconds after tile 1 reports had been absent for
+  fifteen seconds. Tile 0 remained blocked in I2S output; the last tile 1
+  snapshot showed AEC/post-beam processing active. Its completed AEC-plus-beam
+  maximum was 15.51785 ms. These snapshots do not identify a failing instruction
+  or establish that CDC caused the remaining stall. Task/interrupt liveness,
+  assertions, allocation and stack margins still need investigation.
+- The original saved ESP32 application was restored after each failed
+  candidate. Following the last recovery, Tater reported installed and target
+  XMOS dev.8, a completed update, and varying microphone samples/features.
+  Experimental changes remain off the device. No fifteen-minute candidate
+  stability run has passed; another manual music comparison must wait for one.
 
 | Basic hardware check | beam_ic | aec4 | aec4_beam |
 | --- | --- | --- | --- |
