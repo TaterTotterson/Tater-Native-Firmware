@@ -101,15 +101,21 @@ recordings with the manifest checksum and installed version for each run.
 Do not infer live DSP from working SPI alone: check changing microphone samples
 and the DoA frame counter through playback and restarts.
 
+The November 25 follow-up in [AUDIO-BENCH.md](AUDIO-BENCH.md) uses a dedicated
+DSP intertile link and a single-frame speaker path. Its dev.3 factory SHA-256
+starts with `c0623bf46d9519f4`; it differs from the earlier failed dev.3 image.
+The limited passes below apply to that specific image on one board, with the
+internal speaker. They do not complete the broader acceptance counts.
+
 | Check | Acceptance | Result |
 | --- | --- | --- |
-| Installed identity and both mic streams | Expected dev version; live samples on both streams | dev.2/dev.3 fail DSP liveness; dev.1 basic voice pass |
-| Ten cold power cycles | Audio capture and playback recover every time | Pending |
-| Twenty ESP-only restarts | No stale constant mic stream or silent playback | Pending |
-| Playback starts/stops and digital silence | Both streams remain live before/during/after nonzero reference | dev.1 basic tone check passes; dev.2/dev.3 stalled before playback; wider checks pending |
-| Thirty minutes of music | No stalls, watchdog reset or degrading mic stream | Pending |
-| Wake phrase and commands at 1 m and 3 m, four directions | Record success rates and comparable audio levels | Pending |
-| Music plus barge-in | Record command intelligibility, false wakes and echo leakage | Pending |
+| Installed identity and both mic streams | Expected dev version; live samples on both streams | Dedicated-link dev.3 live through music and reboots; earlier dev.2/dev.3 failed |
+| Ten cold power cycles | Audio capture and playback recover every time | One cycle passed; full count pending |
+| Twenty ESP-only restarts | No stale constant mic stream or silent playback | One restart passed; full count pending |
+| Playback starts/stops and digital silence | Both streams remain live before/during/after nonzero reference | Music, limited resumes and voice passed; systematic starts/stops and digital silence pending |
+| Thirty minutes of music | No stalls, watchdog reset or degrading mic stream | One thirty-minute internal-speaker run passed; no observed reset or driver errors |
+| Wake phrase and commands at 1 m and 3 m, four directions | Record success rates and comparable audio levels | Nearby/opposite basic answers confirmed; measured distances/four-direction rates pending |
+| Music plus barge-in | Record command intelligibility, false wakes and echo leakage | Basic wake/answer over music passed; quantified acoustic/false-wake rates pending |
 | Internal, AUX stereo and Both routes | No reference-downmix regression | Pending |
 | Moving talker, noise, silence | Stable direction, sensible confidence and neutral fallback | Pending |
 | Mic health and recovery | No false fault during echo suppression; controlled lab fault recovers | Pending |

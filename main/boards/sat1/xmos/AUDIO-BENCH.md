@@ -433,8 +433,48 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
   physical processing failure/reset, despite the preceding quiet passes.
   The original dev.8 application was restored and live microphone data verified.
   The subsequent dedicated-audio-link change above removes the known
-  normal-build RPC/audio lock cycle; hardware qualification of that change is
-  still pending. No sustained music or manual voice pass is established.
+  normal-build RPC/audio lock cycle. Its later results are recorded below.
+- With the dedicated link installed in the normal image, two consecutive
+  900-second observation windows passed on the same uninterrupted music
+  session. Across 339 status samples, the direction-processing counter advanced
+  by 119,857 frames with no observed reset, missing counter sample, status-read
+  error, or playback write/render/starvation error. Every observation reported
+  music active; the inter-window sample spacing was 2.97 seconds. No wake
+  detections occurred during this thirty-minute playback check. These are
+  processing/playback stability observations, not per-frame timing or acoustic
+  suppression measurements.
+- The user then confirmed wake and spoken answers from the nearby and opposite
+  positions over audible music. The 92.5-second status observation recorded
+  detections increasing from zero to two, continued direction-frame progress,
+  and no status-read errors. This establishes basic functionality for the
+  requested trials, not a recognition success rate.
+- On the dedicated-link image, an ESP32-controlled restart retained XMOS
+  dev.3 and skipped reflashing. A sixty-second observation passed with 4,062
+  additional direction frames, no missing/read errors or reported driver
+  failures. Music was active at every observation after reconnecting. A full
+  cold-power-cycle and post-boot playback/wake check were then performed.
+- The user disconnected all power, including both USB cables, for five seconds
+  and confirmed audible music plus wake/spoken answers after reconnecting.
+  Native status reported reset reason `poweron`, retained dev.3, and skipped
+  reflashing. The post-cycle observation recorded live microphone/features and
+  two wake detections. A separate sixty-second music-required check passed
+  with 4,062 additional direction frames and zero missing/read/driver errors
+  or observed playback gaps. This is one cold cycle and one ESP32-controlled
+  restart of this image, not repeated-reboot reliability qualification.
+
+These results support the fixes in this tested fork. They do not establish
+that the exact cause of the upstream FPH issue is identical, quantify an
+acoustic improvement, or establish full real-time deadline margin. Earlier
+bench measurements still include calls above 15 ms; further timing, movement,
+route and repeated-restart qualification remain work before release promotion.
+
+The normal dedicated-link factory SHA-256 is
+`c0623bf46d9519f4842822d3aa0ce089739755c60b7dec3c7a023def4ff45192`;
+its matching native application SHA-256 is
+`80bc3d16be31bf594e819a839ba94c5b5549df45008096cda7b00e746d06eb20`.
+This dev.3 image differs from the earlier images with the same version string.
+The changes and tests are committed as `9336ac8`; default production assets
+and release selection remain unchanged.
 
 | Basic hardware check | beam_ic | aec4 | aec4_beam |
 | --- | --- | --- | --- |
@@ -443,5 +483,8 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
 | Ninety-second voice capture continuity | Invalid: ESP logging reset | Pass | Pass |
 | Fifteen-minute quiet processing / periodic captures | Not run | Pass | Revised image passed; earlier image failed |
 | Fifteen-minute normal build idle processing | Not run | Not run | Revised image passed |
-| ESP32-controlled restart and sixty-second recovery | Not run | Not run | Revised image passed |
+| Thirty-minute normal build music processing | Not run | Not run | Dedicated-link image passed |
+| Nearby/opposite wake and answer over music | Not run | Not run | User confirmed; two detections recorded |
+| ESP32-controlled restart and sixty-second recovery | Not run | Not run | Dedicated-link image passed |
+| Full power cycle, playback/wake and post-boot minute | Not run | Not run | Dedicated-link image passed once |
 | Comparative acoustic quality / release qualification | Pending | Pending | Pending |

@@ -2,6 +2,16 @@
 
 **The combined 1.2.0-dev.3 candidate failed. Do not promote it.**
 
+These are the November 24 results for the artifact hashes listed below.
+A different dev.3 factory tested on November 25 subsequently passed thirty
+minutes of internal-speaker music, nearby/opposite voice trials, one ESP32
+restart, and one full power cycle with post-boot playback and voice. Its factory
+SHA-256 is `c0623bf46d9519f4842822d3aa0ce089739755c60b7dec3c7a023def4ff45192`.
+See [the audio bench follow-up](AUDIO-BENCH.md) for the buffering/transport
+corrections, exact observations and remaining qualification. Reused version
+strings do not identify the same binary. The earlier failed artifacts below
+remain historical failures.
+
 Tested one Satellite1 paired to Tater over Wi-Fi.
 Each test used its existing setup, internal speaker, and the same power supply.
 Installation used Tater's existing OTA connection and the native image's
