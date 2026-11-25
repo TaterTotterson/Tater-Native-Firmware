@@ -78,6 +78,12 @@ python3 scripts/sat1_audio_bench.py analyze \
   audio_bench_results/beam_ic/double_talk.wav
 ```
 
+Open ESP32 logging before USB capture and wait for boot and XMOS enumeration.
+Opening or closing the native ESP32 Serial/JTAG port can reset the board even
+when a script does not request a reset. Keep that connection open until audio
+and stage captures have finished. A reset invalidates the current USB recording;
+record a fresh session after enumeration instead of joining it across resets.
+
 Files are created without overwriting existing recordings. WAV is 16 kHz PCM32
 with twelve channels. **Do not play the complete WAV:** its final four channels
 are digital markers. Extract only audio channels for listening. Select native
@@ -87,6 +93,13 @@ On macOS, enable microphone access for the host application before recording
 and restart it if requested by the OS. A successfully opened CoreAudio stream
 can still deliver only zeros when microphone access is denied. Check host
 authorization separately from DSP liveness and USB stage counters.
+
+The bench input endpoint uses asynchronous USB packets. Its callback follows
+the DSP queue's fill level with 15, 16 or 17 samples per USB millisecond,
+preserving every PCM and marker word. A full capture buffer drains rather than
+being discarded. TinyUSB's second packet-size controller is disabled for this
+mode; producer overflow, consumer starvation and incomplete FIFO writes count
+as USB loss events. The normal audio endpoint retains its existing policy.
 
 | Zero-based channel | Contents |
 | --- | --- |
@@ -185,10 +198,16 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
 
 ## Software verification, November 25, 2026
 
-- Sixteen new host tests pass, including the actual C snapshot/packing code,
+- Seventeen host tests pass, including the actual C snapshot/packing code,
   counter/timer wraparound, corrupt/drop/repeat detection, host overflow,
   exclusive recording files, fixed-pool ownership, audio/RPC link selection in
   both layouts and build modes, and sanitized USB partial/empty-read handling.
+  The actual USB callback also preserves samples from a full buffer, reports
+  starvation, and passes two thirty-second simulated clocks at ±2,000 ppm
+  without a lost or changed byte.
+  Actual speaker callbacks are also checked with two/four microphones and
+  16/48 kHz transport under address/undefined-behavior sanitizers: allocation
+  and transfer stay stereo in every case.
 - All eleven existing channel-contract tests pass, including four xcore cases.
   Direction/beam, native protocol, recognition routing, updater and playback
   wake-policy regressions pass.
@@ -222,8 +241,58 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
   on tile 1; USB drops remained zero and completed AEC calls never exceeded
   15 ms in those snapshots. This supports the bench transport fix; it does not
   qualify a release build or identify every earlier four-mic fault.
-- The host WAVs from this session are invalid: all samples were zero and
+- Before the permission restart, host WAVs were invalid: all samples were zero and
   AVFoundation reported microphone authorization denied. The user enabled
   access, with an application restart required. Synchronized audio validation
   and acoustic comparisons must resume after that restart. The revised
   four-mic images build but have not yet been installed on this device.
+- After the permission restart, the host received genuine twelve-channel data.
+  Two twenty-second captures each had one zero-filled gap and skipped three
+  frame identities near fifteen seconds, while DSP stages kept advancing and
+  the old USB event count remained zero. This prompted the packet-sizing and
+  buffer-drain changes above; those captures remain invalid for comparison.
+- After those changes, the baseline passed thirty seconds of capture: all
+  480,000 sample frames had valid markers, with 1,999 complete DSP frames and
+  no missing/repeated identities. The mean capture interval was 15.00044 ms,
+  with no interval above 30 ms. Raw mic and processed channels contained data;
+  playback references were silent during this ambient case. This establishes
+  capture continuity, not echo attenuation or recognition quality.
+- The user reported spoken answers from both baseline positions; ESP32 logs
+  contain two wake detections. Its simultaneous USB voice recording is invalid
+  because opening ESP32 logging reset the device. Logging must start first.
+- The first four-mic capture stopped after thirteen completed frames. All AEC
+  and output calls completed; capture then waited for another reference, while
+  the speaker-input counter stayed at thirteen. Tile 1 minimum heap was only
+  2,880 bytes. The speaker pipeline allocated four channels from microphone
+  configuration while always transferring stereo. Its frame is now explicitly
+  stereo (5,760 rather than 11,520 bytes at 48 kHz), with an allocation check.
+  This correction also applies when bench instrumentation is disabled.
+- With the stereo-buffer correction installed, four-mic AEC passed thirty
+  seconds of capture: 480,000 valid sample frames, 1,999 complete DSP frames,
+  no missing/repeated identities and no interval above 30 ms. Its mean capture
+  interval was 15.00024 ms. This verifies sustained bench processing after the
+  initial reference starvation; longer restart and playback testing is still
+  required before release qualification.
+- The corrected four-mic image also passed the ninety-second manual voice
+  recording: all 1,440,000 sample frames validated, including both playback
+  references, with no clipped samples. The user reported answers from both
+  positions. These few trials establish basic operation, not a recognition
+  success rate or improvement over the baseline. The bench-disabled four-mic
+  XMOS image also builds; it has not been runtime-qualified on hardware.
+- Four-mic AEC plus beamforming passed thirty-second ambient and ninety-second
+  voice captures with all sample markers valid and no clipping; the user also
+  reported answers from both positions. Both four-mic candidates recorded zero
+  USB loss events in these captures. The beam variant's AEC-plus-beam boundary
+  recorded twenty completed calls above 15 ms, with a 17.7826 ms maximum, while
+  plain four-mic AEC peaked at 8.10243 ms. These elapsed times include scheduling
+  and mutex waits. No captured frame identities were lost, but beam timing still
+  needs work; do not call this a deadline-margin or release-qualification pass.
+  The raw analysis and post-AEC beam paths share a mutex across direction
+  analysis, making lock scope a candidate for follow-up measurement.
+
+| Basic hardware check | beam_ic | aec4 | aec4_beam |
+| --- | --- | --- | --- |
+| Thirty-second capture continuity | Pass | Pass | Pass |
+| Answers from nearby/opposite positions (user report) | Both | Both | Both |
+| Ninety-second voice capture continuity | Invalid: ESP logging reset | Pass | Pass |
+| Comparative acoustic quality / release qualification | Pending | Pending | Pending |

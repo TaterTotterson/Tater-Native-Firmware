@@ -24,8 +24,11 @@
 #error The speaker pipeline frame advance needs to be set according the sample rate of both pipelines
 #endif
 
+/* Playback/reference transport is stereo regardless of microphone count. */
+enum { SPEAKER_CHANNELS = 2 };
+
 typedef struct {
-    int32_t samples[appconfAUDIO_PIPELINE_CHANNELS][appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE];
+    int32_t samples[SPEAKER_CHANNELS][appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE];
 } frame_data_t;
 
 static void *audio_pipeline_input_i(void *input_app_data)
@@ -33,11 +36,12 @@ static void *audio_pipeline_input_i(void *input_app_data)
     frame_data_t *frame_data;
 
     frame_data = pvPortMalloc(sizeof(frame_data_t));
+    configASSERT(frame_data != NULL);
     memset(frame_data, 0x00, sizeof(frame_data_t));
 
     speaker_pipeline_input(input_app_data,
                        (int32_t **)frame_data->samples,
-                       2,
+                       SPEAKER_CHANNELS,
                        appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE);
 
     return frame_data;
@@ -48,7 +52,7 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
 {
     return speaker_pipeline_output(output_app_data,
                                (int32_t **)frame_data->samples,
-                               2,
+                               SPEAKER_CHANNELS,
                                appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE);
 }
 

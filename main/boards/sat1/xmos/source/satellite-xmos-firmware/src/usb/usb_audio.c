@@ -698,12 +698,14 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t rhport,
      * maintain a good fill level again.
      */
 
+#if !appconfSAT1_AUDIO_BENCH
     if (xStreamBufferIsFull(samples_to_host_stream_buf)) {
         xStreamBufferReset(samples_to_host_stream_buf);
         ready = 0;
         rtos_printf("Oops buffer is full\n");
         return true;
     }
+#endif
 
     bytes_available = xStreamBufferBytesAvailable(samples_to_host_stream_buf);
 
@@ -720,6 +722,22 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t rhport,
         return true;
     }
 
+#if appconfSAT1_AUDIO_BENCH
+    /* Preserve samples while following the independent capture clock. The
+     * producer adds 240 samples at once; leave that entire sawtooth inside
+     * the target band rather than treating every frame as clock drift.
+     * Only packet boundaries vary (15/16/17 samples), never PCM or markers.
+     */
+    const size_t sample_bytes = sizeof(samp_t) * CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX;
+    tx_size_frames = AUDIO_FRAMES_PER_USB_MICS_FRAME;
+    if (bytes_available > 2 * appconfAUDIO_PIPELINE_FRAME_ADVANCE * sample_bytes) {
+        tx_size_frames++;
+    } else if (bytes_available < appconfAUDIO_PIPELINE_FRAME_ADVANCE * sample_bytes) {
+        tx_size_frames--;
+    }
+    tx_size_bytes = tx_size_frames * sample_bytes;
+#endif
+
     size_t tx_size_bytes_rate_adjusted = tx_size_bytes / RATE_MULTIPLIER;
     size_t tx_size_frames_rate_adjusted = tx_size_frames / RATE_MULTIPLIER;
 
@@ -730,6 +748,9 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t rhport,
         ready_data_bytes = tx_size_bytes_rate_adjusted;
     } else {
         ready_data_bytes = bytes_available;
+#if appconfSAT1_AUDIO_BENCH
+        sat1_bench_usb_drop();
+#endif
         if (RATE_MULTIPLIER == 3) {
             ready_data_bytes /= RATE_MULTIPLIER;
             memset(usb_audio_frames, 0, tx_size_bytes);
@@ -768,7 +789,13 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t rhport,
         }
         tud_audio_write(usb_audio_frames, tx_size_bytes);
     } else {
+#if appconfSAT1_AUDIO_BENCH
+        if (tud_audio_write(stream_buffer_audio_frames, tx_size_bytes) != tx_size_bytes) {
+            sat1_bench_usb_drop();
+        }
+#else
         tud_audio_write(stream_buffer_audio_frames, tx_size_bytes);
+#endif
     }
     return true;
 }

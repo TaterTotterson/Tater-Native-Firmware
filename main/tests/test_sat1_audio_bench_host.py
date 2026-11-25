@@ -195,6 +195,53 @@ int main(void) {
                 calls = re.findall(r'rtos_intertile_(?:tx|rx_len|rx_data)\(\s*(\w+)', result.stdout)
                 self.assertEqual(calls, [expected] * 3, (layout, enabled, calls))
 
+    def test_speaker_buffers_remain_stereo_with_four_microphones(self):
+        source = (SRC.parent / "audio_pipelines/speaker/passthrough/speaker_pipeline.c").read_text()
+        callbacks = source[source.index("#if appconfAUDIO_PIPELINE_FRAME_ADVANCE"):source.index("void empty_stage")]
+        harness = self.directory / "speaker_channels.c"
+        harness.write_text(r'''
+#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#define appconfAUDIO_PIPELINE_FRAME_ADVANCE 240
+#define appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE (240 * RATE_FACTOR)
+#define appconfAUDIO_SPK_PL_SR_FACTOR RATE_FACTOR
+#define configASSERT assert
+static void *pvPortMalloc(size_t bytes) {
+    assert(bytes == 2 * 240 * RATE_FACTOR * sizeof(int32_t));
+    return malloc(bytes);
+}
+static void speaker_pipeline_input(void *ctx, int32_t **samples, size_t channels, size_t frames) {
+    (void)ctx;
+    assert(channels == 2 && frames == 240 * RATE_FACTOR);
+    int32_t *data = (int32_t *)samples;
+    for (size_t i = 0; i < frames; ++i) {data[i] = (int32_t)i + 1; data[frames + i] = -(int32_t)i - 7;}
+}
+static int speaker_pipeline_output(void *ctx, int32_t **samples, size_t channels, size_t frames) {
+    (void)ctx;
+    assert(channels == 2 && frames == 240 * RATE_FACTOR);
+    int32_t *data = (int32_t *)samples;
+    for (size_t i = 0; i < frames; ++i) assert(data[i] == (int32_t)i + 1 && data[frames + i] == -(int32_t)i - 7);
+    return 1;
+}
+''' + callbacks + r'''
+int main(void) {
+    frame_data_t *frame = audio_pipeline_input_i(NULL);
+    assert(audio_pipeline_output_i(frame, NULL) == 1);
+    free(frame);
+    return 0;
+}
+''')
+        for microphones in (2, 4):
+            for rate_factor in (1, 3):
+                binary = self.directory / f"speaker_channels_{microphones}_{rate_factor}"
+                subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+                    "-fsanitize=address,undefined", f"-DappconfAUDIO_PIPELINE_CHANNELS={microphones}",
+                    f"-DRATE_FACTOR={rate_factor}", str(harness), "-o", str(binary)], check=True)
+                subprocess.run([str(binary)], check=True, timeout=10)
+
     def capture_fixture(self, name, overflow=False):
         output = self.directory / f"{name}.wav"
         manifest = self.directory / "bench-manifest.json"
@@ -263,39 +310,79 @@ static int32_t src_us3_voice_get_next_sample(int32_t *s, const int32_t *c) {(voi
 static unsigned prev_n_bytes_received;
 static bool host_streaming_out, mic_interface_open = true;
 static void *samples_to_host_stream_buf;
-static unsigned char input[240 * 12 * 4 * 2], written[16 * 12 * 4];
-static size_t cursor, calls, drops;
-static bool stop_reading;
+static unsigned char input[240 * 12 * 4 * 2], written[17 * 12 * 4];
+static size_t cursor, calls, drops, resets, written_size;
+static size_t available = sizeof(input);
+static bool stop_reading, full, drift_run;
 static void sat1_bench_usb_drop(void) {drops++;}
-static int xStreamBufferIsFull(void *s) {(void)s;return 0;}
-static void xStreamBufferReset(void *s) {(void)s;}
-static size_t xStreamBufferBytesAvailable(void *s) {(void)s;return sizeof(input);}
+#define xStreamBufferIsFull(s) full
+#define xStreamBufferReset(s) (resets++)
+static size_t xStreamBufferBytesAvailable(void *s) {(void)s;return available;}
 static size_t xStreamBufferReceive(void *s, void *dest, size_t count, unsigned wait) {
     (void)s;(void)wait;
-    assert(++calls < 100);
+    ++calls;
     if (stop_reading && calls == 2) return 0;
     size_t n = count > 17 ? 17 : count;
-    memcpy(dest, input + cursor, n); cursor += n; return n;
+    assert(n <= available);
+    if (drift_run) {
+        for (size_t i = 0; i < n; ++i) ((unsigned char *)dest)[i] = (unsigned char)((cursor + i) * 37);
+    } else {
+        memcpy(dest, input + cursor, n);
+    }
+    cursor += n; available -= n; return n;
 }
-static void tud_audio_write(const void *data, size_t size) {
-    assert(size == sizeof(written)); memcpy(written, data, size);
+static uint16_t tud_audio_write(const void *data, size_t size) {
+    assert(size <= sizeof(written)); written_size = size;
+    memcpy(written, data, size); return (uint16_t)size;
 }
 ''' + callback + r'''
 int main(void) {
     for (size_t i = 0; i < sizeof(input); ++i) input[i] = (unsigned char)(i * 37);
     assert(tud_audio_tx_done_pre_load_cb(0, 0, 0, 0));
-    assert(memcmp(input, written, sizeof(written)) == 0 && drops == 0);
-    stop_reading = true; calls = 0; cursor = 0;
+    assert(written_size == 16 * 12 * 4 && memcmp(input, written, written_size) == 0 && drops == 0);
+    stop_reading = true; calls = 0; cursor = 0; available = sizeof(input);
     assert(tud_audio_tx_done_pre_load_cb(0, 0, 0, 0));
     assert(drops == 1 && memcmp(input, written, 17) == 0);
-    for (size_t i = 17; i < sizeof(written); ++i) assert(written[i] == 0);
+    for (size_t i = 17; i < written_size; ++i) assert(written[i] == 0);
+    /* A full capture buffer must drain, preserving its samples. */
+    stop_reading = false; full = true; calls = cursor = drops = 0;
+    available = 3 * 240 * 12 * 4;
+    assert(tud_audio_tx_done_pre_load_cb(0, 0, 0, 0));
+    assert(resets == 0 && drops == 0 && written_size == 17 * 12 * 4);
+    assert(memcmp(input, written, written_size) == 0);
+    /* Starvation is reported even when the callback can pad a packet. */
+    full = false; calls = cursor = drops = 0; available = 8 * 12 * 4;
+    assert(tud_audio_tx_done_pre_load_cb(0, 0, 0, 0));
+    assert(drops == 1 && written_size == 15 * 12 * 4);
+    for (size_t i = 8 * 12 * 4; i < written_size; ++i) assert(written[i] == 0);
+    /* Run the actual callback against frame-sized arrivals from clocks at
+     * +/-2000 ppm for 30 seconds each. Check every byte and bounded fill. */
+    drift_run = true;
+    for (unsigned rate = 15968; rate <= 16032; rate += 64) {
+        unsigned phase = 0;
+        size_t emitted = 0;
+        calls = cursor = drops = 0; available = 2 * 240 * 12 * 4;
+        for (unsigned ms = 0; ms < 30000; ++ms) {
+            phase += rate;
+            if (phase >= 240000) {
+                available += 240 * 12 * 4;
+                phase -= 240000;
+            }
+            assert(available <= 3 * 240 * 12 * 4);
+            assert(tud_audio_tx_done_pre_load_cb(0, 0, 0, 0));
+            assert(written_size >= 15 * 12 * 4 && written_size <= 17 * 12 * 4);
+            for (size_t i = 0; i < written_size; ++i) assert(written[i] == (unsigned char)((emitted + i) * 37));
+            emitted += written_size;
+            assert(drops == 0 && resets == 0);
+        }
+    }
     return 0;
 }
 ''')
         binary = self.directory / "usb_read"
         subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
                         "-fsanitize=address,undefined", str(harness), "-o", str(binary)], check=True)
-        subprocess.run([str(binary)], check=True, timeout=10)
+        subprocess.run([str(binary)], check=True, timeout=20)
 
 
 if __name__ == "__main__":

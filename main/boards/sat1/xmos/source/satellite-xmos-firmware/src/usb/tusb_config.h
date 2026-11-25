@@ -168,6 +168,9 @@ extern const uint16_t tud_audio_desc_lengths[CFG_TUD_AUDIO];
 #if appconfSAT1_AUDIO_BENCH
 /* Capture only: playback remains driven by the native ESP32 I2S source. */
 #define CFG_TUD_AUDIO_ENABLE_EP_OUT                 0
+/* The callback sizes packets from the DSP capture queue. A second controller
+ * acting on the one-packet TinyUSB FIFO would change those packet lengths. */
+#define CFG_TUD_AUDIO_EP_IN_FLOW_CONTROL            0
 #else
 #define CFG_TUD_AUDIO_ENABLE_EP_OUT                 1
 #endif
