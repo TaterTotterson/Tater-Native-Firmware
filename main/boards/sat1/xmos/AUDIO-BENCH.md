@@ -488,3 +488,95 @@ and release selection remain unchanged.
 | ESP32-controlled restart and sixty-second recovery | Not run | Not run | Dedicated-link image passed |
 | Full power cycle, playback/wake and post-boot minute | Not run | Not run | Dedicated-link image passed once |
 | Comparative acoustic quality / release qualification | Pending | Pending | Pending |
+
+## Fractional steering timing follow-up — November 25
+
+The fractional-delay filter now calculates its Q8 polynomial coefficients in
+32 bits, retains the single 64-bit rational accumulation, and uses a bounded
+XS3A `ldivu` operation for the final divide. Saturation, truncation, half-way
+rounding, integer delays, steering transitions, microphone gains and health
+selection retain the previous sample values. The portable host path retains
+the C division. This reduces computation; it does not change the acoustic
+filter or add a new enhancement stage.
+
+The differential test retains the original rational filter as a reference.
+Host AddressSanitizer/UndefinedBehaviorSanitizer checks passed 10,519 divides,
+30,986 interpolation cases and 512 complete frames. XS3A simulation passed
+919 divides, 16,650 interpolation cases and 256 complete frames, including
+the actual divide instruction. Both exercise all 256 fractional positions,
+all microphone masks, full-scale signed samples, saturation, history edges,
+short frames, changing directions and direction hold/release. The host uses
+more random repetitions to bound cycle-accurate target simulation time.
+
+| Single-thread simulator beam workload | Original arithmetic (ms) | Optimized (ms) |
+| --- | --- | --- |
+| Integer delay | 0.876 | 0.915 |
+| Half-sample steering | 8.451 | 1.775 |
+| Quarter-sample steering | 8.548 | 1.779 |
+| Changing fractional direction | 8.530 | 1.776 |
+
+These full-range vectors produce identical output samples. The test enforces
+a 2.5 ms beam budget and at least a twofold fractional-path speedup. The real
+4Y1X AEC + raw direction/calibration + residual beam simulator also passed
+48 frames and three initializations, with twelve explicit fractional/transition
+frames and a 9.9345 ms maximum against its 12 ms simulator budget. These
+single-thread limits do not replace a whole-system hardware deadline check.
+
+The first diagnostic image reached flash progress 100% but failed subsequent
+XMOS version/startup verification. Its factory SHA-256 starts `a61f8071983ad9e6`.
+The previously validated normal image was restored, and live microphone data
+and increasing DSP counters were verified before another attempt.
+
+Diagnostic startup was then changed to omit its unused USB intertile link.
+Capture-only USB writes a local stream buffer and does not use that link;
+DSP, I2S/control and CDC retain separate links. The SDK's actual streaming
+channel establishment was also checked on a two-tile simulator: three
+persistent links allow an additional control roundtrip, while four establish
+successfully but leave the additional transfer blocked until the cycle limit.
+A regression covers both outcomes and the bench initialization layout.
+The revised diagnostic image booted and verified successfully on the board.
+
+The revised dev.11 factory SHA-256 is
+`724456e6c151f764b0a8a56269eeebd655a40a89b375e0f147c7a9b02e436bf9`;
+its native application SHA-256 is
+`5abae3ad30cd05f98a7ae557dc4f323842d292a3924c438aba222dd99d178731`.
+Over approximately four minutes of stage observations, AEC plus beam completed
+16,057 calls with a 9.66906 ms maximum and zero completed calls above 15 ms.
+Post-AEC beam processing reached 1.65761 ms maximum, versus 7.37192 ms in the
+earlier run; those hardware runs used different live inputs and are not a
+controlled acoustic A/B comparison. Beam lock wait peaked at 0.04004 ms.
+Minimum heap was 23,760 bytes on tile 1 and 31,064 on tile 0, with zero reported
+USB drops. A ninety-second capture passed continuity checks with 5,999 complete
+DSP frames. Backend telemetry included valid non-integer steering delays
+`[458, 566, 516, 508]`, and a separate 180-second observation recorded 12,111
+additional DSP frames with no read errors, missing counters or driver errors.
+No music was active and no wake detections were recorded in this window;
+the prompted user voice/movement trial has not been confirmed.
+
+The matching normal dev.3 factory SHA-256 is
+`bf9271f8ca279c7433db89912422b1681e9c7c4fecee9a9be3764f0491af225a`;
+the prepared native application SHA-256 is
+`22aa2c5b6dc715b1b3e187b1e4005bd2c370c6838f765a270b934f29995b4607`.
+This normal image was installed through the dev.11-to-dev.3 version transition;
+native status confirmed completed installation, live microphones and a ready
+wake engine. A sixty-second observation passed with 4,038 additional direction
+frames, twelve status samples and zero missing/read/driver errors. An ESP32
+restart then retained dev.3 and skipped reflashing; a 14.06-second follow-up
+recorded 1,009 additional direction frames, changing microphone data and a
+ready wake engine. Music/playback and audible voice confirmation for this
+image are pending. The previous thirty-minute music and cold cycle results
+apply to the earlier `c0623bf4` image. Default production assets remain
+unchanged; these observations do not establish a worst-case guarantee,
+recognition accuracy, moving-talker quality, or release qualification.
+
+To reproduce the arithmetic, link-budget and channel-contract checks from the
+repository root with pytest and the XMOS tool environment available:
+
+```sh
+python -m pytest -q \
+  main/boards/sat1/xmos/source/tests/test_aec_4y/test_beamformer_math.py \
+  main/boards/sat1/xmos/source/tests/test_aec_4y/test_pipeline_contract.py
+```
+
+All fifteen checks passed, as did the 22 audio-bench host checks, the existing
+DoA/beamformer host tests, both XMOS builds and both native builds.

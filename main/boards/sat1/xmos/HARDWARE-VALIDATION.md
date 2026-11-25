@@ -144,3 +144,17 @@ This standard release image remains installed. These checks retain the same
 limits as the earlier functional checks; no additional acoustic or repeated
 cold-boot qualification is claimed. Local records are in the ignored
 `release_assets/sat1-r1-checks/` directory.
+
+## November 25 fractional-steering timing candidate
+
+The later bench work is recorded in [AUDIO-BENCH.md](AUDIO-BENCH.md). The test
+unit now has the optimized normal dev.3 image, factory SHA-256
+`bf9271f8ca279c7433db89912422b1681e9c7c4fecee9a9be3764f0491af225a`,
+native application SHA-256
+`22aa2c5b6dc715b1b3e187b1e4005bd2c370c6838f765a270b934f29995b4607`.
+The diagnostic build recorded approximately four minutes of AEC-plus-beam
+calls with a 9.66906 ms maximum and zero calls above 15 ms. The installed
+normal build passed startup, a sixty-second quiet progress check and one
+ESP32-controlled restart that skipped reflashing. Audible playback and voice
+confirmation for this image are pending. Default production assets are
+unchanged; prior images' music and cold-power-cycle results remain separate.

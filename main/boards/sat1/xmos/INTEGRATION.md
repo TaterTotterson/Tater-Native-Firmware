@@ -107,6 +107,15 @@ starts with `c0623bf46d9519f4`; it differs from the earlier failed dev.3 image.
 The limited passes below apply to that specific image on one board, with the
 internal speaker. They do not complete the broader acceptance counts.
 
+The later fractional-steering timing candidate uses factory SHA-256
+`bf9271f8ca279c74`. Its diagnostic build measured a 9.66906 ms AEC-plus-beam
+maximum with no calls above 15 ms over roughly four minutes, plus bit-exact
+host/target comparisons. Its normal build passed startup, one quiet minute
+and an ESP32 restart; music and audible voice confirmation are pending.
+These results are recorded separately in [AUDIO-BENCH.md](AUDIO-BENCH.md).
+The acceptance table below retains the earlier `c0623bf4` image's results;
+its thirty-minute music and cold-cycle passes do not transfer to the new image.
+
 | Check | Acceptance | Result |
 | --- | --- | --- |
 | Installed identity and both mic streams | Expected dev version; live samples on both streams | Dedicated-link dev.3 live through music and reboots; earlier dev.2/dev.3 failed |

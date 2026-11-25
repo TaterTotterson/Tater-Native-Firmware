@@ -33,6 +33,34 @@ static int32_t saturate_i32(int64_t value)
     return (int32_t)value;
 }
 
+/* Positive divisor; preserve C's truncation toward zero before saturation. */
+static int32_t divide_saturate_i32(int64_t numerator, uint32_t divisor)
+{
+    if (numerator > (int64_t)INT32_MAX * divisor) {
+        return INT32_MAX;
+    }
+    if (numerator < (int64_t)INT32_MIN * divisor) {
+        return INT32_MIN;
+    }
+#if defined(__XS3A__)
+    /*
+     * The bounded quotient fits ldivu's 32-bit result. These clamps also
+     * exclude INT64_MIN and guarantee that the high word is below divisor.
+     * Avoid the general signed 64-bit software divide in every fractional sample.
+     */
+    uint64_t magnitude = numerator < 0 ? (uint64_t)(-numerator)
+                                       : (uint64_t)numerator;
+    uint32_t quotient, remainder;
+    __asm__("ldivu %0, %1, %2, %3, %4"
+            : "=&r"(quotient), "=&r"(remainder)
+            : "r"((uint32_t)(magnitude >> 32)), "r"((uint32_t)magnitude),
+              "r"(divisor));
+    return numerator < 0 ? (int32_t)(-(int64_t)quotient) : (int32_t)quotient;
+#else
+    return (int32_t)(numerator / divisor);
+#endif
+}
+
 static int16_t clamp_delay_q8(int32_t delay_q8)
 {
     if (delay_q8 < 0) {
@@ -77,30 +105,34 @@ static int32_t fractional_delay_sample(
     int32_t sample1 = sample_at(input, history, newest_index - 1);
     int32_t sample2 = sample_at(input, history, newest_index - 2);
     int32_t sample3 = sample_at(input, history, newest_index - 3);
-    int64_t scale = DOA_ESTIMATOR_LAG_Q8_SCALE;
-    int64_t fraction = fraction_q8;
+    int32_t scale = DOA_ESTIMATOR_LAG_Q8_SCALE;
+    int32_t fraction = fraction_q8;
 
     /*
      * Four-point causal Lagrange interpolation. Keeping the polynomial in
      * one rational expression avoids quantizing each tap independently and
      * preserves both DC and linear ramps exactly at Q8 delay positions.
      */
-    int64_t numerator =
-        (int64_t)sample0 * (scale - fraction) *
-            ((2 * scale) - fraction) * ((3 * scale) - fraction) +
-        (int64_t)sample1 * 3 * fraction *
-            ((2 * scale) - fraction) * ((3 * scale) - fraction) -
-        (int64_t)sample2 * 3 * fraction *
-            (scale - fraction) * ((3 * scale) - fraction) +
-        (int64_t)sample3 * fraction *
-            (scale - fraction) * ((2 * scale) - fraction);
-    const int64_t denominator = 6 * scale * scale * scale;
+    /* Q8 coefficients fit int32; accumulate sample products in int64. */
+    int32_t coefficient0 =
+        (scale - fraction) * (2 * scale - fraction) * (3 * scale - fraction);
+    int32_t coefficient1 =
+        3 * fraction * (2 * scale - fraction) * (3 * scale - fraction);
+    int32_t coefficient2 =
+        -3 * fraction * (scale - fraction) * (3 * scale - fraction);
+    int32_t coefficient3 =
+        fraction * (scale - fraction) * (2 * scale - fraction);
+    int64_t numerator = (int64_t)sample0 * coefficient0 +
+                        (int64_t)sample1 * coefficient1 +
+                        (int64_t)sample2 * coefficient2 +
+                        (int64_t)sample3 * coefficient3;
+    const uint32_t denominator = 6U * scale * scale * scale;
     if (numerator >= 0) {
         numerator += denominator / 2;
     } else {
         numerator -= denominator / 2;
     }
-    return saturate_i32(numerator / denominator);
+    return divide_saturate_i32(numerator, denominator);
 }
 
 static uint32_t frame_mean_abs(const int32_t *samples,
