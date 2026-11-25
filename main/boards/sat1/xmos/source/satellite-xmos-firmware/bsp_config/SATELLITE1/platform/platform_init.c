@@ -244,6 +244,7 @@ static void usb_cdc_init(){
 void platform_init(chanend_t other_tile_c)
 {
     rtos_intertile_init(intertile_ctx, other_tile_c);
+    rtos_intertile_init(intertile_audio_ctx, other_tile_c);
 #if appconfUSB_AUDIO_ENABLED
     rtos_intertile_init(intertile_usb_audio_ctx, other_tile_c);
 #endif

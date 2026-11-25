@@ -89,7 +89,7 @@ typedef struct {
 #define NS_FRAME_ADVANCE 240
 typedef struct { int32_t mant; int exp; } float_s32_t;
 ''' + config + r'''
-static void *mic_array_ctx, *i2s_ctx, *ref_input_queue, *intertile_ctx;
+static void *mic_array_ctx, *i2s_ctx, *ref_input_queue, *intertile_ctx, *intertile_audio_ctx;
 #define SPEAKER_PIPELINE_TILE_NO 1
 static void *expected_mic;
 static unsigned input_step, frame_index;

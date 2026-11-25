@@ -183,7 +183,7 @@ int main(void) {
         config = re.sub(r'^#include .*$', '', (SRC / "app_conf.h").read_text(), flags=re.M)
         pipelines = SRC.parent / "audio_pipelines/reference"
         for enabled in (0, 1):
-            expected = "intertile_usb_audio_ctx" if enabled else "intertile_ctx"
+            expected = "intertile_audio_ctx"
             for layout in ("fixed_delay", "fixed_delay4"):
                 source = config + "\n" + "\n".join(
                     re.sub(r'^#include .*$', '', (pipelines / layout / f"audio_pipeline_t{tile}.c").read_text(), flags=re.M)
@@ -241,6 +241,34 @@ int main(void) {
                     "-fsanitize=address,undefined", f"-DappconfAUDIO_PIPELINE_CHANNELS={microphones}",
                     f"-DRATE_FACTOR={rate_factor}", str(harness), "-o", str(binary)], check=True)
                 subprocess.run([str(binary)], check=True, timeout=10)
+
+    def test_normal_dsp_backpressure_does_not_block_i2s_reply(self):
+        def function(source, signature):
+            start = source.index(signature)
+            opening = source.index("{", start)
+            depth, end = 1, opening + 1
+            while depth:
+                depth += (source[end] == "{") - (source[end] == "}")
+                end += 1
+            return source[start:end]
+
+        intertile = (SRC.parents[1] / "modules/rtos/modules/drivers/intertile/src/rtos_intertile.c").read_text()
+        tx = function(intertile, "void rtos_intertile_tx(")
+        config = re.sub(r'^#include .*$', '', (SRC / "app_conf.h").read_text(), flags=re.M)
+        for layout in ("fixed_delay", "fixed_delay4"):
+            pipeline = (SRC.parent / f"audio_pipelines/reference/{layout}/audio_pipeline_t1.c").read_text()
+            callback = function(pipeline, "static int audio_pipeline_output_i(")
+            expanded = subprocess.run([shutil.which("cc"), "-E", "-P", "-x", "c",
+                "-DappconfSAT1_AUDIO_BENCH=0", "-DON_TILE(n)=1",
+                "-DMIC_ARRAY_CONFIG_MIC_COUNT=4", "-DMIC_ARRAY_CONFIG_SAMPLES_PER_FRAME=240", "-"],
+                input=config + "\n" + callback, text=True, capture_output=True, check=True).stdout
+            (self.directory / "sat1_audio_rpc_callbacks.inc").write_text(tx + "\n" + expanded)
+            binary = self.directory / f"audio_rpc_{layout}"
+            subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+                "-Wno-unused-parameter", "-pthread", "-fsanitize=address,undefined",
+                "-D_POSIX_C_SOURCE=200809L", "-I", str(self.directory),
+                str(ROOT / "main/tests/test_sat1_audio_rpc_progress_host.c"), "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True, timeout=5)
 
     def test_speaker_backpressure_keeps_only_one_transport_frame_live(self):
         generic = (ROOT / "main/boards/sat1/xmos/source/modules/rtos/modules/sw_services/generic_pipeline/src/generic_pipeline.c").read_text()
@@ -328,6 +356,8 @@ int main(void) {
                     self.assertEqual(compact.count("rtos_intertile_start(intertile_cdc_ctx)"), cdc)
                     self.assertIn("rtos_intertile_init(intertile_ctx,", compact)
                     self.assertIn("rtos_intertile_start(intertile_ctx)", compact)
+                    self.assertEqual(compact.count("rtos_intertile_init(intertile_audio_ctx,"), 1)
+                    self.assertEqual(compact.count("rtos_intertile_start(intertile_audio_ctx)"), 1)
                     self.assertEqual(compact.count("rtos_intertile_init(intertile_usb_audio_ctx,"), usb_audio)
                     if cdc and tile == 0:
                         self.assertIn("client_intertile_ctx[1]={intertile_cdc_ctx}", compact)

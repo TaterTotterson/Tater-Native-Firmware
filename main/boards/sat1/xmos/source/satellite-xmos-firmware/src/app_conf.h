@@ -25,15 +25,11 @@
 #ifndef appconfSAT1_AUDIO_BENCH
 #define appconfSAT1_AUDIO_BENCH 0
 #endif
-/* Bench USB is capture-only, leaving its intertile link unused. Keep bounded
- * DSP transfers off the RPC link: a blocked audio send must not hold the lock
+/* Keep DSP transfers off the RPC link in normal and bench builds alike:
+ * a blocked audio send must not hold the lock
  * needed by the I2S response that lets the receiving pipeline release a frame.
  */
-#if appconfSAT1_AUDIO_BENCH
-#define appconfAUDIOPIPELINE_INTERTILE_CTX intertile_usb_audio_ctx
-#else
-#define appconfAUDIOPIPELINE_INTERTILE_CTX intertile_ctx
-#endif
+#define appconfAUDIOPIPELINE_INTERTILE_CTX intertile_audio_ctx
 #ifndef appconfSAT1_POST_AEC_BEAM
 #define appconfSAT1_POST_AEC_BEAM 0
 #endif

@@ -199,14 +199,16 @@ stack covers the larger callback plus the passthrough stage, since the input
 and output callbacks do not nest. This change also applies to bench-disabled
 builds; it does not change the embedded production firmware asset.
 
-Bench DSP frames use the otherwise unused USB-audio intertile link. I2S RPC
-retains its original link; enabled CDC uses its own link and serializes each
-client request through receipt of its response. A blocked DSP send on a shared link can hold
+DSP frames use a dedicated audio intertile link in both normal and bench
+builds. I2S RPC retains its control link; enabled CDC uses another link and
+serializes each client request through receipt of its response. A blocked DSP
+send on a shared link can hold
 its transmit lock while tile 0 waits for an I2S reply before releasing a frame;
 the reply then waits for that same transmit lock. Separate links allow RPC to
-complete while the frame pool applies backpressure. Capture-only bench builds
-do not start a USB playback forwarding task on the reserved link. Normal
-builds retain their existing transport selection.
+complete while the receiving pipeline applies backpressure. USB audio retains
+its own context. Both tiles initialize/start the audio link independently of
+USB audio or CDC settings. Capture-only bench builds do not start a USB
+playback forwarding task.
 
 Raw calibration and post-AEC processing share beam state, but direction
 correlation runs outside that mutex. The capture task publishes a completed
@@ -243,7 +245,7 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
 
 ## Software verification, November 25, 2026
 
-- Twenty-one host tests pass, including the actual C snapshot/packing code,
+- Twenty-two host tests pass, including the actual C snapshot/packing code,
   counter/timer wraparound, corrupt/drop/repeat detection, host overflow,
   exclusive recording files, fixed-pool ownership, audio/RPC link selection in
   both layouts and build modes, and sanitized USB partial/empty-read handling.
@@ -266,6 +268,12 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
   may remain live; after release, all 64 frames must arrive in order and be
   freed. The original two-stage source compiles but fails this backpressure
   regression.
+  A separate concurrent regression runs the actual DSP output callback and
+  SDK intertile TX implementation with a blocked audio receiver. The I2S reply
+  must complete before the receiver releases its frame. Both pipeline layouts
+  pass; the original shared-link normal configuration compiles but deadlocks
+  and fails the bounded assertion. This reproduces the transport hazard, not
+  the exact instruction that caused a physical failure.
 - All eleven existing channel-contract tests pass, including four xcore cases.
   Direction/beam, native protocol, recognition routing, updater and playback
   wake-policy regressions pass.
@@ -410,6 +418,23 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
   observed progress loss or status-read errors. This does not test a cold
   power cycle. Music was not started during this session; sustained playback
   and manual wake/answer checks on the revised normal image remain pending.
+
+- The following music test first stopped after 481.4 seconds because one
+  backend status omitted the direction-counter object. Microphone samples
+  remained variable and subsequent direction counters advanced normally,
+  with Sendspin active and no playback-driver errors. This was an observer
+  failure, not demonstrated DSP failure. The observer now preserves the last
+  valid counter across omissions and retains its fifteen-second progress
+  timeout. The original attempt remains saved as an incomplete observation.
+- A fresh music run then failed after 400.2 seconds. The direction counter
+  froze at 118,075, microphone samples became constant +23 and features were
+  all -128. It then restarted at 169 while ESP32 uptime continued increasing;
+  one playback write failure was reported and the stream ended. This is a
+  physical processing failure/reset, despite the preceding quiet passes.
+  The original dev.8 application was restored and live microphone data verified.
+  The subsequent dedicated-audio-link change above removes the known
+  normal-build RPC/audio lock cycle; hardware qualification of that change is
+  still pending. No sustained music or manual voice pass is established.
 
 | Basic hardware check | beam_ic | aec4 | aec4_beam |
 | --- | --- | --- | --- |
