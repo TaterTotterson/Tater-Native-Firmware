@@ -155,6 +155,9 @@ native application SHA-256
 The diagnostic build recorded approximately four minutes of AEC-plus-beam
 calls with a 9.66906 ms maximum and zero calls above 15 ms. The installed
 normal build passed startup, a sixty-second quiet progress check and one
-ESP32-controlled restart that skipped reflashing. Audible playback and voice
-confirmation for this image are pending. Default production assets are
-unchanged; prior images' music and cold-power-cycle results remain separate.
+ESP32-controlled restart that skipped reflashing. The user confirmed audible
+music and wake/spoken answers from nearby and opposite positions. A subsequent
+180-second music-required observation passed with 34 samples, 11,500 additional
+DSP frames, live microphone data and no observed resets or playback driver
+errors. Default production assets are unchanged; prior images' longer music
+and cold-power-cycle results remain separate.

@@ -563,11 +563,18 @@ wake engine. A sixty-second observation passed with 4,038 additional direction
 frames, twelve status samples and zero missing/read/driver errors. An ESP32
 restart then retained dev.3 and skipped reflashing; a 14.06-second follow-up
 recorded 1,009 additional direction frames, changing microphone data and a
-ready wake engine. Music/playback and audible voice confirmation for this
-image are pending. The previous thirty-minute music and cold cycle results
-apply to the earlier `c0623bf4` image. Default production assets remain
-unchanged; these observations do not establish a worst-case guarantee,
-recognition accuracy, moving-talker quality, or release qualification.
+ready wake engine. The user then confirmed audible music and wake/spoken
+answers from the nearby and opposite positions on this normal image; status
+recorded three wake detections since the restart. A subsequent 180-second
+music-required observation passed with 34 status samples and 11,500 additional
+direction frames. Every sampled status reported music active and changing
+microphone samples, with zero read errors, missing counters, observed resets,
+or playback write/render/starvation errors. Wake detections stayed at three
+during this follow-up. This is a short playback and basic voice check on one
+board. The previous thirty-minute music and cold cycle results apply to the
+earlier `c0623bf4` image. Default production assets remain unchanged; these
+observations do not establish a worst-case guarantee, recognition accuracy,
+moving-talker quality, or release qualification.
 
 To reproduce the arithmetic, link-budget and channel-contract checks from the
 repository root with pytest and the XMOS tool environment available:

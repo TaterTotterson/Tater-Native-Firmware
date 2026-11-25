@@ -111,7 +111,9 @@ The later fractional-steering timing candidate uses factory SHA-256
 `bf9271f8ca279c74`. Its diagnostic build measured a 9.66906 ms AEC-plus-beam
 maximum with no calls above 15 ms over roughly four minutes, plus bit-exact
 host/target comparisons. Its normal build passed startup, one quiet minute
-and an ESP32 restart; music and audible voice confirmation are pending.
+and an ESP32 restart. The user confirmed audible music and nearby/opposite
+wake/spoken answers, followed by a three-minute playback observation with
+live DSP/microphone data and no observed reset or playback driver errors.
 These results are recorded separately in [AUDIO-BENCH.md](AUDIO-BENCH.md).
 The acceptance table below retains the earlier `c0623bf4` image's results;
 its thirty-minute music and cold-cycle passes do not transfer to the new image.
