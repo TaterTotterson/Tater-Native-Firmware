@@ -56,9 +56,9 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
                                appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE);
 }
 
-void empty_stage(void)
+static void passthrough_stage(void *frame_data)
 {
-    ;
+    (void)frame_data;
 }
 
 static void initialize_pipeline_stages(void)
@@ -70,16 +70,23 @@ void speaker_pipeline_init(
     void *input_app_data,
     void *output_app_data)
 {
-    const int stage_count = 2;
+    /* Input and output are already the complete passthrough operation. Two
+     * no-op stages allow the generic queue to retain two stereo frames in
+     * addition to the producer's and consumer's frames. Reference backpressure
+     * can therefore raise live 48 kHz transport storage from 5,760 to 23,040
+     * bytes. Keep one frame in flight and let I2S apply backpressure directly.
+     */
+    const int stage_count = 1;
 
     const pipeline_stage_t stages[] = {
-        (pipeline_stage_t)empty_stage,
-        (pipeline_stage_t)empty_stage,
+        passthrough_stage,
     };
 
+    const configSTACK_DEPTH_TYPE input_stack = RTOS_THREAD_STACK_SIZE(audio_pipeline_input_i);
+    const configSTACK_DEPTH_TYPE output_stack = RTOS_THREAD_STACK_SIZE(audio_pipeline_output_i);
     const configSTACK_DEPTH_TYPE stage_stack_sizes[] = {
-        configMINIMAL_STACK_SIZE + RTOS_THREAD_STACK_SIZE(empty_stage) + RTOS_THREAD_STACK_SIZE(audio_pipeline_input_i),
-        configMINIMAL_STACK_SIZE + RTOS_THREAD_STACK_SIZE(empty_stage) + RTOS_THREAD_STACK_SIZE(audio_pipeline_output_i),
+        configMINIMAL_STACK_SIZE + RTOS_THREAD_STACK_SIZE(passthrough_stage) +
+            (input_stack > output_stack ? input_stack : output_stack),
     };
 
     initialize_pipeline_stages();

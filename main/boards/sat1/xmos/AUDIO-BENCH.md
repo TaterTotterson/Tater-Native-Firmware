@@ -1,9 +1,10 @@
 # Satellite1 audio bench
 
-This first milestone adds synchronized diagnostic capture and stage telemetry.
-It does not replace the production audio pipeline or fix the four-mic AEC
-hardware stalls. The normal `sat1` target still embeds dev.8. Bench images are
-excluded from release packaging.
+This milestone adds synchronized diagnostic capture, stage telemetry and
+backpressure/memory corrections. The hardware results below distinguish short
+functional checks from sustained processing and playback qualification. The
+default `sat1` target still embeds dev.8; bench images are excluded from release
+packaging.
 
 ## Build
 
@@ -29,6 +30,22 @@ the linked identity, CMake bench setting, factory MD5 and compression round trip
 Outputs and provenance go into ignored `xmos/bench_candidates/`; the matching
 native host embeds that image and identity so it survives the host's boot-time
 XMOS version check.
+
+For a normal image without USB capture or stage telemetry, rebuild and package
+that XMOS variant before building its native host:
+
+```sh
+SAT1_XMOS_AUDIO_BENCH=0 SAT1_XMOS_PIPELINE=aec4_beam \
+  bash main/boards/sat1/xmos/source/build_sat1_fixed_delay.sh
+python3 main/boards/sat1/xmos/source/scripts/package_candidates.py aec4_beam
+pio run -e sat1_xmos_aec4_beam
+```
+
+The native build embeds the packaged candidate; running only `pio` does not
+rebuild XMOS source. Normal packaging regenerates the selected tracked
+`xmos/candidates/` assets. The default `sat1` target still embeds production
+dev.8. Save the exact native image, manifest and factory payload for each
+hardware comparison.
 
 Boot normally compares version bytes, not an image hash. When rebuilding a lab
 image with the same dev counter, install the normal native image between bench
@@ -170,7 +187,17 @@ task waits for a returned buffer when the pool is occupied. Ownership returns
 to the pool after intertile transmission or final output; the generic pipeline
 must not free these buffers. Compile-time checks bound each profile's frame
 size. Bench-only heap budgets are 120 KiB on tile 1 and 144 KiB on tile 0;
-normal builds retain their existing heap budgets and allocation behavior.
+normal builds retain their existing heap budgets and allocate DSP frames from
+the heap.
+
+Speaker passthrough uses a single generic stage. Input, reference preparation
+and output run sequentially with one stereo transport frame in flight. The
+former two no-op stages added a queue that could retain two more frames while
+the producer and consumer each owned one: up to 23,040 bytes at 48 kHz instead
+of 5,760. Reference backpressure now stops the next input allocation. The task
+stack covers the larger callback plus the passthrough stage, since the input
+and output callbacks do not nest. This change also applies to bench-disabled
+builds; it does not change the embedded production firmware asset.
 
 Bench DSP frames use the otherwise unused USB-audio intertile link. I2S RPC
 retains its original link; enabled CDC uses its own link and serializes each
@@ -216,7 +243,7 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
 
 ## Software verification, November 25, 2026
 
-- Twenty host tests pass, including the actual C snapshot/packing code,
+- Twenty-one host tests pass, including the actual C snapshot/packing code,
   counter/timer wraparound, corrupt/drop/repeat detection, host overflow,
   exclusive recording files, fixed-pool ownership, audio/RPC link selection in
   both layouts and build modes, and sanitized USB partial/empty-read handling.
@@ -234,6 +261,11 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
   writers, checks full request/response serialization and bounded formatting,
   and fails against the original driver. CDC wiring is also checked on both
   tiles with USB audio and CDC independently enabled/disabled.
+  The real speaker and generic pipelines also run together with a blocked
+  output callback, at 16 and 48 kHz, under sanitizers. Only one transport frame
+  may remain live; after release, all 64 frames must arrive in order and be
+  freed. The original two-stage source compiles but fails this backpressure
+  regression.
 - All eleven existing channel-contract tests pass, including four xcore cases.
   Direction/beam, native protocol, recognition routing, updater and playback
   wake-policy regressions pass.
@@ -337,10 +369,54 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
   XMOS dev.8, a completed update, and varying microphone samples/features.
   Experimental changes remain off the device. No fifteen-minute candidate
   stability run has passed; another manual music comparison must wait for one.
+- A subsequent comparison reinstalled the exact saved earlier beam image,
+  before the timing/CDC changes. No ESP32 serial logger was opened and no music
+  was playing. Its first twenty-second probe passed, but the next five-second
+  probe contained 80,000 zero sample frames. The run failed at 67.3 seconds;
+  output stopped near 6,380 DSP frames including boot time. Tater's microphone
+  input was flat at -130, tile 0 waited in I2S output, and tile 1 reports stopped.
+  Tile 1 minimum-ever heap fell from 10,512 to 2,792 bytes near the failure;
+  AEC-plus-beam peaked at 17.1473 ms. This reproduces the failure without the
+  latest changes. It motivates the single-frame speaker path above but does
+  not prove an allocation failure. The original dev.8 recovery was verified
+  before installing unchanged plain four-mic AEC for the next comparison.
+- Unchanged plain four-mic AEC then passed a 900.7-second quiet processing run
+  with fifteen periodic USB probes (twenty seconds initially, then five seconds
+  each minute). All probes validated. Both tiles kept advancing, no USB drops
+  were reported, and tile 1 minimum-ever heap remained 10,512 bytes. AEC peaked
+  at 8.00615 ms with no completed calls above 15 ms. This is a quiet stability
+  result, not a continuous fifteen-minute waveform or a music/recognition score.
+- The revised beam image with single-frame speaker transport also passed
+  900.7 seconds and all fifteen periodic probes, with both tiles advancing and
+  zero reported USB drops. Tile 1 minimum-ever heap stayed at 23,664 bytes;
+  tile 0 minimum was 31,056. AEC-plus-beam peaked at 15.3737 ms, with forty
+  completed calls above 15 ms; post-beam work peaked at 7.37192 ms and its mutex
+  wait at 0.15242 ms. This supports the backpressure change's stability and
+  memory benefit in this run. It does not prove which instruction caused the
+  earlier stalls, or establish a full real-time deadline margin. Normal-build
+  playback and restart qualification are separate checks.
+- The matching bench-disabled beam image then passed a 900-second idle run.
+  Its XMOS direction-processing counter advanced by 59,851 frames across
+  171 backend status samples, with no observed counter/uptime reset, missing
+  progress, or status read errors. Native playback write/render/starvation
+  counters stayed zero. Sendspin was inactive throughout: this is not a music
+  playback result. Backend snapshots are cached, so the observed frame rate
+  includes status-sampling latency rather than measuring each DSP deadline.
+- An ESP32-controlled restart using a read-only MAC query plus hardware reset
+  retained the same normal beam image. Native uptime reset from 944 to 23
+  seconds and the XMOS direction counter restarted; the boot-time version check
+  skipped reflashing. A fresh sixty-second observation then passed with 4,038
+  additional direction-processing frames, varying microphone/features and no
+  observed progress loss or status-read errors. This does not test a cold
+  power cycle. Music was not started during this session; sustained playback
+  and manual wake/answer checks on the revised normal image remain pending.
 
 | Basic hardware check | beam_ic | aec4 | aec4_beam |
 | --- | --- | --- | --- |
 | Thirty-second capture continuity | Pass | Pass | Pass |
 | Answers from nearby/opposite positions (user report) | Both | Both | Both |
 | Ninety-second voice capture continuity | Invalid: ESP logging reset | Pass | Pass |
+| Fifteen-minute quiet processing / periodic captures | Not run | Pass | Revised image passed; earlier image failed |
+| Fifteen-minute normal build idle processing | Not run | Not run | Revised image passed |
+| ESP32-controlled restart and sixty-second recovery | Not run | Not run | Revised image passed |
 | Comparative acoustic quality / release qualification | Pending | Pending | Pending |

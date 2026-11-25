@@ -197,7 +197,7 @@ int main(void) {
 
     def test_speaker_buffers_remain_stereo_with_four_microphones(self):
         source = (SRC.parent / "audio_pipelines/speaker/passthrough/speaker_pipeline.c").read_text()
-        callbacks = source[source.index("#if appconfAUDIO_PIPELINE_FRAME_ADVANCE"):source.index("void empty_stage")]
+        callbacks = source[source.index("#if appconfAUDIO_PIPELINE_FRAME_ADVANCE"):source.index("static void passthrough_stage")]
         harness = self.directory / "speaker_channels.c"
         harness.write_text(r'''
 #include <assert.h>
@@ -241,6 +241,19 @@ int main(void) {
                     "-fsanitize=address,undefined", f"-DappconfAUDIO_PIPELINE_CHANNELS={microphones}",
                     f"-DRATE_FACTOR={rate_factor}", str(harness), "-o", str(binary)], check=True)
                 subprocess.run([str(binary)], check=True, timeout=10)
+
+    def test_speaker_backpressure_keeps_only_one_transport_frame_live(self):
+        generic = (ROOT / "main/boards/sat1/xmos/source/modules/rtos/modules/sw_services/generic_pipeline/src/generic_pipeline.c").read_text()
+        speaker = (SRC.parent / "audio_pipelines/speaker/passthrough/speaker_pipeline.c").read_text()
+        (self.directory / "sat1_speaker_pipeline.inc").write_text(
+            re.sub(r'^#include .*$', '', generic + "\n" + speaker, flags=re.M))
+        for factor in (1, 3):
+            binary = self.directory / f"speaker_backpressure_{factor}"
+            subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+                "-pthread", "-fsanitize=address,undefined", "-fno-sanitize=function",
+                "-D_POSIX_C_SOURCE=200809L", f"-DRATE_FACTOR={factor}", "-I", str(self.directory),
+                str(ROOT / "main/tests/test_sat1_speaker_backpressure_host.c"), "-o", str(binary)], check=True)
+            subprocess.run([str(binary)], check=True, timeout=10)
 
     def test_post_beam_does_not_wait_for_in_progress_direction_analysis(self):
         source = (SRC / "main.c").read_text()
