@@ -13,6 +13,59 @@ FIRMWARE = ROOT / "satellite-xmos-firmware"
 FIXED = FIRMWARE / "audio_pipelines/reference/fixed_delay4"
 
 
+@pytest.mark.parametrize("links", [3, 4])
+def test_streaming_links_leave_room_for_control_traffic(tmp_path, links):
+    """Four persistent routes can establish, then starve another tile transfer."""
+    compiler = shutil.which("xcc")
+    if not compiler or not shutil.which("xsim"):
+        pytest.skip("The XMOS compiler/simulator is required")
+    driver = (ROOT / "modules/rtos/modules/drivers/intertile/src/rtos_intertile.c").read_text()
+    start = driver.index("static chanend_t channel_establish(")
+    end = driver.index("\nvoid rtos_intertile_init(", start)
+    c_source = tmp_path / "links.c"
+    c_source.write_text(r'''
+#include <xcore/channel.h>
+#include <xcore/channel_transaction.h>
+#include <xcore/assert.h>
+#include <stdio.h>
+''' + driver[start:end] + r'''
+void run_links(chanend_t control) {
+    for (unsigned i = 0; i < LINK_COUNT; ++i)
+        (void)channel_establish(control);
+    printf("links_ready=%u\n", LINK_COUNT);
+    chanend_out_word(control, 1234);
+    chanend_out_end_token(control);
+    unsigned value = chanend_in_word(control);
+    chanend_check_end_token(control);
+    xassert(value == 1234);
+    puts("control_roundtrip_complete");
+}
+''')
+    xc_source = tmp_path / "main.xc"
+    xc_source.write_text(r'''
+#include <platform.h>
+extern void run_links(chanend c);
+int main(void) {
+    chan c;
+    par { on tile[0]: run_links(c); on tile[1]: run_links(c); }
+    return 0;
+}
+''')
+    binary = tmp_path / "links.xe"
+    subprocess.run([compiler, "-target=XCORE-AI-EXPLORER", "-Os",
+                    f"-DLINK_COUNT={links}", str(xc_source), str(c_source),
+                    "-o", str(binary)], check=True, timeout=60)
+    result = subprocess.run(["xsim", "--max-cycles", "1000000", str(binary)],
+                            capture_output=True, text=True, timeout=30)
+    assert result.stdout.count(f"links_ready={links}") == 2
+    assert result.stdout.count("control_roundtrip_complete") == (2 if links == 3 else 0)
+    if links == 3:
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode == 1
+        assert "maximum cycles reached" in result.stderr
+
+
 def function(path, name):
     source = path.read_text()
     start = re.search(r"^(?:static )?(?:void \*?|int |int32_t )" + name + r"\(", source, re.M).start()

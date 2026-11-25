@@ -766,7 +766,11 @@ static void tile_common_init(chanend_t c)
     chanend_free(c);
 
 #if appconfUSB_AUDIO_ENABLED && ON_TILE(USB_TILE_NO)
+#if appconfSAT1_AUDIO_BENCH
+    usb_audio_init(NULL, appconfUSB_AUDIO_TASK_PRIORITY);
+#else
     usb_audio_init(intertile_usb_audio_ctx, appconfUSB_AUDIO_TASK_PRIORITY);
+#endif
 #endif
 
     xTaskCreate((TaskFunction_t) startup_task,

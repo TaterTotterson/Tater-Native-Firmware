@@ -359,6 +359,21 @@ int main(void) {
                     self.assertEqual(compact.count("rtos_intertile_init(intertile_audio_ctx,"), 1)
                     self.assertEqual(compact.count("rtos_intertile_start(intertile_audio_ctx)"), 1)
                     self.assertEqual(compact.count("rtos_intertile_init(intertile_usb_audio_ctx,"), usb_audio)
+                    self.assertEqual(compact.count("rtos_intertile_start(intertile_usb_audio_ctx)"), usb_audio)
+                    # The capture-only bench uses a local USB stream buffer.
+                    bench_result = subprocess.run([shutil.which("cc"), "-E", "-P", "-x", "c",
+                        "-DUSB_TILE_NO=0", f"-DTILE_UNDER_TEST={tile}",
+                        "-DON_TILE(n)=((n)==TILE_UNDER_TEST)", "-DappconfSAT1_AUDIO_BENCH=1",
+                        f"-DappconfUSB_CDC_ENABLED={cdc}",
+                        f"-DappconfUSB_AUDIO_ENABLED={usb_audio}", "-"],
+                        input=source, text=True, capture_output=True, check=True).stdout
+                    bench_compact = re.sub(r'\s+', '', bench_result)
+                    self.assertNotIn("rtos_intertile_init(intertile_usb_audio_ctx,", bench_compact)
+                    self.assertNotIn("rtos_intertile_start(intertile_usb_audio_ctx)", bench_compact)
+                    self.assertEqual(bench_compact.count("rtos_intertile_init(intertile_audio_ctx,"), 1)
+                    self.assertEqual(bench_compact.count("rtos_intertile_start(intertile_audio_ctx)"), 1)
+                    # Leave a tile route available beyond persistent streams.
+                    self.assertEqual(bench_compact.count("rtos_intertile_init("), 2 + cdc)
                     if cdc and tile == 0:
                         self.assertIn("client_intertile_ctx[1]={intertile_cdc_ctx}", compact)
                         self.assertIn("rtos_cdc_rpc_host_init(client_intertile_ctx,1)", compact)

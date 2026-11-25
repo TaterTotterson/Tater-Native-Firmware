@@ -245,7 +245,8 @@ void platform_init(chanend_t other_tile_c)
 {
     rtos_intertile_init(intertile_ctx, other_tile_c);
     rtos_intertile_init(intertile_audio_ctx, other_tile_c);
-#if appconfUSB_AUDIO_ENABLED
+#if appconfUSB_AUDIO_ENABLED && !appconfSAT1_AUDIO_BENCH
+    /* Capture-only bench USB writes a local stream buffer; it needs no link. */
     rtos_intertile_init(intertile_usb_audio_ctx, other_tile_c);
 #endif
 #if appconfUSB_CDC_ENABLED
