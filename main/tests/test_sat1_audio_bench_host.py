@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -32,10 +33,11 @@ class AudioBenchTest(unittest.TestCase):
             raise RuntimeError("A host C compiler is required")
         # Boundary stubs let the production snapshot implementation run on host.
         stubs = {
-            "app_conf.h": "#pragma once\n#define appconfSAT1_AUDIO_BENCH 1\n#define appconfSAT1_BENCH_PROFILE 1\n#define APP_VERSION_COUNTER 9\n#define THIS_XCORE_TILE 1\n",
-            "FreeRTOS.h": "#pragma once\n#include <assert.h>\ntypedef int BaseType_t;\n#define taskENTER_CRITICAL() ((void)0)\n#define taskEXIT_CRITICAL() ((void)0)\n#define configASSERT assert\n#define pdPASS 1\n#define configMINIMAL_STACK_SIZE 32\n#define tskIDLE_PRIORITY 0\n#define pdMS_TO_TICKS(x) (x)\nstatic inline unsigned xPortGetFreeHeapSize(void) { return 1000; }\nstatic inline unsigned xPortGetMinimumEverFreeHeapSize(void) { return 900; }\n",
+            "app_conf.h": "#pragma once\n#define appconfSAT1_AUDIO_BENCH 1\n#define appconfSAT1_BENCH_PROFILE 1\n#define APP_VERSION_COUNTER 9\n#define THIS_XCORE_TILE 1\n#define ON_TILE(n) ((n) == THIS_XCORE_TILE)\n",
+            "FreeRTOS.h": "#pragma once\n#include <assert.h>\ntypedef int BaseType_t;\n#define taskENTER_CRITICAL() ((void)0)\n#define taskEXIT_CRITICAL() ((void)0)\n#define configASSERT assert\n#define pdPASS 1\n#define portMAX_DELAY 0xffffffffu\n#define configMINIMAL_STACK_SIZE 32\n#define tskIDLE_PRIORITY 0\n#define pdMS_TO_TICKS(x) (x)\nstatic inline unsigned xPortGetFreeHeapSize(void) { return 1000; }\nstatic inline unsigned xPortGetMinimumEverFreeHeapSize(void) { return 900; }\n",
             "task.h": "#pragma once\nstatic inline void vTaskDelay(unsigned t) {(void)t;}\nstatic inline int xTaskCreate(void (*f)(void *), const char *n, unsigned s, void *a, unsigned p, void *h) { (void)f;(void)n;(void)s;(void)a;(void)p;(void)h;return 1;}\n",
             "rtos_osal.h": "#define RTOS_THREAD_STACK_SIZE(f) 0\n",
+            "queue.h": "#pragma once\n#include <string.h>\ntypedef struct {void *items[4];unsigned count,capacity;} fake_queue_t;\ntypedef fake_queue_t *QueueHandle_t;\nstatic inline QueueHandle_t xQueueCreate(unsigned n, unsigned size) {static fake_queue_t q;(void)size;q.count=0;q.capacity=n;return &q;}\nstatic inline int xQueueSend(QueueHandle_t q,const void *item,unsigned timeout) {(void)timeout;if(q->count==q->capacity)return 0;memcpy(&q->items[q->count++],item,sizeof(void *));return 1;}\nstatic inline int xQueueReceive(QueueHandle_t q,void *item,unsigned timeout) {(void)timeout;if(!q->count)return 0;memcpy(item,&q->items[0],sizeof(void *));memmove(q->items,q->items+1,--q->count*sizeof(void *));return 1;}\n",
             "usb/usb_cdc.h": "static inline int cdc_printf(const char *format, ...) {(void)format; return 0;}\n",
             "xcore/hwtimer.h": "#pragma once\n#include <stdint.h>\nstatic inline uint32_t get_reference_time(void) { static uint32_t t = 0xfff00000; t += 1500000; return t; }\n",
         }
@@ -53,6 +55,17 @@ int main(void) {
     int32_t raw[4][240], left[240], right[240], agc[240], ns[240];
     sat1_bench_frame_t frame;
     int32_t packed[240][12];
+    sat1_bench_pool_init();
+    void *slot0 = sat1_bench_frame_acquire(SAT1_BENCH_PIPELINE_FRAME_BYTES);
+    void *slot1 = sat1_bench_frame_acquire(SAT1_BENCH_PIPELINE_FRAME_BYTES);
+    assert(slot0 != slot1 && ((uintptr_t)slot0 & 7u) == 0 && ((uintptr_t)slot1 & 7u) == 0);
+    memset(slot0, 0xa5, SAT1_BENCH_PIPELINE_FRAME_BYTES);
+    memset(slot1, 0x5a, SAT1_BENCH_PIPELINE_FRAME_BYTES);
+    assert(((unsigned char *)slot0)[0] == 0xa5);
+    sat1_bench_frame_release(slot0);
+    assert(sat1_bench_frame_acquire(SAT1_BENCH_PIPELINE_FRAME_BYTES) == slot0);
+    sat1_bench_frame_release(slot0);
+    sat1_bench_frame_release(slot1);
     for (int i = 0; i < 240; ++i) {
         for (int ch = 0; ch < 4; ++ch) raw[ch][i] = (ch + 1) * 1000000 + i;
         left[i] = 500000000 + i; right[i] = -300000000 - i;
@@ -162,6 +175,25 @@ int main(void) {
             env={**os.environ, "SAT1_XMOS_AUDIO_BENCH": "ON"}, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("SAT1_XMOS_AUDIO_BENCH must be 0 or 1", result.stderr)
+
+    def test_bench_audio_uses_a_link_independent_of_i2s_rpc(self):
+        # Preprocess the actual config/callbacks in both layouts and modes.
+        # A shared TX lock allows an audio send waiting on a full frame pool to
+        # block the I2S reply needed by output to return a frame to that pool.
+        config = re.sub(r'^#include .*$', '', (SRC / "app_conf.h").read_text(), flags=re.M)
+        pipelines = SRC.parent / "audio_pipelines/reference"
+        for enabled in (0, 1):
+            expected = "intertile_usb_audio_ctx" if enabled else "intertile_ctx"
+            for layout in ("fixed_delay", "fixed_delay4"):
+                source = config + "\n" + "\n".join(
+                    re.sub(r'^#include .*$', '', (pipelines / layout / f"audio_pipeline_t{tile}.c").read_text(), flags=re.M)
+                    for tile in (0, 1))
+                result = subprocess.run([shutil.which("cc"), "-E", "-P", "-x", "c",
+                    f"-DappconfSAT1_AUDIO_BENCH={enabled}", "-DON_TILE(n)=1",
+                    "-DMIC_ARRAY_CONFIG_MIC_COUNT=4", "-DMIC_ARRAY_CONFIG_SAMPLES_PER_FRAME=240", "-"], input=source,
+                    text=True, capture_output=True, check=True)
+                calls = re.findall(r'rtos_intertile_(?:tx|rx_len|rx_data)\(\s*(\w+)', result.stdout)
+                self.assertEqual(calls, [expected] * 3, (layout, enabled, calls))
 
     def capture_fixture(self, name, overflow=False):
         output = self.directory / f"{name}.wav"

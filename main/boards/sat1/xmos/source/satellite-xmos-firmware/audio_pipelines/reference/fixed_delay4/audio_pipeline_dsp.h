@@ -53,6 +53,10 @@ typedef struct {
     sat1_bench_frame_t bench;
 #endif
 } frame_data_t;
+#if appconfSAT1_AUDIO_BENCH
+_Static_assert(sizeof(frame_data_t) <= SAT1_BENCH_PIPELINE_FRAME_BYTES,
+               "Bench frame pool slot is too small");
+#endif
 
 #if appconfSAT1_AUDIO_BENCH
 _Static_assert(sizeof(frame_data_t) == ((5784 + sizeof(sat1_bench_frame_t) + 7) & ~7),

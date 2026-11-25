@@ -44,7 +44,11 @@ static void *audio_pipeline_input_i(void *input_app_data)
     sat1_bench_begin(SAT1_BENCH_CAPTURE);
     sat1_bench_arm_capture();
 #endif
+#if appconfSAT1_AUDIO_BENCH
+    frame_data = sat1_bench_frame_acquire(sizeof(frame_data_t));
+#else
     frame_data = pvPortMalloc(sizeof(frame_data_t));
+#endif
     configASSERT(frame_data != NULL);
     memset(frame_data, 0x00, sizeof(frame_data_t));
 
@@ -81,7 +85,7 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
 #if appconfSAT1_AUDIO_BENCH
     sat1_bench_begin(SAT1_BENCH_INTERTILE_TX);
 #endif
-    rtos_intertile_tx(intertile_ctx,
+    rtos_intertile_tx(appconfAUDIOPIPELINE_INTERTILE_CTX,
                       appconfAUDIOPIPELINE_PORT,
                       frame_data,
                       sizeof(frame_data_t));
@@ -90,7 +94,12 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
 #endif
 
 
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_frame_release(frame_data);
+    return 0; /* Ownership stays with the pool, not generic_pipeline. */
+#else
     return AUDIO_PIPELINE_FREE_FRAME;
+#endif
 }
 
 static void stage_delay(frame_data_t *frame_data)

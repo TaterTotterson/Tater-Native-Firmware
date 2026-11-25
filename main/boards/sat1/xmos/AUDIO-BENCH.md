@@ -83,6 +83,11 @@ with twelve channels. **Do not play the complete WAV:** its final four channels
 are digital markers. Extract only audio channels for listening. Select native
 format, unity capture gain and no host audio enhancements.
 
+On macOS, enable microphone access for the host application before recording
+and restart it if requested by the OS. A successfully opened CoreAudio stream
+can still deliver only zeros when microphone access is denied. Check host
+authorization separately from DSP liveness and USB stage counters.
+
 | Zero-based channel | Contents |
 | --- | --- |
 | 0–3 | Raw East/West/North/South, before calibration and beamforming |
@@ -131,13 +136,29 @@ after about 42.95 seconds. Heap/minimum-ever heap and USB drops are reported.
 | 7–9 | IC/VNR, noise suppression, AGC |
 | 10–11 | ESP32 I2S output, USB packing/enqueue |
 | 12–13 | Speaker I2S input, reference enqueue |
+| 14 | Fixed diagnostic frame-pool wait |
 
 Compare several snapshots: normal waits may be active. An entered-but-not-ended
 AEC differs from advancing AEC with blocked I2S output. CDC itself shares MCU
 scheduling/intertile resources; if logs stop too, retain ESP32 logs and collect
 a debugger trace. The last printed stage is not proof of a failing instruction.
 
-Bench capture increases frame size, bandwidth, heap and scheduling load. It can
+Bench frames use two fixed buffers on tile 1 and three on tile 0. The input
+task waits for a returned buffer when the pool is occupied. Ownership returns
+to the pool after intertile transmission or final output; the generic pipeline
+must not free these buffers. Compile-time checks bound each profile's frame
+size. Bench-only heap budgets are 120 KiB on tile 1 and 144 KiB on tile 0;
+normal builds retain their existing heap budgets and allocation behavior.
+
+Bench DSP frames use the otherwise unused USB-audio intertile link. I2S and CDC
+RPC retain their original link. A blocked DSP send on a shared link can hold
+its transmit lock while tile 0 waits for an I2S reply before releasing a frame;
+the reply then waits for that same transmit lock. Separate links allow RPC to
+complete while the frame pool applies backpressure. Capture-only bench builds
+do not start a USB playback forwarding task on the reserved link. Normal
+builds retain their existing transport selection.
+
+Bench capture increases frame size, bandwidth, memory and scheduling load. It can
 expose or change a timing fault. Reproduce a fix with instrumentation disabled
 before changing a release image.
 
@@ -164,9 +185,10 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
 
 ## Software verification, November 25, 2026
 
-- Fifteen new host tests pass, including the actual C snapshot/packing code,
+- Sixteen new host tests pass, including the actual C snapshot/packing code,
   counter/timer wraparound, corrupt/drop/repeat detection, host overflow,
-  exclusive recording files and sanitized USB partial/empty-read handling.
+  exclusive recording files, fixed-pool ownership, audio/RPC link selection in
+  both layouts and build modes, and sanitized USB partial/empty-read handling.
 - All eleven existing channel-contract tests pass, including four xcore cases.
   Direction/beam, native protocol, recognition routing, updater and playback
   wake-policy regressions pass.
@@ -180,5 +202,28 @@ Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
   image, excluding the production dev.8 payload. The default bench-disabled
   XMOS profile also builds. Production assets/version/release selection are
   unchanged.
-- Physical USB enumeration, capture, acoustic quality and restart/stall behavior
-  remain untested for these bench images. No device was flashed in this run.
+- The first physical baseline test enumerated the twelve-channel audio and CDC
+  interfaces, but stopped producing DSP frames after eight frames. AEC and
+  output stages completed those frames; capture entered its ninth call without
+  reaching the next reference wait. Tile 1 minimum heap was 5,752 bytes, below
+  the roughly 11.5 KiB diagnostic frame allocation. This points to the bench's
+  allocation boundary and does not establish the cause of the earlier four-mic
+  hardware stall. The fixed pools above replace that per-frame bench allocation.
+- A full ESP32 flash backup and the starting XMOS factory partition were saved
+  before installation. Only the active ESP32 application slot is rewritten;
+  settings and boot selection are retained. Capture quality and restart/stall
+  qualification remain separate hardware checks.
+- Fixed pools alone reached twelve completed output frames before another
+  stall: tile 0 waited in I2S output with all three buffers occupied, and tile 1
+  CDC reports were absent. The shared intertile transport permits the lock
+  cycle described above. After moving bench DSP traffic to the separate link,
+  both tiles continued advancing for over three minutes and output exceeded
+  12,600 frames. Minimum-ever heaps were 26,872 bytes on tile 0 and 16,720 bytes
+  on tile 1; USB drops remained zero and completed AEC calls never exceeded
+  15 ms in those snapshots. This supports the bench transport fix; it does not
+  qualify a release build or identify every earlier four-mic fault.
+- The host WAVs from this session are invalid: all samples were zero and
+  AVFoundation reported microphone authorization denied. The user enabled
+  access, with an application restart required. Synchronized audio validation
+  and acoustic comparisons must resume after that restart. The revised
+  four-mic images build but have not yet been installed on this device.

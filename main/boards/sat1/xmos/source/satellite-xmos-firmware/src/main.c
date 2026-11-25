@@ -614,6 +614,7 @@ void startup_task(void *arg)
     rtos_printf("Startup task running from tile %d on core %d\n", THIS_XCORE_TILE, portGET_CORE_ID());
     platform_start();
 #if appconfSAT1_AUDIO_BENCH
+    sat1_bench_pool_init();
     sat1_bench_monitor_start();
 #endif
 

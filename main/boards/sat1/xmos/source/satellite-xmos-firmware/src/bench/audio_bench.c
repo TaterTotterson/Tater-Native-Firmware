@@ -4,6 +4,7 @@
 #include <xcore/hwtimer.h>
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
 #include "rtos_osal.h"
 #include "usb/usb_cdc.h"
 
@@ -18,6 +19,52 @@ static uint32_t usb_dropped;
  */
 static const int32_t *raw_samples;
 static uint32_t frame_sequence;
+
+/* Fixed ownership per tile. Capture/AEC overlap on tile 1; three postprocessing
+ * stages overlap on tile 0. Queue pressure blocks the input task instead of
+ * growing the heap or dropping an already captured frame.
+ */
+#if ON_TILE(0)
+#define BENCH_POOL_SLOTS 3
+#else
+#define BENCH_POOL_SLOTS 2
+#endif
+static uint64_t frame_pool[BENCH_POOL_SLOTS][SAT1_BENCH_PIPELINE_FRAME_BYTES / 8];
+static QueueHandle_t free_frames;
+
+void sat1_bench_pool_init(void)
+{
+    configASSERT(free_frames == NULL);
+    free_frames = xQueueCreate(BENCH_POOL_SLOTS, sizeof(void *));
+    configASSERT(free_frames != NULL);
+    for (unsigned i = 0; i < BENCH_POOL_SLOTS; ++i) {
+        void *frame = frame_pool[i];
+        BaseType_t result = xQueueSend(free_frames, &frame, 0);
+        configASSERT(result == pdPASS);
+    }
+}
+
+void *sat1_bench_frame_acquire(size_t size)
+{
+    configASSERT(size <= SAT1_BENCH_PIPELINE_FRAME_BYTES && free_frames != NULL);
+    void *frame = NULL;
+    sat1_bench_begin(SAT1_BENCH_FRAME_POOL_WAIT);
+    BaseType_t result = xQueueReceive(free_frames, &frame, portMAX_DELAY);
+    configASSERT(result == pdPASS);
+    sat1_bench_end(SAT1_BENCH_FRAME_POOL_WAIT);
+    return frame;
+}
+
+void sat1_bench_frame_release(void *frame)
+{
+    unsigned index;
+    for (index = 0; index < BENCH_POOL_SLOTS; ++index) {
+        if (frame == (void *)frame_pool[index]) break;
+    }
+    configASSERT(index < BENCH_POOL_SLOTS);
+    BaseType_t result = xQueueSend(free_frames, &frame, 0);
+    configASSERT(result == pdPASS);
+}
 
 void sat1_bench_begin(sat1_bench_stage_t stage)
 {

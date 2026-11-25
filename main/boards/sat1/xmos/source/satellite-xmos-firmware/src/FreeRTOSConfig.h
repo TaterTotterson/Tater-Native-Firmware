@@ -46,10 +46,19 @@ your application. */
 #define configSUPPORT_STATIC_ALLOCATION         0
 #define configSUPPORT_DYNAMIC_ALLOCATION        1
 #if ON_TILE(0)
+#if appconfSAT1_AUDIO_BENCH
+/* Diagnostic frames are reserved statically instead of allocated per frame. */
+#define configTOTAL_HEAP_SIZE                   144*1024
+#else
 #define configTOTAL_HEAP_SIZE                   160*1024
 #endif
+#endif
 #if ON_TILE(1)
+#if appconfSAT1_AUDIO_BENCH
+#define configTOTAL_HEAP_SIZE                   120*1024
+#else
 #define configTOTAL_HEAP_SIZE                   128*1024
+#endif
 #endif
 #define configAPPLICATION_ALLOCATED_HEAP        0
 

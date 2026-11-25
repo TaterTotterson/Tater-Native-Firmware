@@ -51,20 +51,24 @@ static void *audio_pipeline_input_i(void *input_app_data)
     sat1_bench_begin(SAT1_BENCH_INTERTILE_RX);
 #endif
 
+#if appconfSAT1_AUDIO_BENCH
+    frame_data = sat1_bench_frame_acquire(sizeof(frame_data_t));
+#else
     frame_data = pvPortMalloc(sizeof(frame_data_t));
+#endif
     configASSERT(frame_data != NULL);
     memset(frame_data, 0x00, sizeof(frame_data_t));
 
     size_t bytes_received = 0;
     bytes_received = rtos_intertile_rx_len(
-            intertile_ctx,
+            appconfAUDIOPIPELINE_INTERTILE_CTX,
             appconfAUDIOPIPELINE_PORT,
             portMAX_DELAY);
 
     xassert(bytes_received == sizeof(frame_data_t));
 
     rtos_intertile_rx_data(
-            intertile_ctx,
+            appconfAUDIOPIPELINE_INTERTILE_CTX,
             frame_data,
             bytes_received);
 
@@ -85,7 +89,13 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
     usb_audio_send_bench(&frame_data->bench, frame_data->samples[0],
         frame_data->aec_reference_audio_samples[1]);
 #endif
+#if appconfSAT1_AUDIO_BENCH
+    (void)result;
+    sat1_bench_frame_release(frame_data);
+    return 0; /* Ownership stays with the pool, not generic_pipeline. */
+#else
     return result;
+#endif
 }
 
 static void stage_average_aec_residuals(frame_data_t *frame_data)

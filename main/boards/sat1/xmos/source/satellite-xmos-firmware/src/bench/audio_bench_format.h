@@ -12,6 +12,8 @@
 #define SAT1_BENCH_RAW_VALID 1u
 #define SAT1_BENCH_REFERENCE_VALID 2u
 #define SAT1_BENCH_TIMER_HZ 100000000u
+/* Largest full pipeline frame, including diagnostic rows and 8-byte padding. */
+#define SAT1_BENCH_PIPELINE_FRAME_BYTES 11560
 
 typedef struct {
     int32_t raw[4][SAT1_BENCH_FRAME_SAMPLES];
