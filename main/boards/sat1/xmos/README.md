@@ -3,6 +3,10 @@
 Lab capture and stall instrumentation are documented in [AUDIO-BENCH.md](AUDIO-BENCH.md).
 They use separate images and do not change the release default.
 
+The speech-aware post-AEC tracking and protected cleanup candidate is documented
+in [TRACKING-CLEANUP.md](TRACKING-CLEANUP.md), including its build identities and
+hardware qualification scope.
+
 The standard native `sat1` environment in **0.7.0-r3** embeds
 `sat1_xmos_1_2_0_dev8_factory.bin.zlib` and installs XMOS **1.2.0-dev.8** when
 another version is present. The same uncompressed image is bundled by RPi

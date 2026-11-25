@@ -11,8 +11,8 @@ from pathlib import Path
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSIONS = {"beam_ic": 8, "legacy": 1, "aec4": 2, "aec4_beam": 3}
-BENCH_VERSIONS = {"beam_ic": 9, "legacy": 12, "aec4": 10, "aec4_beam": 11}
+VERSIONS = {"beam_ic": 8, "legacy": 1, "aec4": 2, "aec4_beam": 3, "aec4_track": 13}
+BENCH_VERSIONS = {"beam_ic": 9, "legacy": 12, "aec4": 10, "aec4_beam": 11, "aec4_track": 14}
 
 def linked_versions(executable):
     """Read the DFU identity from linked ELF symbols, not the shared source header."""
@@ -101,6 +101,9 @@ def main():
             "#define SAT1_XMOS_TARGET_PATCH 0\n#define SAT1_XMOS_TARGET_PRERELEASE 4\n"
             f"#define SAT1_XMOS_TARGET_COUNTER {versions[variant]}\n"
             f"#define SAT1_XMOS_TARGET_IMAGE_SIZE {len(data)}U\n")
+        if variant == "aec4_track":
+            with (destination / f"{variant}.h").open("a") as header:
+                header.write("#define SAT1_XMOS_SPEECH_TRACKING 1\n")
         manifest[variant] = {
             "version": f"1.2.0-dev.{versions[variant]}",
             "linked_version": list(expected_version),
@@ -109,7 +112,8 @@ def main():
             "factory_md5": md5, "factory_sha256": hashlib.sha256(data).hexdigest(),
             "compressed_sha256": hashlib.sha256(compressed).hexdigest(),
             "upstream_develop": "ace8050265f134c1e0442661c8a16866467c9e53",
-            "ic_vnr_enabled": variant == "beam_ic",
+            "ic_vnr_enabled": variant in ("beam_ic", "aec4_track"),
+            "post_aec_speech_tracking": variant == "aec4_track",
             "compact_frames_pr132": None if variant in ("legacy", "beam_ic") else "208e0d3ea07c3d61ae306b0ddd980b45977b2a76",
             "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
             "protocol": "0x11", "doa_resource": 233,

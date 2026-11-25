@@ -31,6 +31,9 @@
 #include "usb/usb_audio.h"
 #endif
 #include "audio_pipeline_io.h"
+#if appconfSAT1_SPEECH_FRONTEND
+#include "voice_frontend/sat1_voice_frontend.h"
+#endif
 
 #if appconfAUDIO_PIPELINE_FRAME_ADVANCE != 240
 #error This pipeline is only configured for 240 frame advance
@@ -39,8 +42,10 @@
 #define VNR_AGC_THRESHOLD (0.5)
 
 #if ON_TILE(0)
+#if !appconfSAT1_SPEECH_FRONTEND
 static ic_stage_ctx_t DWORD_ALIGNED ic_stage_state = {};
 static vnr_pred_stage_ctx_t DWORD_ALIGNED vnr_pred_stage_state = {};
+#endif
 static ns_stage_ctx_t DWORD_ALIGNED ns_stage_state = {};
 static agc_stage_ctx_t DWORD_ALIGNED agc_stage_state = {};
 
@@ -100,6 +105,12 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
 
 static void stage_average_aec_residuals(frame_data_t *frame_data)
 {
+#if appconfSAT1_SPEECH_FRONTEND
+    sat1_voice_frontend_analyze(frame_data->samples,
+        frame_data->aec_reference_audio_samples[0], frame_data->aec_corr_factor,
+        frame_data->ref_active_flag, &frame_data->voice);
+    frame_data->vnr_pred_flag = (frame_data->voice.flags & SAT1_VOICE_NEAR_SPEECH) != 0;
+#endif
 #if !appconfPIPELINE_BYPASS && !appconfSAT1_POST_AEC_BEAM
     _Static_assert(AP_MAX_Y_CHANNELS == 4, "Residual averaging requires four microphones");
     for (size_t i = 0; i < appconfAUDIO_PIPELINE_FRAME_ADVANCE; ++i) {
@@ -119,7 +130,9 @@ static void stage_vnr_and_ic(frame_data_t *frame_data)
     sat1_bench_begin(SAT1_BENCH_IC);
 #endif
 
-#if appconfAUDIO_PIPELINE_SKIP_IC_AND_VNR
+#if appconfSAT1_SPEECH_FRONTEND
+    sat1_voice_frontend_cleanup(frame_data->samples, &frame_data->voice);
+#elif appconfAUDIO_PIPELINE_SKIP_IC_AND_VNR
 #else
     int32_t DWORD_ALIGNED ic_output[appconfAUDIO_PIPELINE_FRAME_ADVANCE];
     ic_filter(&ic_stage_state.state,
@@ -199,8 +212,12 @@ static void stage_agc(frame_data_t *frame_data)
 
 static void initialize_pipeline_stages(void)
 {
+#if appconfSAT1_SPEECH_FRONTEND
+    sat1_voice_frontend_init();
+#else
     int32_t ic_status = voice_ic_init(&ic_stage_state.state, &vnr_pred_stage_state.vnr_pred_state);
     configASSERT(ic_status == 0);
+#endif
 
     ns_init(&ns_stage_state.state);
 

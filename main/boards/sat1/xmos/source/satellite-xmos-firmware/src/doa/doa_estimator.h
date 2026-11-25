@@ -13,7 +13,8 @@
 #define DOA_ESTIMATOR_CONTROL_PLAYBACK_ACTIVE (1u << 0)
 #define DOA_ESTIMATOR_CONTROL_VOICE_LOCK      (1u << 1)
 #define DOA_ESTIMATOR_CONTROL_FORCE_OMNI      (1u << 2)
-#define DOA_ESTIMATOR_CONTROL_MASK            (0x07u)
+#define DOA_ESTIMATOR_CONTROL_VOICE_ACTIVE    (1u << 3)
+#define DOA_ESTIMATOR_CONTROL_MASK            (0x0fu)
 
 #define DOA_ESTIMATOR_MODE_LOCKED          (1u << 0)
 #define DOA_ESTIMATOR_MODE_PLAYBACK_FROZEN (1u << 1)
@@ -54,7 +55,12 @@ void doa_estimator_process_frame_4(const int32_t *east,
                                    size_t frame_count);
 
 void doa_estimator_get_state(doa_estimator_state_t *state);
+/* Direction for display, before audio-only force-omni/hold policy. */
+void doa_estimator_get_observation(doa_estimator_state_t *state);
 void doa_estimator_get_diagnostics(doa_estimator_diagnostics_t *diagnostics);
 void doa_estimator_set_control(uint8_t control_flags);
 void doa_estimator_set_mic_health(uint8_t active_mic_mask);
+/* Enables speech-gated tracking for the post-AEC frontend. Legacy callers
+ * retain their existing energy gate and playback-freeze behaviour. */
+void doa_estimator_set_tracking_evidence(uint8_t speech_active, uint8_t echo_dominated);
 void doa_estimator_reset(void);

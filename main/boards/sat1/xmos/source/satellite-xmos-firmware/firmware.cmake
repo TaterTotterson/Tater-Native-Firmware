@@ -2,9 +2,9 @@
 # Gather Sources
 #**********************
 
-set(SAT1_XMOS_PIPELINE "beam_ic" CACHE STRING "beam_ic, legacy, aec4, or aec4_beam")
-set_property(CACHE SAT1_XMOS_PIPELINE PROPERTY STRINGS beam_ic legacy aec4 aec4_beam)
-if(NOT SAT1_XMOS_PIPELINE MATCHES "^(beam_ic|legacy|aec4|aec4_beam)$")
+set(SAT1_XMOS_PIPELINE "beam_ic" CACHE STRING "beam_ic, legacy, aec4, aec4_beam, or aec4_track")
+set_property(CACHE SAT1_XMOS_PIPELINE PROPERTY STRINGS beam_ic legacy aec4 aec4_beam aec4_track)
+if(NOT SAT1_XMOS_PIPELINE MATCHES "^(beam_ic|legacy|aec4|aec4_beam|aec4_track)$")
     message(FATAL_ERROR "Invalid SAT1_XMOS_PIPELINE: ${SAT1_XMOS_PIPELINE}")
 endif()
 set(SAT1_XMOS_VERSION "v1.2.0-dev.8" CACHE STRING "Candidate firmware identity")
@@ -16,6 +16,8 @@ if(SAT1_AUDIO_BENCH)
         set(SAT1_BENCH_COUNTER 12)
     elseif(SAT1_XMOS_PIPELINE STREQUAL "aec4")
         set(SAT1_BENCH_COUNTER 10)
+    elseif(SAT1_XMOS_PIPELINE STREQUAL "aec4_track")
+        set(SAT1_BENCH_COUNTER 14)
     else()
         set(SAT1_BENCH_COUNTER 11)
     endif()

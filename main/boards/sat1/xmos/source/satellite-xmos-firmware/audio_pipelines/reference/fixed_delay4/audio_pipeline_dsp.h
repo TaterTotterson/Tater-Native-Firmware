@@ -9,6 +9,9 @@
 #include "FreeRTOS.h"
 #include "stream_buffer.h"
 #include "app_conf.h"
+#if appconfSAT1_SPEECH_FRONTEND
+#include "voice_frontend/sat1_voice_policy.h"
+#endif
 #if appconfSAT1_AUDIO_BENCH
 #include "bench/audio_bench_format.h"
 #endif
@@ -37,6 +40,12 @@ _Static_assert(appconfMIC_PIPELINE_REF_CHANNELS == 2, "Reference mixing requires
 _Static_assert(appconfMIC_PIPELINE_INPUT_CHANNELS == AP_MAX_Y_CHANNELS, "Capture and processing channel mismatch");
 
 
+#if appconfSAT1_SPEECH_FRONTEND
+#define SAT1_VOICE_METADATA_BYTES 48
+#else
+#define SAT1_VOICE_METADATA_BYTES 0
+#endif
+
 /* Intertile payload shared by tile 1 (capture/AEC) and tile 0 (postprocessing).
  * Capture writes directly into samples; reference slot 1 also carries NS output.
  */
@@ -49,6 +58,9 @@ typedef struct {
     float_s32_t max_ref_energy;
     float_s32_t aec_corr_factor;
     int32_t ref_active_flag;
+#if appconfSAT1_SPEECH_FRONTEND
+    sat1_voice_frame_t voice;
+#endif
 #if appconfSAT1_AUDIO_BENCH
     sat1_bench_frame_t bench;
 #endif
@@ -59,10 +71,10 @@ _Static_assert(sizeof(frame_data_t) <= SAT1_BENCH_PIPELINE_FRAME_BYTES,
 #endif
 
 #if appconfSAT1_AUDIO_BENCH
-_Static_assert(sizeof(frame_data_t) == ((5784 + sizeof(sat1_bench_frame_t) + 7) & ~7),
+_Static_assert(sizeof(frame_data_t) == ((5784 + SAT1_VOICE_METADATA_BYTES + sizeof(sat1_bench_frame_t) + 7) & ~7),
                "Bench intertile frame size");
 #else
-_Static_assert(sizeof(frame_data_t) == 5784, "Fixed-delay intertile frame size");
+_Static_assert(sizeof(frame_data_t) == 5784 + SAT1_VOICE_METADATA_BYTES, "Fixed-delay intertile frame size");
 #endif
 _Static_assert(offsetof(frame_data_t, samples) == 0, "Microphone row offset");
 _Static_assert(offsetof(frame_data_t, aec_reference_audio_samples) == 3840, "Reference row offset");

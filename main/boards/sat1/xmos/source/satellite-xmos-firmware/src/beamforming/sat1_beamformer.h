@@ -61,3 +61,15 @@ void sat1_beamformer_analyze_frame(sat1_beamformer_t *beamformer,
 void sat1_beamformer_process_calibrated_frame(sat1_beamformer_t *beamformer,
     int32_t *output, const int32_t *microphones[4], size_t frame_count,
     const doa_estimator_state_t *direction);
+
+/* Import raw-microphone calibration when postprocessing runs on another tile.
+ * Steering/history remain owned by the processing instance. */
+void sat1_beamformer_set_calibration(sat1_beamformer_t *beamformer,
+    const sat1_beamformer_diagnostics_t *calibration);
+
+/* The blocking reference is the first healthy aligned mic minus the beam.
+ * A perfectly aligned/calibrated target cancels from this reference. */
+void sat1_beamformer_process_calibrated_frame_with_reference(
+    sat1_beamformer_t *beamformer, int32_t *output, int32_t *noise_reference,
+    const int32_t *microphones[4], size_t frame_count,
+    const doa_estimator_state_t *direction);

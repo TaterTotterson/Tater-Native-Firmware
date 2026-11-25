@@ -30,23 +30,17 @@
     "version": "1.2.0-dev.2"
   },
   "aec4_beam": {
+    "audio_bench": false,
     "compact_frames_pr132": "208e0d3ea07c3d61ae306b0ddd980b45977b2a76",
-    "compressed_bytes": 138594,
-    "compressed_sha256": "1088f93b766520fdece5688957a7ad0a4a669ab8c30f1ad2dc74ec618c7a0899",
+    "compressed_bytes": 138443,
+    "compressed_sha256": "fe0b573611ac33543f8d2586a884def0f0d3b35529f4b0e891a8ddbca523c679",
     "doa_resource": 233,
     "factory_bytes": 245760,
-    "factory_md5": "0cd2790acd4871e720d75b8d95a2e31e",
-    "factory_sha256": "73c5e633954ba034b793938251ceb8b091c0dd74c628f89945dd759b7a25591d",
+    "factory_md5": "3dbea8d5ff513f955e2fc816e2b745b2",
+    "factory_sha256": "bf9271f8ca279c7433db89912422b1681e9c7c4fecee9a9be3764f0491af225a",
     "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
-    "hardware_smoke_test": {
-      "date": "2026-11-24",
-      "frame_counter": 12,
-      "reason": "DSP frame counter stalls; wake microphone repeats a constant sample",
-      "report": "../HARDWARE-VALIDATION.md",
-      "result": "failed",
-      "wake_repeated_sample": -3056
-    },
     "hardware_validated": false,
+    "ic_vnr_enabled": false,
     "linked_version": [
       1,
       2,
@@ -54,10 +48,42 @@
       4,
       3
     ],
-    "local_source_sha256": "9d21d47acfa840f0da634193b4e52e553212bfc380a08e9b4aef53c023819139",
+    "local_source_sha256": "7808f9d4a2866fec09e03da1ccd3a2fc35d195d0506d2e4208d36701427378eb",
     "protocol": "0x11",
     "upstream_develop": "ace8050265f134c1e0442661c8a16866467c9e53",
     "version": "1.2.0-dev.3"
+  },
+  "aec4_track": {
+    "audio_bench": false,
+    "compact_frames_pr132": "208e0d3ea07c3d61ae306b0ddd980b45977b2a76",
+    "compressed_bytes": 151392,
+    "compressed_sha256": "067ca8fa61ccec633d32c5acabbc5ea820ea90348ec52b5c3e97a17ce1278141",
+    "doa_resource": 233,
+    "factory_bytes": 270336,
+    "factory_md5": "839cca701cdc78ac3c1f01b9b26e03e4",
+    "factory_sha256": "2af046f6d95372f332cdc48236c74098ce4f8bcf8608efe8c04925122c75865f",
+    "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
+    "hardware_smoke_test": {
+      "date": "2026-11-25",
+      "native_sha256": "37c5cd576c42309ad47d963c832b552315bfd8e02cbcad8d32d302583c3d5ae6",
+      "report": "../TRACKING-CLEANUP.md",
+      "result": "passed",
+      "scope": "Quiet USB capture and processing deadlines; normal-image full power cycle, music, immediate commands from both sides and direction LEDs; 120-second DSP liveness with 70.7 seconds of music, stopped intentionally by the user."
+    },
+    "hardware_validated": false,
+    "ic_vnr_enabled": true,
+    "linked_version": [
+      1,
+      2,
+      0,
+      4,
+      13
+    ],
+    "local_source_sha256": "c2b5cf4c14c920a1d692bddf9e5b3b1a1ef4bd6f894af683ff4dbae157e0de29",
+    "post_aec_speech_tracking": true,
+    "protocol": "0x11",
+    "upstream_develop": "ace8050265f134c1e0442661c8a16866467c9e53",
+    "version": "1.2.0-dev.13"
   },
   "beam_ic": {
     "compact_frames_pr132": null,

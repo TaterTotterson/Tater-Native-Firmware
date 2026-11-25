@@ -89,7 +89,8 @@ def test_production_channel_arithmetic(tmp_path, channels, sample_rate, backend)
         pytest.skip("The XMOS simulator is required")
     config = re.sub(r'^#include .*$', '', (FIRMWARE / "src/app_conf.h").read_text(), flags=re.M)
     layout = (FIXED / "audio_pipeline_dsp.h").read_text()
-    frame = layout[layout.index("typedef struct {"):layout.index("typedef struct stage_delay_ctx")]
+    frame = layout[layout.index("#if appconfSAT1_SPEECH_FRONTEND\n#define SAT1_VOICE_METADATA_BYTES"):
+                   layout.index("typedef struct stage_delay_ctx")]
     legacy_frame = r'''
 typedef struct {
     _Alignas(8) int32_t samples[CHANNELS][240];
@@ -401,6 +402,58 @@ int main(void) {
     subprocess.run([compiler, "-std=c11", "-Werror=implicit-function-declaration", *flags,
         f"-DCHANNELS={channels}", f"-DSAMPLE_RATE={sample_rate}",
         str(harness), "-o", str(binary)], check=True)
+    subprocess.run((["xsim"] if backend == "xcore" else []) + [str(binary)], check=True)
+
+
+@pytest.mark.parametrize("bench", [0, 1])
+@pytest.mark.parametrize("backend", ["host", "xcore"])
+def test_voice_metadata_frame_layout(tmp_path, bench, backend):
+    compiler = shutil.which("xcc" if backend == "xcore" else "cc")
+    if not compiler or (backend == "xcore" and not shutil.which("xsim")):
+        pytest.skip(f"The {backend} compiler/simulator is required")
+    layout = (FIXED / "audio_pipeline_dsp.h").read_text()
+    frame = layout[layout.index("#if appconfSAT1_SPEECH_FRONTEND\n#define SAT1_VOICE_METADATA_BYTES"):
+                   layout.index("typedef struct stage_delay_ctx")]
+    source = r'''
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+#define appconfSAT1_SPEECH_FRONTEND 1
+#define appconfMIC_PIPELINE_PROC_CHANNELS 4
+#define appconfMIC_PIPELINE_REF_CHANNELS 2
+#define appconfAUDIO_PIPELINE_FRAME_ADVANCE 240
+#define portBYTE_ALIGNMENT 8
+typedef struct { int32_t mant, exp; } float_s32_t;
+#include "voice_frontend/sat1_voice_policy.h"
+#include "bench/audio_bench_format.h"
+''' + frame + r'''
+static struct { uint64_t before; frame_data_t frame; uint64_t after; } tx, rx;
+int main(void) {
+    assert(sizeof(frame_data_t) == (appconfSAT1_AUDIO_BENCH ? 11608 : 5832));
+    assert(offsetof(frame_data_t, voice) == 5784);
+    tx.before = tx.after = rx.before = rx.after = UINT64_C(0x123456789abcdef);
+    memset(&tx.frame, 0xa5, sizeof(tx.frame));
+    tx.frame.voice.calibration.mic_gain_q15[3] = 46341;
+    tx.frame.voice.calibration.active_mic_mask = 7;
+    tx.frame.voice.speech_q15 = 30000;
+    tx.frame.voice.flags = SAT1_VOICE_NEAR_SPEECH | SAT1_VOICE_UNSETTLED;
+    memcpy(&rx.frame, &tx.frame, sizeof(tx.frame));
+    assert(memcmp(&rx.frame, &tx.frame, sizeof(tx.frame)) == 0);
+    assert(rx.frame.voice.calibration.mic_gain_q15[3] == 46341);
+    assert(rx.frame.voice.calibration.active_mic_mask == 7);
+    assert(rx.frame.voice.speech_q15 == 30000);
+    assert(rx.before == tx.before && rx.after == tx.after);
+    return 0;
+}
+'''
+    harness = tmp_path / "voice_frame.c"
+    harness.write_text(source)
+    binary = tmp_path / ("voice_frame.xe" if backend == "xcore" else "voice_frame")
+    flags = (["-target=XCORE-AI-EXPLORER", "-Os", "-mcmodel=large"] if backend == "xcore"
+             else ["-fsanitize=undefined,address", "-fno-sanitize-recover=all"])
+    subprocess.run([compiler, "-std=c11", *flags, f"-DappconfSAT1_AUDIO_BENCH={bench}",
+                    "-I", str(FIRMWARE / "src"), str(harness), "-o", str(binary)], check=True)
     subprocess.run((["xsim"] if backend == "xcore" else []) + [str(binary)], check=True)
 
 

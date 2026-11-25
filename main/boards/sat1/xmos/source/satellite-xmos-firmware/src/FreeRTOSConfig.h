@@ -48,7 +48,12 @@ your application. */
 #if ON_TILE(0)
 #if appconfSAT1_AUDIO_BENCH
 /* Diagnostic frames are reserved statically instead of allocated per frame. */
+#if appconfSAT1_SPEECH_FRONTEND
+/* VNR/tracking and protected IC need larger task stacks on the postprocess tile. */
+#define configTOTAL_HEAP_SIZE                   152*1024
+#else
 #define configTOTAL_HEAP_SIZE                   144*1024
+#endif
 #else
 #define configTOTAL_HEAP_SIZE                   160*1024
 #endif

@@ -309,10 +309,15 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
         sat1_bench_end(SAT1_BENCH_RAW_BEAM_LOCK_WAIT);
 #endif
         sat1_beamformer_analyze_frame(&sat1_beamformer, raw_mics, frame_count);
+#if !appconfSAT1_SPEECH_FRONTEND
         uint8_t active_mic_mask = sat1_beamformer.active_mic_mask;
+#endif
         xSemaphoreGive(sat1_beam_mutex);
+#if !appconfSAT1_SPEECH_FRONTEND
         doa_estimator_set_mic_health(active_mic_mask);
 #endif
+#endif
+#if !appconfSAT1_SPEECH_FRONTEND
 #if appconfSAT1_AUDIO_BENCH
         sat1_bench_begin(SAT1_BENCH_DIRECTION_ANALYSIS);
 #endif
@@ -337,6 +342,7 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
         sat1_beam_direction = direction;
         xSemaphoreGive(sat1_beam_mutex);
 #endif
+#endif /* Raw DoA is replaced by post-AEC speech tracking in the frontend. */
     }
 #elif appconfAUDIO_PIPELINE_CHANNELS >= 2
     if (received == frame_count) {
@@ -438,7 +444,7 @@ int audio_pipeline_output_channels(const int32_t *processed_samples,
     return AUDIO_PIPELINE_FREE_FRAME;
 }
 
-#if ON_TILE(SPEAKER_PIPELINE_TILE_NO)
+#if ON_TILE(SPEAKER_PIPELINE_TILE_NO) && !appconfSAT1_SPEECH_FRONTEND
 void sat1_post_aec_beam(int32_t samples[4][240])
 {
     int32_t output[240];
@@ -717,7 +723,8 @@ void startup_task(void *arg)
     );
 #endif
 
-#if ON_TILE(MICARRAY_TILE_NO)
+#if (appconfSAT1_SPEECH_FRONTEND && ON_TILE(0)) || \
+    (!appconfSAT1_SPEECH_FRONTEND && ON_TILE(MICARRAY_TILE_NO))
     servicer_t doa_servicer_ctx;
     doa_servicer_init(&doa_servicer_ctx);
 

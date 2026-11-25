@@ -66,6 +66,9 @@ static void *audio_pipeline_input_i(void *input_app_data)
                            frame_data->aec_reference_audio_samples[0],
                            frame_data->aec_reference_audio_samples[1],
                            appconfAUDIO_PIPELINE_FRAME_ADVANCE);
+#if appconfSAT1_SPEECH_FRONTEND
+    sat1_beamformer_get_diagnostics(&frame_data->voice.calibration);
+#endif
 
 #if appconfSAT1_AUDIO_BENCH
     sat1_bench_snapshot(&frame_data->bench,
@@ -175,7 +178,7 @@ static void stage_aec(frame_data_t *frame_data)
     frame_data->ref_active_flag = aec_detect_input_activity(
             frame_data->aec_reference_audio_samples, f64_to_float_s32(0.001), AEC_MAX_X_CHANNELS);
     memcpy(frame_data->samples, stage1_output, AEC_MAX_Y_CHANNELS * appconfAUDIO_PIPELINE_FRAME_ADVANCE * sizeof(int32_t));
-#if appconfSAT1_POST_AEC_BEAM
+#if appconfSAT1_POST_AEC_BEAM && !appconfSAT1_SPEECH_FRONTEND
     sat1_post_aec_beam(frame_data->samples);
 #endif
 #if appconfSAT1_AUDIO_BENCH

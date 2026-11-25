@@ -21,12 +21,14 @@ FRAME = 240
 CHANNELS = 12
 NAMES = ("raw_e", "raw_w", "raw_n", "raw_s", "reference_l", "reference_r",
          "processed_agc", "pre_agc_ns")
-PROFILES = {1: ("beam_ic", 9), 2: ("legacy", 12), 3: ("aec4", 10), 4: ("aec4_beam", 11)}
+PROFILES = {1: ("beam_ic", 9), 2: ("legacy", 12), 3: ("aec4", 10), 4: ("aec4_beam", 11),
+            5: ("aec4_track", 14)}
 CASES = ("quiet", "far_field", "music_only", "double_talk", "moving", "tv", "reboot")
 STAGES = ("capture", "reference_wait", "mic_wait", "raw_analysis", "aec",
           "intertile_tx", "intertile_rx", "ic", "ns", "agc", "i2s_output",
           "usb_output", "speaker_input", "reference_tx", "frame_pool_wait",
-          "raw_beam_lock_wait", "direction_analysis", "post_beam_lock_wait", "post_beam")
+          "raw_beam_lock_wait", "direction_analysis", "post_beam_lock_wait", "post_beam",
+          "voice_analysis")
 
 
 def json_write(path, value):

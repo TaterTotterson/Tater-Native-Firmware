@@ -59,10 +59,14 @@ manifest's factory hash is expected provenance, not a hash read from hardware.
 | legacy (optional) | 1.2.0-dev.12 | 2 |
 | aec4 | 1.2.0-dev.10 | 3 |
 | aec4_beam | 1.2.0-dev.11 | 4 |
+| aec4_track (experimental) | 1.2.0-dev.14 | 5 |
 
 These compare complete pipelines, not microphone count alone. `beam_ic` keeps
 two independent playback references and enables IC/VNR. The four-mic variants
-mix playback references to mono and bypass IC/VNR. Those differences must be
+`aec4` and `aec4_beam` mix playback references to mono and bypass IC/VNR.
+`aec4_track` retains mono-reference AEC and adds post-AEC speech tracking and
+protected IC/VNR cleanup; see [TRACKING-CLEANUP.md](TRACKING-CLEANUP.md).
+Those differences must be
 retained in any interpretation; stereo-reference four-mic AEC is later work.
 
 These commands build only. Installing a bench image is a separate hardware
@@ -176,6 +180,7 @@ after about 42.95 seconds. Heap/minimum-ever heap and USB drops are reported.
 | 16 | Four-mic direction analysis outside the beam mutex |
 | 17 | Post-AEC beam mutex wait |
 | 18 | Post-AEC beam processing and output copy |
+| 19 | Post-AEC VNR, echo evidence, direction and beam (`aec4_track`) |
 
 Compare several snapshots: normal waits may be active. An entered-but-not-ended
 AEC differs from advancing AEC with blocked I2S output. CDC itself shares MCU
@@ -186,7 +191,8 @@ Bench frames use two fixed buffers on tile 1 and three on tile 0. The input
 task waits for a returned buffer when the pool is occupied. Ownership returns
 to the pool after intertile transmission or final output; the generic pipeline
 must not free these buffers. Compile-time checks bound each profile's frame
-size. Bench-only heap budgets are 120 KiB on tile 1 and 144 KiB on tile 0;
+size. Bench-only heap budgets are 120 KiB on tile 1 and 144 KiB on tile 0
+(152 KiB on tile 0 for `aec4_track`);
 normal builds retain their existing heap budgets and allocate DSP frames from
 the heap.
 
@@ -236,10 +242,12 @@ from boot logs and a fresh capture instead.
 
 Next: diagnose physical stalls; establish runtime memory/deadline margins;
 verify repeated cold/ESP-only restarts and speaker routes; compare against
-dev.8. Then evaluate stereo-reference four-mic AEC, adaptive directional
-processing during playback, residual-echo suppression and dereverberation,
-followed by wake/turn-taking tuning. This milestone does not establish HomePod
-parity or resolve issue #129.
+dev.8. The experimental `aec4_track` profile now implements speech-aware
+direction tracking during playback and protected IC/residual-echo cleanup;
+its functional checks are documented in [TRACKING-CLEANUP.md](TRACKING-CLEANUP.md).
+Stereo-reference four-mic AEC, dereverberation, quantified recognition/movement
+tests and wake/turn-taking tuning remain further work. This milestone does not
+establish HomePod parity or resolve issue #129.
 
 Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
 

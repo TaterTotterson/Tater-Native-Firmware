@@ -399,6 +399,29 @@ void sat1_beamformer_process_calibrated_frame(
     size_t frame_count,
     const doa_estimator_state_t *direction)
 {
+    sat1_beamformer_process_calibrated_frame_with_reference(
+        beamformer, output, NULL, microphones, frame_count, direction);
+}
+
+void sat1_beamformer_set_calibration(sat1_beamformer_t *beamformer,
+    const sat1_beamformer_diagnostics_t *calibration)
+{
+    if (beamformer == NULL || calibration == NULL) return;
+    if (!beamformer->initialized) sat1_beamformer_reset(beamformer);
+    memcpy(beamformer->mic_level_ema, calibration->mic_level,
+           sizeof(beamformer->mic_level_ema));
+    memcpy(beamformer->mic_gain_q15, calibration->mic_gain_q15,
+           sizeof(beamformer->mic_gain_q15));
+    memcpy(beamformer->mic_health_flags, calibration->mic_health_flags,
+           sizeof(beamformer->mic_health_flags));
+    beamformer->active_mic_mask = calibration->active_mic_mask & 0x0f;
+}
+
+void sat1_beamformer_process_calibrated_frame_with_reference(
+    sat1_beamformer_t *beamformer, int32_t *output, int32_t *noise_reference,
+    const int32_t *microphones[4], size_t frame_count,
+    const doa_estimator_state_t *direction)
+{
     if (beamformer == NULL || output == NULL || microphones == NULL ||
         frame_count == 0) {
         return;
@@ -419,6 +442,7 @@ void sat1_beamformer_process_calibrated_frame(
 
     for (size_t sample = 0; sample < frame_count; sample++) {
         int64_t sum = 0;
+        int64_t first = 0;
         uint32_t active_count = 0;
         for (size_t mic = 0; mic < SAT1_BEAMFORMER_MIC_COUNT; mic++) {
             if ((beamformer->active_mic_mask & (1u << mic)) == 0) {
@@ -434,13 +458,19 @@ void sat1_beamformer_process_calibrated_frame(
                 beamformer->history[mic],
                 sample,
                 delay_q8);
-            sum += ((int64_t)delayed * beamformer->mic_gain_q15[mic]) /
-                   SAT1_BEAMFORMER_GAIN_Q15_SCALE;
+            int64_t calibrated = ((int64_t)delayed * beamformer->mic_gain_q15[mic]) /
+                                 SAT1_BEAMFORMER_GAIN_Q15_SCALE;
+            if (active_count == 0) first = calibrated;
+            sum += calibrated;
             active_count++;
         }
         output[sample] = active_count > 0
                              ? saturate_i32(sum / active_count)
                              : 0;
+        if (noise_reference != NULL) {
+            noise_reference[sample] = active_count > 1
+                ? saturate_i32((first - sum / active_count) / 2) : 0;
+        }
     }
 
     memcpy(beamformer->current_delay_q8,

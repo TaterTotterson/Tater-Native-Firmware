@@ -33,6 +33,9 @@
 #ifndef appconfSAT1_POST_AEC_BEAM
 #define appconfSAT1_POST_AEC_BEAM 0
 #endif
+#ifndef appconfSAT1_SPEECH_FRONTEND
+#define appconfSAT1_SPEECH_FRONTEND 0
+#endif
 
 /* Audio Pipeline Configuration */
 #define appconfAUDIO_CLOCK_FREQUENCY            MIC_ARRAY_CONFIG_MCLK_FREQ

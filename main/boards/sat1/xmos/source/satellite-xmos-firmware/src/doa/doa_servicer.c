@@ -60,7 +60,11 @@ static control_ret_t doa_servicer_read_cmd(control_resid_t resid,
     case DOA_SERVICER_CMD_READ_STATE:
     {
         doa_estimator_state_t state;
+#if appconfSAT1_SPEECH_FRONTEND
+        doa_estimator_get_observation(&state);
+#else
         doa_estimator_get_state(&state);
+#endif
 
         store_u16_le(&payload_ptr[0], (uint16_t)state.sample_delay);
         payload_ptr[2] = state.confidence;

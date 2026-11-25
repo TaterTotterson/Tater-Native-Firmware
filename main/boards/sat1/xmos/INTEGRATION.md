@@ -18,7 +18,8 @@ for the historical observations and [IC-VNR-UPDATE.md](IC-VNR-UPDATE.md) for dev
 | `sat1`, `sat1_xmos_beam_ic` | 1.2.0-dev.8 | Release default: calibrated pre-AEC beam, stereo-reference 2Y2X AEC, IC/VNR, NS and AGC |
 | `sat1_xmos_legacy` | 1.2.0-dev.1 | fwk_voice 0.9.0 and protocol 0x11, retaining the pre-AEC beam and two stereo echo references |
 | `sat1_xmos_aec4` | 1.2.0-dev.2 | Individual four-mic AEC, mono echo reference, residual averaging; raw DoA/health telemetry |
-| `sat1_xmos_aec4_beam` | 1.2.0-dev.3 | Individual four-mic AEC followed by our calibrated, steered residual beam |
+| `sat1_xmos_aec4_beam` | 1.2.0-dev.3 | Individual four-mic AEC followed by our calibrated, steered residual beam; retained comparison baseline |
+| `sat1_xmos_aec4_track` | 1.2.0-dev.13 | Four-mic AEC followed by speech-gated direction tracking and protected IC/echo cleanup; see [TRACKING-CLEANUP.md](TRACKING-CLEANUP.md) for qualification |
 
 All candidates preserve noise suppression, AGC, the two ESP output channels,
 button/LED control, USB DFU, and the raw USB lab target source. Calibration and

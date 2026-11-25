@@ -49,6 +49,9 @@ static const char *TAG = "tater_audio_sat1";
 #define SAT1_XMOS_TARGET_COUNTER 8
 #define SAT1_XMOS_TARGET_IMAGE_SIZE 258048U
 #endif
+#ifndef SAT1_XMOS_SPEECH_TRACKING
+#define SAT1_XMOS_SPEECH_TRACKING 0
+#endif
 
 extern const uint8_t sat1_xmos_asset_start[] asm("_binary_" SAT1_XMOS_ASSET "_start");
 extern const uint8_t sat1_xmos_asset_end[] asm("_binary_" SAT1_XMOS_ASSET "_end");
@@ -71,6 +74,8 @@ extern const uint8_t sat1_xmos_asset_end[] asm("_binary_" SAT1_XMOS_ASSET "_end"
 #define SAT1_DOA_FLAG_VALID (1u << 0)
 #define SAT1_DOA_FLAG_FOUR_MIC (1u << 1)
 #define SAT1_DOA_CONTROL_FORCE_OMNI (1u << 2)
+#define SAT1_DOA_CONTROL_PLAYBACK_ACTIVE (1u << 0)
+#define SAT1_DOA_CONTROL_VOICE_ACTIVE (1u << 3)
 #define SAT1_DOA_CONTROL_HEARTBEAT_US 1000000
 #define SAT1_DOA_PLAYBACK_LEVEL_THRESHOLD 0.004f
 #define SAT1_XMOS_VERSION_READY_TIMEOUT_MS 8000
@@ -1471,8 +1476,15 @@ static esp_err_t sat1_sync_doa_control(int64_t now_us)
     uint8_t flags = 0;
     if (s_speaker_enabled &&
         tater_audio_speaker_level() >= SAT1_DOA_PLAYBACK_LEVEL_THRESHOLD) {
+#if SAT1_XMOS_SPEECH_TRACKING
+        flags |= SAT1_DOA_CONTROL_PLAYBACK_ACTIVE;
+#else
         flags |= SAT1_DOA_CONTROL_FORCE_OMNI;
+#endif
     }
+#if SAT1_XMOS_SPEECH_TRACKING
+    if (tater_protocol_voice_active()) flags |= SAT1_DOA_CONTROL_VOICE_ACTIVE;
+#endif
 
     bool heartbeat_due = last_send_us == 0 ||
                          now_us - last_send_us >=
@@ -1578,7 +1590,9 @@ static void doa_task(void *arg)
             }
         }
         sat1_output_poll(esp_timer_get_time());
-        vTaskDelay(tater_protocol_voice_active() ? pdMS_TO_TICKS(25) : pdMS_TO_TICKS(125));
+        /* Keep control traffic bounded during a voice session as well as idle.
+         * The direction display interpolates between these observations. */
+        vTaskDelay(pdMS_TO_TICKS(125));
     }
 }
 
@@ -2163,12 +2177,14 @@ bool tater_audio_doa_snapshot(tater_audio_doa_t *out)
     if (!out) {
         return false;
     }
-    int64_t now = esp_timer_get_time();
     int64_t updated_us = 0;
     portENTER_CRITICAL(&s_doa_lock);
     *out = s_doa;
     updated_us = s_doa_update_us;
     portEXIT_CRITICAL(&s_doa_lock);
+    /* Read time after the snapshot: an update while acquiring the lock must
+     * not make a fresh sample look as though it came from the future. */
+    int64_t now = esp_timer_get_time();
     if (updated_us <= 0 || now < updated_us) {
         out->age_ms = UINT32_MAX;
         return false;

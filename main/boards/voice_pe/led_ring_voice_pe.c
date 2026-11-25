@@ -420,8 +420,9 @@ static bool current_doa_position(float *position, uint8_t *confidence)
         return false;
     }
     if (doa.four_mic) {
-        bool tdoa_has_direction = doa.sample_delay != 0 || doa.vertical_delay != 0 || doa.angle_index != (TATER_LED_COUNT / 2);
-        if (doa.valid && tdoa_has_direction && doa.confidence >= SAT1_DOA_MIN_CONFIDENCE) {
+        /* A valid fractional direction can round both integer delays to zero.
+         * The centre LED index is also a real direction on the full ring. */
+        if (doa.valid && doa.confidence >= SAT1_DOA_MIN_CONFIDENCE) {
             *position = wrap_position((float)(doa.angle_index % TATER_LED_COUNT));
             if (confidence) {
                 *confidence = doa.confidence;
@@ -1433,6 +1434,9 @@ static void led_task(void *arg)
             delay_ms = 50;
 #endif
         }
+#endif
+#if TATER_BOARD_SAT1
+        delay_ms = 100;
 #endif
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }

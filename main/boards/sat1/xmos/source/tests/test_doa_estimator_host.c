@@ -203,6 +203,64 @@ static void expect_playback_aware_locking(const int east[4],
                 state.angle_index);
         exit(1);
     }
+    doa_estimator_state_t observation = {0};
+    doa_estimator_get_observation(&observation);
+    if (!(observation.flags & DOA_ESTIMATOR_FLAG_VALID) ||
+        observation.frame_counter != state.frame_counter ||
+        observation.confidence == 0) {
+        fprintf(stderr, "force omni erased the display observation\n");
+        exit(1);
+    }
+}
+
+static void expect_speech_gated_moving_tracking(const int east[4], const int west[4])
+{
+    doa_estimator_state_t state = {0};
+    doa_estimator_reset();
+    doa_estimator_set_tracking_evidence(0, 0);
+    feed_direction(east, TEST_FRAMES, 1);
+    doa_estimator_get_observation(&state);
+    if (state.flags & DOA_ESTIMATOR_FLAG_VALID) {
+        fprintf(stderr, "nonspeech produced a display direction\n"); exit(1);
+    }
+    doa_estimator_set_tracking_evidence(1, 0);
+    feed_direction(east, TEST_FRAMES, 1);
+    doa_estimator_get_state(&state);
+    if (!(state.flags & DOA_ESTIMATOR_FLAG_VALID)) {
+        fprintf(stderr, "speech tracking did not acquire\n"); exit(1);
+    }
+    doa_estimator_set_control(DOA_ESTIMATOR_CONTROL_PLAYBACK_ACTIVE);
+    for (unsigned i = 0; i < 14; ++i) feed_direction(west, 1, 1);
+    doa_estimator_get_state(&state);
+    if (!(state.flags & DOA_ESTIMATOR_FLAG_VALID) ||
+        !(state.flags & DOA_ESTIMATOR_FLAG_PLAYBACK) ||
+        ring_distance(state.angle_index, 6) > 1) {
+        fprintf(stderr, "speech tracking froze during playback: angle=%u flags=%u\n",
+                state.angle_index, state.flags); exit(1);
+    }
+    doa_estimator_set_tracking_evidence(1, 1);
+    feed_direction(west, 1, 1);
+    doa_estimator_get_state(&state);
+    if (state.flags & DOA_ESTIMATOR_FLAG_VALID) {
+        fprintf(stderr, "echo-dominated playback kept steering\n"); exit(1);
+    }
+    doa_estimator_get_observation(&state);
+    if (!(state.flags & DOA_ESTIMATOR_FLAG_VALID)) {
+        fprintf(stderr, "audio fallback erased the measured display direction\n"); exit(1);
+    }
+    doa_estimator_set_control(DOA_ESTIMATOR_CONTROL_PLAYBACK_ACTIVE |
+                              DOA_ESTIMATOR_CONTROL_VOICE_ACTIVE);
+    feed_direction(west, 1, 1);
+    doa_estimator_get_state(&state);
+    if (!(state.flags & DOA_ESTIMATOR_FLAG_VALID)) {
+        fprintf(stderr, "voice-session hint did not permit speech tracking\n"); exit(1);
+    }
+    doa_estimator_set_tracking_evidence(0, 1);
+    feed_direction(west, TEST_FRAMES, 1);
+    doa_estimator_get_observation(&state);
+    if (state.flags & DOA_ESTIMATOR_FLAG_VALID) {
+        fprintf(stderr, "silent playback refreshed the LED direction\n"); exit(1);
+    }
 }
 
 int main(void)
@@ -295,6 +353,7 @@ int main(void)
     }
 
     expect_playback_aware_locking(east, west, south);
+    expect_speech_gated_moving_tracking(east, west);
 
     puts("DoA estimator host tests passed.");
     return 0;

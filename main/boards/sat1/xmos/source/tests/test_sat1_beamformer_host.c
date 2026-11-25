@@ -330,6 +330,51 @@ static void expect_cleaned_audio_does_not_change_calibration(void)
     }
 }
 
+static void expect_blocking_reference_preserves_target(void)
+{
+    /* Imported calibration must preserve this instance's steering/history.
+     * Repeat with East failed: the reference must use the first healthy mic. */
+    for (unsigned mask = 15; mask >= 14; --mask) {
+        sat1_beamformer_t beam;
+        sat1_beamformer_reset(&beam);
+        beam.history[0][0] = 12345;
+        beam.current_delay_q8[0] = 789;
+        sat1_beamformer_diagnostics_t calibration = {0};
+        calibration.active_mic_mask = mask;
+        for (unsigned mic = 0; mic < 4; ++mic) {
+            calibration.mic_gain_q15[mic] = 32768;
+            calibration.mic_level[mic] = 1000 + mic;
+        }
+        if (mask == 14) calibration.mic_health_flags[0] = SAT1_MIC_HEALTH_DEAD;
+        sat1_beamformer_set_calibration(&beam, &calibration);
+        if (beam.history[0][0] != 12345 || beam.current_delay_q8[0] != 789 ||
+            beam.active_mic_mask != mask || beam.mic_level_ema[3] != 1003) {
+            fprintf(stderr, "Imported calibration changed local steering/history\n");
+            exit(1);
+        }
+        doa_estimator_state_t east = {
+            .sample_delay_q8 = 4 * DOA_ESTIMATOR_LAG_Q8_SCALE,
+            .flags = DOA_ESTIMATOR_FLAG_VALID | DOA_ESTIMATOR_FLAG_FOUR_MIC,
+        };
+        for (unsigned frame = 0; frame < TEST_FRAMES; ++frame) {
+            const int32_t *mics[4];
+            int32_t output[FRAME_SAMPLES], blocked[FRAME_SAMPLES];
+            for (unsigned mic = 0; mic < 4; ++mic)
+                mics[mic] = microphone_audio[mic] + frame * FRAME_SAMPLES;
+            sat1_beamformer_process_calibrated_frame_with_reference(
+                &beam, output, blocked, mics, FRAME_SAMPLES, &east);
+            if (frame == 0) continue;
+            for (unsigned i = 0; i < FRAME_SAMPLES; ++i) {
+                unsigned n = frame * FRAME_SAMPLES + i;
+                if (output[i] != source_audio[n - 4] || blocked[i] != 0) {
+                    fprintf(stderr, "Aligned target leaked into blocking reference\n");
+                    exit(1);
+                }
+            }
+        }
+    }
+}
+
 int main(void)
 {
     build_directional_audio();
@@ -339,6 +384,7 @@ int main(void)
     expect_direction_hold_and_release();
     expect_failed_mic_fallback();
     expect_cleaned_audio_does_not_change_calibration();
+    expect_blocking_reference_preserves_target();
     puts("Sat1 beamformer host tests passed.");
     return 0;
 }

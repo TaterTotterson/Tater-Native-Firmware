@@ -20,6 +20,7 @@
 #define DOA_ESTIMATOR_MIN_DIRECTION_CONFIDENCE (12U)
 
 static volatile doa_estimator_state_t latest_state = {0};
+static volatile doa_estimator_state_t latest_observation = {0};
 static int32_t four_mic_history[4][DOA_ESTIMATOR_HISTORY_SAMPLES];
 static size_t four_mic_history_count;
 static int32_t smoothed_ew_delay_q8;
@@ -38,6 +39,9 @@ static uint8_t held_confidence;
 static uint8_t steering_lock_valid;
 static uint8_t playback_freeze_valid;
 static uint8_t steering_mode_flags;
+static uint8_t tracking_enabled, tracking_speech, tracking_echo;
+static int32_t candidate_ew_q8, candidate_ns_q8;
+static unsigned candidate_frames;
 
 typedef struct {
     int lag;
@@ -451,6 +455,8 @@ static uint8_t capture_latest_or_candidate(
 
 static void apply_steering_control(doa_estimator_state_t *next)
 {
+    /* Display the measured direction independently of audio fallback/locking. */
+    latest_observation = *next;
     uint8_t control = requested_control_flags &
                       DOA_ESTIMATOR_CONTROL_MASK;
     steering_mode_flags = 0;
@@ -477,6 +483,16 @@ static void apply_steering_control(doa_estimator_state_t *next)
     steering_lock_valid = 0;
 
     if ((control & DOA_ESTIMATOR_CONTROL_PLAYBACK_ACTIVE) != 0) {
+        if (tracking_enabled) {
+            playback_freeze_valid = 0;
+            next->flags |= DOA_ESTIMATOR_FLAG_PLAYBACK;
+            if (tracking_echo && !(control & DOA_ESTIMATOR_CONTROL_VOICE_ACTIVE)) {
+                steering_mode_flags = DOA_ESTIMATOR_MODE_FORCE_OMNI;
+                clear_published_direction(next);
+                next->flags |= DOA_ESTIMATOR_FLAG_PLAYBACK;
+            }
+            return;
+        }
         if (!playback_freeze_valid) {
             playback_freeze_valid = capture_latest_or_candidate(next);
         }
@@ -529,6 +545,7 @@ void doa_estimator_process_frame(const int32_t *mic0,
         next.flags = DOA_ESTIMATOR_FLAG_VALID;
     }
 
+    latest_observation = next;
     store_latest_state(&next);
 }
 
@@ -557,7 +574,17 @@ void doa_estimator_process_frame_4(const int32_t *east,
     }
     uint32_t frame_energy =
         mean_four_mic_energy(next.mic_energy, frame_count, mic_mask);
-    if (!four_mic_signal_present(frame_energy)) {
+    uint8_t signal_present;
+    if (tracking_enabled) {
+        /* The VNR has already classified the cleaned signal. Do not train a
+         * new noise floor from a person speaking during boot/acquisition. */
+        if (!tracking_speech) (void)four_mic_signal_present(frame_energy);
+        signal_present = tracking_speech && frame_energy > DOA_ESTIMATOR_NOISE_FLOOR_MIN;
+        signal_energy_active = signal_present;
+    } else {
+        signal_present = four_mic_signal_present(frame_energy);
+    }
+    if (!signal_present) {
         /*
          * Never mix low-level room noise into the correlation history. The
          * ESP renderer will hold the last valid direction briefly while this
@@ -604,14 +631,35 @@ void doa_estimator_process_frame_4(const int32_t *east,
             smoothed_ns_delay_q8 = ns_delay_q8;
             smoothed_direction_valid = 1;
         } else {
-            smoothed_ew_delay_q8 +=
-                ((ew_delay_q8 - smoothed_ew_delay_q8) *
-                 DOA_ESTIMATOR_SMOOTH_NUMERATOR) /
-                DOA_ESTIMATOR_SMOOTH_DENOMINATOR;
-            smoothed_ns_delay_q8 +=
-                ((ns_delay_q8 - smoothed_ns_delay_q8) *
-                 DOA_ESTIMATOR_SMOOTH_NUMERATOR) /
-                DOA_ESTIMATOR_SMOOTH_DENOMINATOR;
+            int numerator = DOA_ESTIMATOR_SMOOTH_NUMERATOR;
+            int max_step = 1024;
+            if (tracking_enabled) {
+                int distance = abs_int(ew_delay_q8 - smoothed_ew_delay_q8) +
+                               abs_int(ns_delay_q8 - smoothed_ns_delay_q8);
+                numerator = confidence >= 48 ? 4 : confidence >= 24 ? 3 : 1;
+                max_step = confidence >= 48 ? 128 : 64;
+                if (distance > 384) {
+                    if (abs_int(ew_delay_q8 - candidate_ew_q8) +
+                        abs_int(ns_delay_q8 - candidate_ns_q8) <= 128) {
+                        if (candidate_frames < 3) ++candidate_frames;
+                    } else {
+                        candidate_frames = 1;
+                    }
+                    candidate_ew_q8 = ew_delay_q8;
+                    candidate_ns_q8 = ns_delay_q8;
+                    if (candidate_frames < 3) numerator = 0;
+                } else {
+                    candidate_frames = 0;
+                }
+            }
+            int step_ew = (ew_delay_q8 - smoothed_ew_delay_q8) * numerator / 8;
+            int step_ns = (ns_delay_q8 - smoothed_ns_delay_q8) * numerator / 8;
+            if (step_ew > max_step) step_ew = max_step;
+            if (step_ew < -max_step) step_ew = -max_step;
+            if (step_ns > max_step) step_ns = max_step;
+            if (step_ns < -max_step) step_ns = -max_step;
+            smoothed_ew_delay_q8 += step_ew;
+            smoothed_ns_delay_q8 += step_ns;
         }
 
         invalid_direction_frames = 0;
@@ -656,6 +704,13 @@ void doa_estimator_get_state(doa_estimator_state_t *state)
     memcpy(state->mic_energy, (const void *)latest_state.mic_energy, sizeof(state->mic_energy));
 }
 
+void doa_estimator_get_observation(doa_estimator_state_t *state)
+{
+    if (state != NULL) {
+        *state = latest_observation;
+    }
+}
+
 void doa_estimator_get_diagnostics(doa_estimator_diagnostics_t *diagnostics)
 {
     if (diagnostics == NULL) {
@@ -683,15 +738,26 @@ void doa_estimator_set_mic_health(uint8_t mic_mask)
     active_mic_mask = mic_mask != 0 ? mic_mask : 0x0f;
 }
 
+void doa_estimator_set_tracking_evidence(uint8_t speech_active, uint8_t echo_dominated)
+{
+    tracking_enabled = 1;
+    tracking_speech = speech_active != 0;
+    tracking_echo = echo_dominated != 0;
+}
+
 void doa_estimator_reset(void)
 {
     memset((void *)&latest_state, 0, sizeof(latest_state));
+    memset((void *)&latest_observation, 0, sizeof(latest_observation));
     memset(four_mic_history, 0, sizeof(four_mic_history));
     four_mic_history_count = 0;
     smoothed_ew_delay_q8 = 0;
     smoothed_ns_delay_q8 = 0;
     smoothed_direction_valid = 0;
     invalid_direction_frames = 0;
+    tracking_enabled = tracking_speech = tracking_echo = 0;
+    candidate_ew_q8 = candidate_ns_q8 = 0;
+    candidate_frames = 0;
     noise_floor_energy = 0;
     noise_calibration_frames = 0;
     signal_energy_active = 0;

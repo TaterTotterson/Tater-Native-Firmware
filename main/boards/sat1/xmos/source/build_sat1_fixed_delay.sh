@@ -21,6 +21,7 @@ case "${PIPELINE}" in
   legacy) FW_VERSION=v1.2.0-dev.1 ;;
   aec4) FW_VERSION=v1.2.0-dev.2 ;;
   aec4_beam) FW_VERSION=v1.2.0-dev.3 ;;
+  aec4_track) FW_VERSION=v1.2.0-dev.13 ;;
   *) echo "Unknown SAT1_XMOS_PIPELINE: ${PIPELINE}" >&2; exit 1 ;;
 esac
 if [[ "$BENCH" == "1" ]]; then
@@ -29,6 +30,7 @@ if [[ "$BENCH" == "1" ]]; then
     legacy) FW_VERSION=v1.2.0-dev.12 ;;
     aec4) FW_VERSION=v1.2.0-dev.10 ;;
     aec4_beam) FW_VERSION=v1.2.0-dev.11 ;;
+    aec4_track) FW_VERSION=v1.2.0-dev.14 ;;
   esac
 fi
 TARGET="${SAT1_XMOS_TARGET:-satellite1_firmware_fixed_delay}"
@@ -108,6 +110,8 @@ echo "MD5  ${BUILD_DIR}/${TARGET}.factory.md5"
 if [[ "${SAT1_XMOS_RUN_SIM_TESTS:-0}" == "1" ]]; then
   if [[ "${PIPELINE}" == "legacy" || "${PIPELINE}" == "beam_ic" ]]; then
     SIM_TARGETS=(voice_compat_test)
+  elif [[ "${PIPELINE}" == "aec4_track" ]]; then
+    SIM_TARGETS=(fph_aec_4y_init_canary_test sat1_voice_frontend_test)
   else
     SIM_TARGETS=(fph_aec_4y_init_canary_test sat1_aec_beam_test)
   fi
