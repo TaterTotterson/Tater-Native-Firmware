@@ -8,7 +8,14 @@ NINJA_BIN="${NINJA_BIN:-/opt/homebrew/opt/ninja/bin/ninja}"
 PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/bin/python3.11}"
 VENV_DIR="${SAT1_XMOS_VENV_DIR:-${ROOT_DIR}/.venv}"
 PIPELINE="${SAT1_XMOS_PIPELINE:-beam_ic}"
-BUILD_DIR="${ROOT_DIR}/build_${PIPELINE}"
+BENCH="${SAT1_XMOS_AUDIO_BENCH:-0}"
+case "$BENCH" in
+  0|1) ;;
+  *) echo "SAT1_XMOS_AUDIO_BENCH must be 0 or 1" >&2; exit 1 ;;
+esac
+BUILD_SUFFIX=""
+if [[ "$BENCH" == "1" ]]; then BUILD_SUFFIX="_bench"; fi
+BUILD_DIR="${ROOT_DIR}/build_${PIPELINE}${BUILD_SUFFIX}"
 case "${PIPELINE}" in
   beam_ic) FW_VERSION=v1.2.0-dev.8 ;;
   legacy) FW_VERSION=v1.2.0-dev.1 ;;
@@ -16,7 +23,19 @@ case "${PIPELINE}" in
   aec4_beam) FW_VERSION=v1.2.0-dev.3 ;;
   *) echo "Unknown SAT1_XMOS_PIPELINE: ${PIPELINE}" >&2; exit 1 ;;
 esac
+if [[ "$BENCH" == "1" ]]; then
+  case "$PIPELINE" in
+    beam_ic) FW_VERSION=v1.2.0-dev.9 ;;
+    legacy) FW_VERSION=v1.2.0-dev.12 ;;
+    aec4) FW_VERSION=v1.2.0-dev.10 ;;
+    aec4_beam) FW_VERSION=v1.2.0-dev.11 ;;
+  esac
+fi
 TARGET="${SAT1_XMOS_TARGET:-satellite1_firmware_fixed_delay}"
+if [[ "$BENCH" == "1" && "$TARGET" != satellite1_firmware_fixed_delay ]]; then
+  echo "Audio bench mode requires satellite1_firmware_fixed_delay" >&2
+  exit 1
+fi
 CLEAN_BUILD="${XMOS_CLEAN_BUILD:-1}"
 
 if [[ ! -x "${XTC_DIR}/bin/xcc" ]]; then
@@ -77,6 +96,7 @@ fi
   -DPython3_EXECUTABLE="${VENV_DIR}/bin/python" \
   -DSAT1_XMOS_PIPELINE="${PIPELINE}" \
   -DSAT1_XMOS_VERSION="${FW_VERSION}" \
+  -DSAT1_AUDIO_BENCH="${BENCH}" \
   -DBUILD_VOICE_COMPAT_TESTS=ON \
   -DFPH_AEC_4Y_TESTS=ON
 

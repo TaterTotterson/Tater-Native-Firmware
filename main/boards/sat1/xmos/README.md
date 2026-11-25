@@ -1,5 +1,8 @@
 # Sat1 XMOS Firmware
 
+Lab capture and stall instrumentation are documented in [AUDIO-BENCH.md](AUDIO-BENCH.md).
+They use separate images and do not change the release default.
+
 The standard native `sat1` environment in **0.7.0-r3** embeds
 `sat1_xmos_1_2_0_dev8_factory.bin.zlib` and installs XMOS **1.2.0-dev.8** when
 another version is present. The same uncompressed image is bundled by RPi

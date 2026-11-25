@@ -113,10 +113,18 @@ extern const uint16_t tud_audio_desc_lengths[CFG_TUD_AUDIO];
 #define CFG_TUD_AUDIO_FUNC_1_CTRL_BUF_SZ                    64
 
 /* TODO make these configurable in app_conf? */
+#if appconfSAT1_AUDIO_BENCH
+#define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX          4
+#else
 #define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX          2
+#endif
 #define CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX          2
 
-#if appconfUSB_AUDIO_RAW_MIC_CAPTURE
+#if appconfSAT1_AUDIO_BENCH
+#include "bench/audio_bench_format.h"
+#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX                  SAT1_BENCH_CHANNELS
+#define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX                  2
+#elif appconfUSB_AUDIO_RAW_MIC_CAPTURE
 #define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX                  4
 #define CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX                  2
 #elif appconfUSB_AUDIO_MODE == appconfUSB_AUDIO_RELEASE
@@ -157,7 +165,12 @@ extern const uint16_t tud_audio_desc_lengths[CFG_TUD_AUDIO];
 #define CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ_MAX           (CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ)    // Maximum EP IN size for all AS alternate settings used
 #define CFG_TUD_AUDIO_FUNC_1_EP_IN_SW_BUF_SZ        CFG_TUD_AUDIO_FUNC_1_EP_IN_SZ
 
+#if appconfSAT1_AUDIO_BENCH
+/* Capture only: playback remains driven by the native ESP32 I2S source. */
+#define CFG_TUD_AUDIO_ENABLE_EP_OUT                 0
+#else
 #define CFG_TUD_AUDIO_ENABLE_EP_OUT                 1
+#endif
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ              ((AUDIO_FRAMES_PER_USB_SPK_FRAME + 1) * CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_RX * CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_RX)
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ_MAX          (CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ + 2)   // Maximum EP OUT size for all AS alternate settings used. Plus 2 for CRC
 #define CFG_TUD_AUDIO_FUNC_1_EP_OUT_SW_BUF_SZ       CFG_TUD_AUDIO_FUNC_1_EP_OUT_SZ*3

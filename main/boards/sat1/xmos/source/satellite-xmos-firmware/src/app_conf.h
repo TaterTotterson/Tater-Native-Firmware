@@ -22,6 +22,9 @@
 #ifndef appconfSAT1_AEC4
 #define appconfSAT1_AEC4 0
 #endif
+#ifndef appconfSAT1_AUDIO_BENCH
+#define appconfSAT1_AUDIO_BENCH 0
+#endif
 #ifndef appconfSAT1_POST_AEC_BEAM
 #define appconfSAT1_POST_AEC_BEAM 0
 #endif

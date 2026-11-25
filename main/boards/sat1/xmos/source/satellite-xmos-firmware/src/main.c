@@ -36,6 +36,7 @@
 #include "doa/doa_estimator.h"
 #include "doa/doa_servicer.h"
 #include "beamforming/sat1_beamformer.h"
+#include "bench/audio_bench.h"
 
 
 /* Config headers for sw_pll */
@@ -110,7 +111,11 @@ void speaker_pipeline_input(void *input_app_data,
                         size_t frame_count)
 {
 #if ON_TILE(SPEAKER_PIPELINE_TILE_NO)
-    if (!appconfUSB_AUDIO_ENABLED || aec_ref_source == appconfAEC_REF_I2S) {
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_SPEAKER_INPUT);
+#endif
+    if (!appconfUSB_AUDIO_ENABLED || appconfSAT1_AUDIO_BENCH ||
+        aec_ref_source == appconfAEC_REF_I2S) {
         /* This shouldn't need to block given it shares a clock with the PDM mics */
 
         xassert(frame_count == appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE);
@@ -132,9 +137,9 @@ void speaker_pipeline_input(void *input_app_data,
         }
     }
 
-#if appconfUSB_AUDIO_ENABLED
+#if appconfUSB_AUDIO_ENABLED && !appconfSAT1_AUDIO_BENCH
     int32_t **usb_mic_audio_frame = NULL;
-    if (true) {
+    if (aec_ref_source == appconfAEC_REF_USB) {
         usb_mic_audio_frame = input_audio_frames;
         /*
         * As noted above, this does not block.
@@ -146,6 +151,9 @@ void speaker_pipeline_input(void *input_app_data,
             ch_count);
     }
 #endif    
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_SPEAKER_INPUT);
+#endif
 #endif
 }
 
@@ -198,7 +206,14 @@ int speaker_pipeline_output(void *output_app_data,
     }
     
     // send to microphone pipeline as reference
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_REFERENCE_TX);
+#endif
     (void) rtos_osal_queue_send(ref_input_queue, &frame_data, RTOS_OSAL_WAIT_FOREVER);
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_REFERENCE_TX);
+#endif
+
 
 #endif
     return AUDIO_PIPELINE_FREE_FRAME;
@@ -211,11 +226,22 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
 {
 #if MIC_ARRAY_CONFIG_MIC_COUNT > appconfAUDIO_PIPELINE_CHANNELS
     static int32_t full_mic_frames[MIC_ARRAY_CONFIG_MIC_COUNT][MIC_ARRAY_CONFIG_SAMPLES_PER_FRAME] __attribute__((aligned(8)));
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_MIC_WAIT);
+#endif
     size_t received = rtos_mic_array_rx(mic_array_ctx,
                                         (int32_t **)full_mic_frames,
                                         frame_count,
                                         timeout);
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_MIC_WAIT);
+#endif
     if (received == frame_count) {
+#if appconfSAT1_AUDIO_BENCH
+        sat1_bench_note_raw(&full_mic_frames[0][0], frame_count);
+        sat1_bench_begin(SAT1_BENCH_RAW_ANALYSIS);
+#endif
+
         int32_t *pipeline_mic_ptr = (int32_t *)pipeline_mic_frames;
 #if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS >= 2
         sat1_beamformer_diagnostics_t beam_diagnostics;
@@ -245,12 +271,25 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
                                     frame_count);
 #endif
     }
+#if appconfSAT1_AUDIO_BENCH
+    if (received == frame_count) sat1_bench_end(SAT1_BENCH_RAW_ANALYSIS);
+#endif
     return received;
 #else
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_MIC_WAIT);
+#endif
     size_t received = rtos_mic_array_rx(mic_array_ctx,
                                         pipeline_mic_frames,
                                         frame_count,
                                         timeout);
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_MIC_WAIT);
+    if (received == frame_count) {
+        sat1_bench_note_raw((const int32_t *)pipeline_mic_frames, frame_count);
+        sat1_bench_begin(SAT1_BENCH_RAW_ANALYSIS);
+    }
+#endif
 #if MIC_ARRAY_CONFIG_MIC_COUNT >= 4 && appconfAUDIO_PIPELINE_CHANNELS >= 4
     if (received == frame_count) {
         int32_t *pipeline_mic_ptr = (int32_t *)pipeline_mic_frames;
@@ -280,6 +319,9 @@ static size_t receive_mic_array_frame(int32_t **pipeline_mic_frames,
                                     frame_count);
     }
 #endif
+#if appconfSAT1_AUDIO_BENCH
+    if (received == frame_count) sat1_bench_end(SAT1_BENCH_RAW_ANALYSIS);
+#endif
     return received;
 #endif
 }
@@ -301,7 +343,14 @@ void audio_pipeline_capture(void *mic_samples, int32_t *reference_left,
         }
     }
     void *reference;
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_REFERENCE_WAIT);
+#endif
     rtos_osal_queue_receive(ref_input_queue, &reference, RTOS_OSAL_WAIT_FOREVER);
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_REFERENCE_WAIT);
+#endif
+
     const int32_t *ref = reference;
     for (size_t i = 0; i < frame_count; ++i) {
         reference_left[i] = ref[2 * i];
@@ -343,10 +392,16 @@ int audio_pipeline_output_channels(const int32_t *processed_samples,
         }
     }
 
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_I2S_OUTPUT);
+#endif
     rtos_i2s_tx(i2s_ctx,
                 (int32_t*) tmp,
                 appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE,
                 portMAX_DELAY);
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_I2S_OUTPUT);
+#endif
 #else
     (void) processed_samples;
     (void) ns_samples;
@@ -398,7 +453,14 @@ void audio_pipeline_input(void *input_app_data,
 #if ON_TILE(SPEAKER_PIPELINE_TILE_NO)
     //read the speaker pipeline output as reference
     void *frame_data;
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_REFERENCE_WAIT);
+#endif
     (void) rtos_osal_queue_receive(ref_input_queue, &frame_data, RTOS_OSAL_WAIT_FOREVER);
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_REFERENCE_WAIT);
+#endif
+
     int32_t *tmpptr = (int32_t *)input_audio_frames;
     int32_t *refptr = (int32_t *)frame_data;
 
@@ -470,13 +532,19 @@ int audio_pipeline_output(void *output_app_data,
     }    
     
     
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_I2S_OUTPUT);
+#endif
     rtos_i2s_tx(i2s_ctx,
                 (int32_t*) tmp,
                 appconfAUDIO_SPK_PIPELINE_FRAME_ADVANCE,
                 portMAX_DELAY);
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_I2S_OUTPUT);
+#endif
 #endif
 
-#if appconfUSB_AUDIO_ENABLED
+#if appconfUSB_AUDIO_ENABLED && !appconfSAT1_AUDIO_BENCH
     usb_audio_send(intertile_usb_audio_ctx,
                 frame_count,
                 output_audio_frames,
@@ -545,6 +613,10 @@ void startup_task(void *arg)
 {
     rtos_printf("Startup task running from tile %d on core %d\n", THIS_XCORE_TILE, portGET_CORE_ID());
     platform_start();
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_monitor_start();
+#endif
+
 #if appconfSAT1_AEC4 && ON_TILE(SPEAKER_PIPELINE_TILE_NO)
     sat1_beam_mutex = xSemaphoreCreateMutex();
     xassert(sat1_beam_mutex != NULL);

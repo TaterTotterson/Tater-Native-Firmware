@@ -11,3 +11,7 @@ sdkconfig.*
 .DS_Store
 __pycache__/
 *.pyc
+
+# Locally generated audio-bench payloads and recordings.
+main/boards/sat1/xmos/bench_candidates/
+audio_bench_results/

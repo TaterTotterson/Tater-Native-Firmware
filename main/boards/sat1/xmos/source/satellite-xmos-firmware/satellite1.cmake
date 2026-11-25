@@ -42,6 +42,24 @@ foreach(FFVA_AP ${FFVA_PIPELINES_INT})
         set(SAT1_AEC4_TARGET 0)
     endif()
     
+    if(SAT1_AUDIO_BENCH AND FFVA_AP STREQUAL "fixed_delay")
+        list(REMOVE_ITEM FFVA_INT_COMPILE_DEFINITIONS
+            appconfUSB_AUDIO_ENABLED=0 appconfUSB_CDC_ENABLED=0)
+        if(SAT1_XMOS_PIPELINE STREQUAL "beam_ic")
+            set(SAT1_BENCH_PROFILE 1)
+        elseif(SAT1_XMOS_PIPELINE STREQUAL "legacy")
+            set(SAT1_BENCH_PROFILE 2)
+        elseif(SAT1_XMOS_PIPELINE STREQUAL "aec4")
+            set(SAT1_BENCH_PROFILE 3)
+        else()
+            set(SAT1_BENCH_PROFILE 4)
+        endif()
+        list(APPEND FFVA_INT_COMPILE_DEFINITIONS
+            appconfSAT1_AUDIO_BENCH=1
+            appconfSAT1_BENCH_PROFILE=${SAT1_BENCH_PROFILE}
+            appconfUSB_AUDIO_ENABLED=1 appconfUSB_CDC_ENABLED=1)
+    endif()
+
     #**********************
     # Tile Targets
     #**********************

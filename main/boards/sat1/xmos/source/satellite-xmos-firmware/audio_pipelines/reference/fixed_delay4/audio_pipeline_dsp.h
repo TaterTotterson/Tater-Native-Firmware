@@ -9,6 +9,9 @@
 #include "FreeRTOS.h"
 #include "stream_buffer.h"
 #include "app_conf.h"
+#if appconfSAT1_AUDIO_BENCH
+#include "bench/audio_bench_format.h"
+#endif
 
 /* Pipeline config */
 #define AP_MAX_Y_CHANNELS (appconfMIC_PIPELINE_PROC_CHANNELS)
@@ -46,9 +49,17 @@ typedef struct {
     float_s32_t max_ref_energy;
     float_s32_t aec_corr_factor;
     int32_t ref_active_flag;
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_frame_t bench;
+#endif
 } frame_data_t;
 
+#if appconfSAT1_AUDIO_BENCH
+_Static_assert(sizeof(frame_data_t) == ((5784 + sizeof(sat1_bench_frame_t) + 7) & ~7),
+               "Bench intertile frame size");
+#else
 _Static_assert(sizeof(frame_data_t) == 5784, "Fixed-delay intertile frame size");
+#endif
 _Static_assert(offsetof(frame_data_t, samples) == 0, "Microphone row offset");
 _Static_assert(offsetof(frame_data_t, aec_reference_audio_samples) == 3840, "Reference row offset");
 _Static_assert(offsetof(frame_data_t, vnr_pred_flag) == 5760, "VNR flag offset");

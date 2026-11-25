@@ -8,6 +8,11 @@
 
 #if CFG_TUD_AUDIO
 #include "rtos_intertile.h"
+#if appconfSAT1_AUDIO_BENCH
+#include "bench/audio_bench_format.h"
+void usb_audio_send_bench(const sat1_bench_frame_t *frame,
+                          const int32_t *processed, const int32_t *ns);
+#endif
 
 
 /*

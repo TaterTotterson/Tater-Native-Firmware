@@ -50,6 +50,7 @@
 #include "audio_pipeline.h"
 
 #include "app_conf.h"
+#include "bench/audio_bench.h"
 
 // Audio controls
 // Current states
@@ -118,6 +119,28 @@ typedef int16_t samp_t;
 typedef int32_t samp_t;
 #else
 #error CFG_TUD_AUDIO_FUNC_1_N_BYTES_PER_SAMPLE_TX must be either 2 or 4
+#endif
+
+#if appconfSAT1_AUDIO_BENCH
+void usb_audio_send_bench(const sat1_bench_frame_t *frame,
+                          const int32_t *processed, const int32_t *ns)
+{
+    _Static_assert(RATE_MULTIPLIER == 1, "Bench metadata cannot be resampled");
+    _Static_assert(sizeof(samp_t) == 4, "Bench capture requires PCM32");
+    int32_t packet[SAT1_BENCH_FRAME_SAMPLES][SAT1_BENCH_CHANNELS];
+    sat1_bench_begin(SAT1_BENCH_USB_OUTPUT);
+    if (mic_interface_open && sat1_bench_interleave(&packet[0][0],
+            SAT1_BENCH_FRAME_SAMPLES, frame, processed, ns)) {
+        if (xStreamBufferSpacesAvailable(samples_to_host_stream_buf) >= sizeof(packet)) {
+            size_t sent = xStreamBufferSend(samples_to_host_stream_buf, packet, sizeof(packet), 0);
+            if (sent != sizeof(packet)) sat1_bench_usb_drop();
+        } else {
+            /* Never block the DSP or log from its output task on overflow. */
+            sat1_bench_usb_drop();
+        }
+    }
+    sat1_bench_end(SAT1_BENCH_USB_OUTPUT);
+}
 #endif
 
 void usb_audio_send(rtos_intertile_t *intertile_ctx,
@@ -494,6 +517,7 @@ bool tud_audio_get_req_entity_cb(uint8_t rhport,
     return false; 	// Yet not implemented
 }
 
+#if AUDIO_OUTPUT_ENABLED
 bool tud_audio_rx_done_pre_read_cb(uint8_t rhport,
                                     uint16_t n_bytes_received,
                                     uint8_t func_id,
@@ -619,6 +643,8 @@ bool tud_audio_rx_done_post_read_cb(uint8_t rhport,
     return true;
 }
 
+#endif /* AUDIO_OUTPUT_ENABLED */
+
 bool tud_audio_tx_done_pre_load_cb(uint8_t rhport,
                                    uint8_t itf,
                                    uint8_t ep_in,
@@ -715,7 +741,18 @@ bool tud_audio_tx_done_pre_load_cb(uint8_t rhport,
 
     size_t num_rx_total = 0;
     while(num_rx_total < ready_data_bytes){
-        size_t num_rx =  xStreamBufferReceive(samples_to_host_stream_buf, &stream_buffer_audio_frames[num_rx_total], ready_data_bytes-num_rx_total, 0);
+        size_t num_rx = xStreamBufferReceive(samples_to_host_stream_buf,
+            (uint8_t *)stream_buffer_audio_frames + num_rx_total,
+            ready_data_bytes - num_rx_total, 0);
+        if (num_rx == 0) {
+            /* A reset/short read must not spin forever in the USB callback. */
+            memset((uint8_t *)stream_buffer_audio_frames + num_rx_total, 0,
+                   ready_data_bytes - num_rx_total);
+#if appconfSAT1_AUDIO_BENCH
+            sat1_bench_usb_drop();
+#endif
+            break;
+        }
         num_rx_total += num_rx;
     }
 
@@ -836,7 +873,9 @@ void usb_audio_init(rtos_intertile_t *intertile_ctx,
     samples_to_host_stream_buf = xStreamBufferCreate(3 * sizeof(samp_t) * appconfAUDIO_PIPELINE_FRAME_ADVANCE * CFG_TUD_AUDIO_FUNC_1_N_CHANNELS_TX,
                                             0);
 
+#if !appconfSAT1_AUDIO_BENCH
     xTaskCreate((TaskFunction_t) usb_audio_out_task, "usb_audio_out_task", portTASK_STACK_DEPTH(usb_audio_out_task), intertile_ctx, priority, &usb_audio_out_task_handle);
+#endif
 }
 
 #endif /* CFG_TUD_AUDIO */

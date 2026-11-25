@@ -26,6 +26,10 @@
 #include "app_conf.h"
 #include "audio_pipeline.h"
 #include "audio_pipeline_dsp.h"
+#include "bench/audio_bench.h"
+#if appconfSAT1_AUDIO_BENCH
+#include "usb/usb_audio.h"
+#endif
 #include "audio_pipeline_io.h"
 
 #if appconfAUDIO_PIPELINE_FRAME_ADVANCE != 240
@@ -43,8 +47,12 @@ static agc_stage_ctx_t DWORD_ALIGNED agc_stage_state = {};
 static void *audio_pipeline_input_i(void *input_app_data)
 {
     frame_data_t *frame_data;
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_INTERTILE_RX);
+#endif
 
     frame_data = pvPortMalloc(sizeof(frame_data_t));
+    configASSERT(frame_data != NULL);
     memset(frame_data, 0x00, sizeof(frame_data_t));
 
     size_t bytes_received = 0;
@@ -60,6 +68,9 @@ static void *audio_pipeline_input_i(void *input_app_data)
             frame_data,
             bytes_received);
 
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_INTERTILE_RX);
+#endif
     return frame_data;
 }
 
@@ -67,9 +78,14 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
                                    void *output_app_data)
 {
     (void) output_app_data;
-    return audio_pipeline_output_channels(frame_data->samples[0],
+    int result = audio_pipeline_output_channels(frame_data->samples[0],
                                           frame_data->aec_reference_audio_samples[1],
                                           appconfAUDIO_PIPELINE_FRAME_ADVANCE);
+#if appconfSAT1_AUDIO_BENCH
+    usb_audio_send_bench(&frame_data->bench, frame_data->samples[0],
+        frame_data->aec_reference_audio_samples[1]);
+#endif
+    return result;
 }
 
 static void stage_average_aec_residuals(frame_data_t *frame_data)
@@ -89,6 +105,10 @@ static void stage_average_aec_residuals(frame_data_t *frame_data)
 
 static void stage_vnr_and_ic(frame_data_t *frame_data)
 {
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_IC);
+#endif
+
 #if appconfAUDIO_PIPELINE_SKIP_IC_AND_VNR
 #else
     int32_t DWORD_ALIGNED ic_output[appconfAUDIO_PIPELINE_FRAME_ADVANCE];
@@ -110,10 +130,17 @@ static void stage_vnr_and_ic(frame_data_t *frame_data)
     memcpy(frame_data->aec_reference_audio_samples[0], ic_output, appconfAUDIO_PIPELINE_FRAME_ADVANCE * sizeof(int32_t));   // Store the interference cancelled audio in the first reference channel
 #endif
 #endif
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_IC);
+#endif
 }
 
 static void stage_ns(frame_data_t *frame_data)
 {
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_NS);
+#endif
+
 #if appconfAUDIO_PIPELINE_SKIP_NS
 #else
     int32_t DWORD_ALIGNED ns_output[appconfAUDIO_PIPELINE_FRAME_ADVANCE];
@@ -127,10 +154,17 @@ static void stage_ns(frame_data_t *frame_data)
     memcpy(frame_data->aec_reference_audio_samples[1], ns_output, appconfAUDIO_PIPELINE_FRAME_ADVANCE * sizeof(int32_t));   // Store NS audio in the second reference channel
 #endif
 #endif
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_NS);
+#endif
 }
 
 static void stage_agc(frame_data_t *frame_data)
 {
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_AGC);
+#endif
+
 #if appconfAUDIO_PIPELINE_SKIP_AGC
 #else
     int32_t DWORD_ALIGNED agc_output[appconfAUDIO_PIPELINE_FRAME_ADVANCE];
@@ -147,6 +181,9 @@ static void stage_agc(frame_data_t *frame_data)
             frame_data->samples[0],
             &agc_stage_state.md);
     memcpy(frame_data->samples, agc_output, appconfAUDIO_PIPELINE_FRAME_ADVANCE * sizeof(int32_t));
+#endif
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_AGC);
 #endif
 }
 

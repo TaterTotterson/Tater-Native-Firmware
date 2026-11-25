@@ -8,6 +8,9 @@
 #include "FreeRTOS.h"
 #include "stream_buffer.h"
 #include "app_conf.h"
+#if appconfSAT1_AUDIO_BENCH
+#include "bench/audio_bench_format.h"
+#endif
 #include <stdint.h>
 
 /* Pipeline config */
@@ -44,6 +47,9 @@ typedef struct {
     float_s32_t max_ref_energy;
     float_s32_t aec_corr_factor;
     int32_t ref_active_flag;
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_frame_t bench;
+#endif
 } frame_data_t;
 
 typedef struct stage_delay_ctx {

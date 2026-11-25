@@ -20,6 +20,10 @@
 #include "app_conf.h"
 #include "audio_pipeline.h"
 #include "audio_pipeline_dsp.h"
+#include "bench/audio_bench.h"
+#if appconfSAT1_AUDIO_BENCH
+#include "usb/usb_audio.h"
+#endif
 #include "audio_pipeline_io.h"
 
 #if appconfAUDIO_PIPELINE_FRAME_ADVANCE != 240
@@ -45,7 +49,12 @@ static void mix_stereo_reference_to_mono(frame_data_t *frame_data)
 static void *audio_pipeline_input_i(void *input_app_data)
 {
     frame_data_t *frame_data;
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_CAPTURE);
+    sat1_bench_arm_capture();
+#endif
     frame_data = pvPortMalloc(sizeof(frame_data_t));
+    configASSERT(frame_data != NULL);
     memset(frame_data, 0x00, sizeof(frame_data_t));
 
     (void) input_app_data;
@@ -54,9 +63,17 @@ static void *audio_pipeline_input_i(void *input_app_data)
                            frame_data->aec_reference_audio_samples[1],
                            appconfAUDIO_PIPELINE_FRAME_ADVANCE);
 
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_snapshot(&frame_data->bench,
+        frame_data->aec_reference_audio_samples[0],
+        frame_data->aec_reference_audio_samples[1]);
+#endif
     frame_data->vnr_pred_flag = 0;
     mix_stereo_reference_to_mono(frame_data);
 
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_CAPTURE);
+#endif
     return frame_data;
 }
 
@@ -64,10 +81,17 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
                                    void *output_app_data)
 {
 
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_INTERTILE_TX);
+#endif
     rtos_intertile_tx(intertile_ctx,
                       appconfAUDIOPIPELINE_PORT,
                       frame_data,
                       sizeof(frame_data_t));
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_INTERTILE_TX);
+#endif
+
 
     return AUDIO_PIPELINE_FREE_FRAME;
 }
@@ -125,6 +149,9 @@ static void stage_aec(frame_data_t *frame_data)
 #else
     int32_t DWORD_ALIGNED stage1_output[AEC_MAX_Y_CHANNELS][appconfAUDIO_PIPELINE_FRAME_ADVANCE];
 
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_begin(SAT1_BENCH_AEC);
+#endif
     aec_process_frame(
             &aec_state.state,
             stage1_output,
@@ -141,6 +168,9 @@ static void stage_aec(frame_data_t *frame_data)
     memcpy(frame_data->samples, stage1_output, AEC_MAX_Y_CHANNELS * appconfAUDIO_PIPELINE_FRAME_ADVANCE * sizeof(int32_t));
 #if appconfSAT1_POST_AEC_BEAM
     sat1_post_aec_beam(frame_data->samples);
+#endif
+#if appconfSAT1_AUDIO_BENCH
+    sat1_bench_end(SAT1_BENCH_AEC);
 #endif
 #endif
 }
