@@ -1,5 +1,7 @@
-- **Satellite1 update: 0.7.0-r3.** Fixes the rev2 issue where Sat1 wakes, then returns to idle without replying.
-- Sends fully processed XMOS audio to speech recognition, using the same gain-controlled channel as buffered wake/command audio and FPH ESPHome.
-- Uses unity ESP32 microphone gain and XMOS AGC instead of adding another speech boost and leveler.
-- Includes XMOS **1.2.0-dev.8** with interference cancellation, voice/noise-ratio estimation, the calibrated four-microphone beam, stereo-reference AEC, noise suppression, and direction finding.
-- Only Satellite1 receives a revision bump. Voice PE, ReSpeaker XVF3800, and ESP32-S3-BOX-3 remain on **0.7.0**.
+- **Satellite1 only: 0.7.0-r4**, including XMOS **1.2.0-dev.13**.
+- Cancels speaker echo on all four microphones before combining them into a calibrated directional beam. The playback echo reference is mixed to mono.
+- Tracks speech direction after echo cancellation and keeps the direction LEDs responsive while listening over music.
+- Adds speech-aware interference cancellation and residual echo cleanup, with limits to protect the talker's voice. Supplies speech evidence to the existing noise suppression and gain control pipeline.
+- Fixes DSP communication and audio-frame ownership problems that could stall startup or playback, and reduces beamforming processing time.
+- Preserves the processed microphone path and unity ESP32 microphone gain from 0.7.0-r3.
+- Voice PE, ReSpeaker XVF3800, and ESP32-S3-BOX-3 stay on **0.7.0**, using their existing published binaries and checksums.

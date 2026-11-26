@@ -49,8 +49,15 @@ def main() -> int:
     version = text(manifest.get("version")) or args.manifest.stem
     display_version = text(manifest.get("display_version")) or version
     highlights = release_highlights()
+    all_devices = manifest.get("devices") if isinstance(manifest.get("devices"), list) else []
+    updated_keys = manifest.get("updated_boards")
+    devices = [row for row in all_devices if isinstance(row, dict) and
+               (not isinstance(updated_keys, list) or row.get("key") in updated_keys)]
+    carried = [row for row in all_devices if isinstance(row, dict) and row not in devices]
+    single_label = text(devices[0].get("label")) if len(devices) == 1 else ""
+    title = f"{single_label} Firmware" if single_label else "Tater Firmware"
     lines: list[str] = [
-        f"# Tater Firmware {display_version}",
+        f"# {title} {display_version}",
         "",
         "Tater Native Satellite firmware release.",
         "",
@@ -62,17 +69,24 @@ def main() -> int:
     else:
         lines.extend(["- Maintenance firmware update.", ""])
 
-    devices = manifest.get("devices") if isinstance(manifest.get("devices"), list) else []
     firmware_versions = {
         text(device.get("display_version")) or text(device.get("firmware_version"))
         for device in devices
         if isinstance(device, dict) and (text(device.get("display_version")) or text(device.get("firmware_version")))
     }
     version_summary = (
+        f"- Updates only {single_label}; other satellite versions and published artifacts are retained unchanged."
+        if single_label else
         "- Ships one shared native firmware version across all supported satellite targets."
         if len(firmware_versions) <= 1
         else "- Packages each supported satellite target with its own embedded board version so board-only updates do not bump unaffected devices."
     )
+    if carried:
+        lines.extend(["## Unchanged Devices", ""])
+        for row in carried:
+            lines.append(f"- {text(row.get('label')) or text(row.get('key'))}: `{text(row.get('firmware_version'))}`")
+        lines.extend(["", "Their existing artifact URLs and SHA-256 values are preserved in the combined manifest.", ""])
+
     lines.extend(
         [
             "## Highlights",

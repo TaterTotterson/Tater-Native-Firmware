@@ -7,7 +7,7 @@ CMAKE_BIN="${CMAKE_BIN:-/opt/homebrew/opt/cmake/bin/cmake}"
 NINJA_BIN="${NINJA_BIN:-/opt/homebrew/opt/ninja/bin/ninja}"
 PYTHON_BIN="${PYTHON_BIN:-/opt/homebrew/bin/python3.11}"
 VENV_DIR="${SAT1_XMOS_VENV_DIR:-${ROOT_DIR}/.venv}"
-PIPELINE="${SAT1_XMOS_PIPELINE:-beam_ic}"
+PIPELINE="${SAT1_XMOS_PIPELINE:-aec4_track}"
 BENCH="${SAT1_XMOS_AUDIO_BENCH:-0}"
 case "$BENCH" in
   0|1) ;;

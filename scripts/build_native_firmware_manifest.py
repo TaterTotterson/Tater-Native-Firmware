@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import re
 import shutil
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -26,9 +28,10 @@ BOARDS: dict[str, dict[str, Any]] = {
         "header": FIRMWARE_ROOT / "main" / "boards" / "sat1" / "board_sat1.h",
         "flash_size": "16MB",
         "xmos_firmware": {
-            "version": "1.2.0-dev.8",
-            "source": FIRMWARE_ROOT / "main" / "boards" / "sat1" / "xmos" / "sat1_xmos_1_2_0_dev8_factory.bin",
-            "repo_path": "main/boards/sat1/xmos/sat1_xmos_1_2_0_dev8_factory.bin",
+            "version": "1.2.0-dev.13",
+            "source": FIRMWARE_ROOT / "main" / "boards" / "sat1" / "xmos" / "sat1_xmos_1_2_0_dev13_factory.bin",
+            "repo_path": "main/boards/sat1/xmos/sat1_xmos_1_2_0_dev13_factory.bin",
+            "embedded_asset": FIRMWARE_ROOT / "main" / "boards" / "sat1" / "xmos" / "candidates" / "sat1_xmos_aec4_track.bin.zlib",
         },
     },
     "voicepe": {
@@ -142,6 +145,52 @@ def run_build(board: dict[str, Any]) -> None:
     subprocess.run(["platformio", "run", "-e", board["env"]], cwd=FIRMWARE_ROOT, check=True)
 
 
+def carry_forward(
+    manifest: dict[str, Any], latest: dict[str, Any], updated_keys: set[str]
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """Keep unaffected boards' published versions, URLs and hashes exactly."""
+    if manifest.get("schema") != 1 or latest.get("schema") != 1:
+        raise SystemExit("The previous release must use manifest schema 1.")
+    if manifest.get("kind") != "tater_native_satellite_firmware" or latest.get("kind") != "tater_native_satellite_firmware_latest":
+        raise SystemExit("The previous release has an unexpected manifest kind.")
+    if not manifest.get("version") or manifest.get("version") != latest.get("version"):
+        raise SystemExit("The previous latest and manifest versions do not match.")
+    rows, index = manifest.get("devices"), latest.get("boards")
+    if not isinstance(rows, list) or not isinstance(index, dict):
+        raise SystemExit("The previous release needs devices and board index entries.")
+    by_key: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = row.get("key") if isinstance(row, dict) else None
+        if not isinstance(key, str) or not key or key in by_key:
+            raise SystemExit("The previous release contains a missing or duplicate board key.")
+        by_key[key] = row
+    required = set(BOARDS) - updated_keys
+    if required - by_key.keys() or required - index.keys():
+        raise SystemExit("The previous release is missing an unaffected board; refusing to drop it.")
+    carried_rows, carried_index = [], {}
+    for key, row in by_key.items():
+        if key in updated_keys:
+            continue
+        entry = index.get(key)
+        if not isinstance(entry, dict) or entry.get("version") != row.get("firmware_version"):
+            raise SystemExit(f"Previous board version/index mismatch: {key}")
+        if not str(entry.get("manifest", "")).startswith("https://"):
+            raise SystemExit(f"Previous board manifest needs an absolute HTTPS URL: {key}")
+        artifacts = row.get("artifacts")
+        if not isinstance(artifacts, dict):
+            raise SystemExit(f"Previous board has no artifact map: {key}")
+        for kind in ("ota", "factory"):
+            item = artifacts.get(kind)
+            if (not isinstance(item, dict) or
+                    not str(item.get("path", "")).startswith("https://") or
+                    not re.fullmatch(r"[0-9a-fA-F]{64}", str(item.get("sha256", ""))) or
+                    not isinstance(item.get("size_bytes"), int) or item["size_bytes"] <= 0):
+                raise SystemExit(f"Previous board has an invalid published {kind} artifact: {key}")
+        carried_rows.append(copy.deepcopy(row))
+        carried_index[key] = copy.deepcopy(entry)
+    return carried_rows, carried_index
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Package Tater Native satellite firmware artifacts and manifest.")
     parser.add_argument(
@@ -153,6 +202,8 @@ def main() -> int:
     parser.add_argument("--skip-build", action="store_true", help="Use existing PlatformIO build outputs.")
     parser.add_argument("--release-repo", help="OWNER/REPO for GitHub Release asset URLs.")
     parser.add_argument("--release-tag", help="GitHub Release tag for asset URLs.")
+    parser.add_argument("--previous-latest", type=Path, help="Published latest.json whose unaffected board entries are retained.")
+    parser.add_argument("--previous-manifest", type=Path, help="Published manifest paired with --previous-latest.")
     parser.add_argument(
         "--release-dir",
         type=Path,
@@ -161,6 +212,21 @@ def main() -> int:
     args = parser.parse_args()
 
     selected_boards = list(BOARDS.values()) if args.board == "all" else [BOARDS[args.board]]
+    release_mode = bool(args.release_repo or args.release_tag)
+    if release_mode and (not args.release_repo or not args.release_tag):
+        raise SystemExit("--release-repo and --release-tag must be provided together.")
+    if bool(args.previous_latest) != bool(args.previous_manifest):
+        raise SystemExit("--previous-latest and --previous-manifest must be provided together.")
+    if args.board == "all" and args.previous_latest:
+        raise SystemExit("Carry-forward inputs are only for a board-only release.")
+    if release_mode and args.board != "all" and not args.previous_latest:
+        raise SystemExit("A board-only public release requires the previous latest and manifest to preserve other boards.")
+    updated_keys = {board["key"] for board in selected_boards}
+    old_rows, old_index = [], {}
+    if args.previous_latest:
+        old_latest = json.loads(args.previous_latest.read_text(encoding="utf-8"))
+        old_manifest = json.loads(args.previous_manifest.read_text(encoding="utf-8"))
+        old_rows, old_index = carry_forward(old_manifest, old_latest, updated_keys)
     if not args.skip_build:
         for board in selected_boards:
             run_build(board)
@@ -168,10 +234,6 @@ def main() -> int:
     board_versions = [read_version(board) for board in selected_boards]
     version = board_versions[0] if len(board_versions) == 1 else release_version(board_versions)
     display = display_version(version)
-    release_mode = bool(args.release_repo or args.release_tag)
-    if release_mode and (not args.release_repo or not args.release_tag):
-        raise SystemExit("--release-repo and --release-tag must be provided together.")
-
     release_dir = args.release_dir.resolve() if args.release_dir else (LOCAL_RELEASE_ROOT / version)
     release_dir.mkdir(parents=True, exist_ok=True)
 
@@ -190,6 +252,11 @@ def main() -> int:
         for path in (ota_src, factory_src):
             if not path.is_file():
                 raise SystemExit(f"Missing build output: {path}")
+        if ota_src.stat().st_size > 0x300000:
+            raise SystemExit(f"OTA image exceeds the 3 MiB application slot: {ota_src}")
+        ota_bytes = ota_src.read_bytes()
+        if board_version.encode("utf-8") + b"\0" not in ota_bytes:
+            raise SystemExit(f"OTA image does not contain its board firmware version: {board_version}")
 
         ota_asset_name = f"{board_version}-{board['key']}-ota.bin"
         factory_asset_name = f"{board_version}-{board['key']}-factory.bin"
@@ -205,6 +272,11 @@ def main() -> int:
         xmos_payload = None
         if xmos:
             xmos_source = xmos["source"]
+            embedded_asset = xmos.get("embedded_asset")
+            if embedded_asset:
+                compressed = embedded_asset.read_bytes()
+                if zlib.decompress(compressed) != xmos_source.read_bytes() or ota_bytes.count(compressed) != 1:
+                    raise SystemExit("Sat1's embedded XMOS payload does not match its release metadata.")
             xmos_payload = {
                 "included": True,
                 "version": xmos["version"],
@@ -237,6 +309,9 @@ def main() -> int:
             "manifest": manifest_ref,
         }
 
+    devices.extend(old_rows)
+    latest_boards.update(old_index)
+
     manifest = {
         "schema": 1,
         "kind": "tater_native_satellite_firmware",
@@ -244,6 +319,7 @@ def main() -> int:
         "display_version": display,
         "project": "tater.native_satellite",
         "generated_from": ".",
+        "updated_boards": sorted(updated_keys),
         "devices": devices,
     }
     latest = {

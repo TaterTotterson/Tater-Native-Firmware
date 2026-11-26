@@ -1,10 +1,11 @@
 # Sat1 XMOS integration
 
-The normal `sat1` PlatformIO environment in native **0.7.0-r2** embeds XMOS
-**1.2.0-dev.8**. It enables IC/VNR after the existing calibrated pre-AEC beam
-and stereo-reference 2Y2X AEC, following the IC-enabled topology tested in the
-FPH companion dev.4 build. The new native/RPi host builds require their own
-physical follow-up checks; earlier dev.1 observations do not qualify dev.8.
+The normal `sat1` PlatformIO environment in native **0.7.0-r4** embeds XMOS
+**1.2.0-dev.13**: four-mic AEC, post-AEC speech tracking and beamforming, protected
+IC/echo cleanup, NS and AGC. Playback references are mixed to mono. See
+[TRACKING-CLEANUP.md](TRACKING-CLEANUP.md) for the exact tested identity,
+architecture and qualification limits. Native direction polling and rendering
+also changed; this release includes ESP32 host changes as well as XMOS work.
 
 The IC-bypassed **1.2.0-dev.1** remains an explicit comparison/recovery image.
 The earlier four-mic AEC dev.2/dev.3 candidates failed startup/liveness checks
@@ -15,7 +16,8 @@ for the historical observations and [IC-VNR-UPDATE.md](IC-VNR-UPDATE.md) for dev
 
 | Native environment | XMOS identity | Processing |
 | --- | --- | --- |
-| `sat1`, `sat1_xmos_beam_ic` | 1.2.0-dev.8 | Release default: calibrated pre-AEC beam, stereo-reference 2Y2X AEC, IC/VNR, NS and AGC |
+| `sat1` | 1.2.0-dev.13 | Release default: four-mic AEC, speech tracking, post-AEC beam, protected IC/echo cleanup, NS and AGC |
+| `sat1_xmos_beam_ic` | 1.2.0-dev.8 | Previous release: calibrated pre-AEC beam, stereo-reference 2Y2X AEC, IC/VNR, NS and AGC |
 | `sat1_xmos_legacy` | 1.2.0-dev.1 | fwk_voice 0.9.0 and protocol 0x11, retaining the pre-AEC beam and two stereo echo references |
 | `sat1_xmos_aec4` | 1.2.0-dev.2 | Individual four-mic AEC, mono echo reference, residual averaging; raw DoA/health telemetry |
 | `sat1_xmos_aec4_beam` | 1.2.0-dev.3 | Individual four-mic AEC followed by our calibrated, steered residual beam; retained comparison baseline |
@@ -25,8 +27,9 @@ All candidates preserve noise suppression, AGC, the two ESP output channels,
 button/LED control, USB DFU, and the raw USB lab target source. Calibration and
 mic health use raw microphone levels; AEC residual levels never train the
 calibration. Capture and AEC tasks serialize access to the calibration/beam
-state. Direction follows valid talkers and requests omni steering during
-playback, as in production.
+state. The older profiles request omni steering during playback. The release
+profile uses post-AEC speech evidence and preserves direction observations
+independently of native steering overrides.
 
 We deliberately retain Tater's microphone gain arrangement rather than adding
 FPH's fixed 10x digital microphone gain. `aec4` is therefore a topology comparison
@@ -72,13 +75,16 @@ SAT1_XMOS_PIPELINE=beam_ic SAT1_XMOS_RUN_SIM_TESTS=1 bash main/boards/sat1/xmos/
 SAT1_XMOS_PIPELINE=legacy SAT1_XMOS_RUN_SIM_TESTS=1 bash main/boards/sat1/xmos/source/build_sat1_fixed_delay.sh
 SAT1_XMOS_PIPELINE=aec4 SAT1_XMOS_RUN_SIM_TESTS=1 bash main/boards/sat1/xmos/source/build_sat1_fixed_delay.sh
 SAT1_XMOS_PIPELINE=aec4_beam SAT1_XMOS_RUN_SIM_TESTS=1 bash main/boards/sat1/xmos/source/build_sat1_fixed_delay.sh
-python3 main/boards/sat1/xmos/source/scripts/package_candidates.py beam_ic legacy aec4 aec4_beam
+SAT1_XMOS_PIPELINE=aec4_track SAT1_XMOS_RUN_SIM_TESTS=1 bash main/boards/sat1/xmos/source/build_sat1_fixed_delay.sh
+python3 main/boards/sat1/xmos/source/scripts/package_candidates.py beam_ic legacy aec4 aec4_beam aec4_track
 pio run -e sat1_xmos_beam_ic -e sat1_xmos_legacy -e sat1_xmos_aec4 -e sat1_xmos_aec4_beam
 ```
 
 Each XMOS configuration has its own `build_<variant>` directory. Use
 `XMOS_CLEAN_BUILD=0` for incremental rebuilds. Compressed images, identities and
-checksums are under `candidates/`; the standard production payload is unchanged.
+checksums are under `candidates/`; `sat1` selects the packaged `aec4_track` profile.
+When replacing its factory image, also update the canonical uncompressed
+`sat1_xmos_1_2_0_dev13_factory.bin` used by release metadata.
 The packaging script verifies factory MD5s and compression round trips.
 For any source edit, rebuild and repackage before rebuilding the ESP image.
 
@@ -92,7 +98,8 @@ Native binaries and the corresponding bootloader/partition files are in
 is the merged USB installation image at address 0. Check the actual generated
 filename before flashing. The embedded XMOS image installs on first boot.
 For rollback to XMOS 1.1.1, install the published `native-0.7.0` Sat1 image;
-the current standard `sat1` target installs the IC-enabled dev.8 image.
+the current standard `sat1` target installs dev.13. The published
+`native-0.7.0-r3` Sat1 application restores dev.8.
 
 ## Bench validation before release or upstream PRs
 

@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: native-firmware-release
+  cancel-in-progress: false
+
 jobs:
   firmware:
     name: Build Native Firmware
@@ -37,8 +41,26 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install --upgrade pip "platformio==${PLATFORMIO_VERSION}"
 
+      - name: Select release boards
+        id: scope
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$TAG" == native-satellite1-* ]]; then
+            echo "board=satellite1" >> "$GITHUB_OUTPUT"
+          else
+            echo "board=all" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build firmware
-        run: platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
+        env:
+          RELEASE_BOARD: ${{ steps.scope.outputs.board }}
+        run: |
+          if [ "$RELEASE_BOARD" = satellite1 ]; then
+            platformio run -e sat1
+          else
+            platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
+          fi
 
       - name: Run host regressions
         env:
@@ -48,19 +70,34 @@ jobs:
           for test in main/scripts/test_*_host.sh; do
             bash "$test"
           done
+          python -m unittest discover -s scripts/tests -p 'test_release_*.py'
+          python main/tests/test_sat1_doa_ui_host.py
 
       - name: Package release assets
         id: package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BOARD: ${{ steps.scope.outputs.board }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           RELEASE_DIR="${RUNNER_TEMP}/tater-native-release"
+          BASE_ARGS=()
+          if [ "$RELEASE_BOARD" != all ]; then
+            BASE_DIR="${RUNNER_TEMP}/tater-native-previous"
+            mkdir -p "$BASE_DIR"
+            gh release download --repo "$GITHUB_REPOSITORY" \
+              --pattern latest.json --pattern '*-manifest.json' --dir "$BASE_DIR"
+            BASE_MANIFEST="$(python -c 'import json,sys; from pathlib import PurePosixPath; from urllib.parse import urlparse; print(PurePosixPath(urlparse(json.load(open(sys.argv[1]))["manifest"]).path).name)' "$BASE_DIR/latest.json")"
+            BASE_ARGS=(--previous-latest "$BASE_DIR/latest.json" --previous-manifest "$BASE_DIR/$BASE_MANIFEST")
+          fi
           ./scripts/build_native_firmware_manifest.py \
-            --board all \
+            --board "$RELEASE_BOARD" \
             --skip-build \
             --release-repo "$GITHUB_REPOSITORY" \
             --release-tag "$TAG" \
-            --release-dir "$RELEASE_DIR"
+            --release-dir "$RELEASE_DIR" \
+            "${BASE_ARGS[@]}"
 
           VERSION="$(python -c 'import json; print(json.load(open("'"${RELEASE_DIR}"'/latest.json", encoding="utf-8"))["version"])')"
           DISPLAY_VERSION="$(python -c 'import json; data=json.load(open("'"${RELEASE_DIR}"'/latest.json", encoding="utf-8")); print(data.get("display_version") or data["version"])')"
@@ -92,9 +129,13 @@ jobs:
           VERSION: ${{ steps.package.outputs.version }}
           DISPLAY_VERSION: ${{ steps.package.outputs.display_version }}
           RELEASE_DIR: ${{ steps.package.outputs.release_dir }}
+          RELEASE_BOARD: ${{ steps.scope.outputs.board }}
         run: |
           set -euo pipefail
           TITLE="Tater Firmware ${DISPLAY_VERSION}"
+          if [ "$RELEASE_BOARD" = satellite1 ]; then
+            TITLE="Satellite1 Firmware ${DISPLAY_VERSION}"
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${RELEASE_DIR}"/* --clobber
             gh release edit "$TAG" --latest --title "$TITLE" --notes-file "${RELEASE_DIR}/RELEASE_NOTES.md"

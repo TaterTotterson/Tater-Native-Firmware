@@ -65,10 +65,10 @@
     "fwk_voice": "74b9e2e2c4b747efe124f35a52e654e0a19b6c87",
     "hardware_smoke_test": {
       "date": "2026-11-25",
-      "native_sha256": "37c5cd576c42309ad47d963c832b552315bfd8e02cbcad8d32d302583c3d5ae6",
-      "report": "../TRACKING-CLEANUP.md",
+      "native_sha256": "397198d91af9dbea0017fb4901a5e9cd66ce0db4952b7b0cfd63545bc75dce5e",
+      "report": "../RELEASE-0.7.0-r4.md",
       "result": "passed",
-      "scope": "Quiet USB capture and processing deadlines; normal-image full power cycle, music, immediate commands from both sides and direction LEDs; 120-second DSP liveness with 70.7 seconds of music, stopped intentionally by the user."
+      "scope": "Standard Sat1 r4 build; actual published r3/dev.8 OTA upgrade, explicit rollback and upgrade again; user-reported full power cycle with music, two-sided commands and direction LEDs. Additional 91.3 seconds of observed music with 6,093 advancing DSP frames and no detected errors; longer soak stopped at user request. Earlier exact-DSP capture/deadline checks are recorded in TRACKING-CLEANUP.md."
     },
     "hardware_validated": false,
     "ic_vnr_enabled": true,
@@ -79,7 +79,7 @@
       4,
       13
     ],
-    "local_source_sha256": "c2b5cf4c14c920a1d692bddf9e5b3b1a1ef4bd6f894af683ff4dbae157e0de29",
+    "local_source_sha256": "0a455f99606a6c29d3d540fc98a61e4ab2eb2b9704aa9f33a0a1edc2dbac01cc",
     "post_aec_speech_tracking": true,
     "protocol": "0x11",
     "upstream_develop": "ace8050265f134c1e0442661c8a16866467c9e53",

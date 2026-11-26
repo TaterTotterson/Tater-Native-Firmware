@@ -2,12 +2,12 @@
 # Gather Sources
 #**********************
 
-set(SAT1_XMOS_PIPELINE "beam_ic" CACHE STRING "beam_ic, legacy, aec4, aec4_beam, or aec4_track")
+set(SAT1_XMOS_PIPELINE "aec4_track" CACHE STRING "beam_ic, legacy, aec4, aec4_beam, or aec4_track")
 set_property(CACHE SAT1_XMOS_PIPELINE PROPERTY STRINGS beam_ic legacy aec4 aec4_beam aec4_track)
 if(NOT SAT1_XMOS_PIPELINE MATCHES "^(beam_ic|legacy|aec4|aec4_beam|aec4_track)$")
     message(FATAL_ERROR "Invalid SAT1_XMOS_PIPELINE: ${SAT1_XMOS_PIPELINE}")
 endif()
-set(SAT1_XMOS_VERSION "v1.2.0-dev.8" CACHE STRING "Candidate firmware identity")
+set(SAT1_XMOS_VERSION "v1.2.0-dev.13" CACHE STRING "Candidate firmware identity")
 option(SAT1_AUDIO_BENCH "Enable lab-only synchronized USB capture and stage telemetry" OFF)
 if(SAT1_AUDIO_BENCH)
     if(SAT1_XMOS_PIPELINE STREQUAL "beam_ic")

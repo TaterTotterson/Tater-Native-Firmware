@@ -40,14 +40,7 @@ static const char *TAG = "tater_audio_sat1";
 #ifdef TATER_SAT1_XMOS_CANDIDATE_HEADER
 #include TATER_SAT1_XMOS_CANDIDATE_HEADER
 #else
-#define SAT1_XMOS_ASSET "sat1_xmos_1_2_0_dev8_factory_bin_zlib"
-#define SAT1_DOA_RESOURCE_ID 233
-#define SAT1_XMOS_TARGET_MAJOR 1
-#define SAT1_XMOS_TARGET_MINOR 2
-#define SAT1_XMOS_TARGET_PATCH 0
-#define SAT1_XMOS_TARGET_PRERELEASE 4
-#define SAT1_XMOS_TARGET_COUNTER 8
-#define SAT1_XMOS_TARGET_IMAGE_SIZE 258048U
+#include "xmos/candidates/aec4_track.h"
 #endif
 #ifndef SAT1_XMOS_SPEECH_TRACKING
 #define SAT1_XMOS_SPEECH_TRACKING 0

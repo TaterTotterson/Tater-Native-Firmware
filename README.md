@@ -581,6 +581,28 @@ After a successful build:
 Use `--board voicepe`, `--board satellite1`, `--board respeaker_xvf3800`, or
 `--board s3_box` to package a single board.
 
+For a public Satellite1-only release, use a `native-satellite1-*` tag. The release
+workflow builds only `sat1` and carries forward the other boards' published
+versions, URLs and checksums into the combined manifest. Other `native-*` tags
+build all boards. A tag push publishes the GitHub release and updates `latest`.
+The normal `sat1` target in 0.7.0-r4 includes XMOS 1.2.0-dev.13; capture/bench
+instrumentation is excluded.
+
+To prepare the same scoped assets locally, download the currently published
+`latest.json` and the manifest it references, then run:
+
+```sh
+./scripts/build_native_firmware_manifest.py \
+  --board satellite1 --skip-build \
+  --release-repo TaterTotterson/Tater-Native-Firmware \
+  --release-tag native-satellite1-0.7.0-r4 \
+  --previous-latest /path/to/published/latest.json \
+  --previous-manifest /path/to/published/native-0.7.0-r3-manifest.json
+```
+
+Public single-board packaging requires both previous files so an update cannot
+silently remove unaffected boards from the shared OTA/USB-flasher manifest.
+
 This writes local release-style assets under `release_assets/<version>/`:
 
 - `latest.json`

@@ -1,7 +1,7 @@
-# Four-microphone speech tracking and cleanup experiment
+# Four-microphone speech tracking and cleanup
 
-`aec4_track` is an explicit comparison profile. The release `sat1` environment
-still embeds dev.8. This candidate has passed the functional checks below;
+`aec4_track` is the default profile for the release `sat1` environment in
+native **0.7.0-r4**. It has passed the functional checks below;
 recognition accuracy and acoustic gains have not been quantified.
 
 The normal image is dev.13 (`sat1_xmos_aec4_track`); the capture image is dev.14
@@ -90,7 +90,7 @@ classification is retained alongside that clarification.
 
 Exact tested normal factory SHA-256:
 `2af046f6d95372f332cdc48236c74098ce4f8bcf8608efe8c04925122c75865f`.
-Native application SHA-256:
+Pre-release comparison native application SHA-256 (0.7.0-r3):
 `37c5cd576c42309ad47d963c832b552315bfd8e02cbcad8d32d302583c3d5ae6`.
 Private captures/status/artifacts are under
 `audio_bench_results/hardware/20261125T225521Z-music-tracking/`.
