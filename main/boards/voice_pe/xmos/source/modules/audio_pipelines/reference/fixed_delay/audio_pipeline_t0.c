@@ -26,6 +26,7 @@
 #include "app_conf.h"
 #include "audio_pipeline.h"
 #include "audio_pipeline_dsp.h"
+#include "doa/doa_estimator.h"
 
 /* configuration servicer */
 #include "configuration_servicer.h"
@@ -37,6 +38,17 @@
 #define VNR_AGC_THRESHOLD (0.5)
 
 #if ON_TILE(0)
+static uint16_t probability_q15(float_s32_t probability)
+{
+    if (probability.mant <= 0) return 0;
+    int shift = probability.exp + 15;
+    if (shift >= 15) return 32768;
+    if (shift <= -32) return 0;
+    uint64_t value = shift >= 0 ? (uint64_t)probability.mant << shift :
+                                  (uint32_t)probability.mant >> -shift;
+    return value > 32768 ? 32768 : (uint16_t)value;
+}
+
 static ic_stage_ctx_t DWORD_ALIGNED ic_stage_state = {};
 static vnr_pred_stage_ctx_t DWORD_ALIGNED vnr_pred_stage_state = {};
 static ns_stage_ctx_t DWORD_ALIGNED ns_stage_state = {};
@@ -76,6 +88,12 @@ static int audio_pipeline_output_i(frame_data_t *frame_data,
 
 static void stage_vnr_and_ic(frame_data_t *frame_data)
 {
+    /* These are the two AEC outputs from tile 1. Analyze before ic_filter()
+     * delays/overwrites its primary, then gate with this frame's input VNR. */
+    doa_estimator_state_t direction;
+    doa_estimator_analyze_frame(frame_data->samples[0], frame_data->samples[1],
+                                appconfAUDIO_PIPELINE_FRAME_ADVANCE, &direction);
+    bool speech_present = false;
 #if appconfAUDIO_PIPELINE_SKIP_IC_AND_VAD
 #else
     int32_t DWORD_ALIGNED ic_output[appconfAUDIO_PIPELINE_FRAME_ADVANCE];
@@ -88,7 +106,12 @@ static void stage_vnr_and_ic(frame_data_t *frame_data)
               ic_output);
 
     vnr_pred_state_t *vnr_pred_state = &vnr_pred_stage_state.vnr_pred_state;
+    uint16_t previous_input_vnr = probability_q15(ic_stage_state.state.vnr_pred_state.input_vnr_pred);
     ic_calc_vnr_pred(&ic_stage_state.state, &vnr_pred_state->input_vnr_pred, &vnr_pred_state->output_vnr_pred);
+    uint16_t instant_input_vnr = doa_estimator_instant_vnr(previous_input_vnr,
+        probability_q15(vnr_pred_state->input_vnr_pred),
+        ic_stage_state.state.vnr_pred_state.pred_alpha_q30);
+    speech_present = instant_input_vnr >= 16384;
     configuration_push_vnr_value((int)(float_s32_to_float(vnr_pred_state->output_vnr_pred) * 100));
 
     float_s32_t agc_vnr_threshold = f32_to_float_s32(VNR_AGC_THRESHOLD);
@@ -100,6 +123,13 @@ static void stage_vnr_and_ic(frame_data_t *frame_data)
     memcpy(frame_data->samples[0], ic_output, appconfAUDIO_PIPELINE_FRAME_ADVANCE * sizeof(int32_t));
     memcpy(frame_data->aec_reference_audio_samples[0], ic_output, appconfAUDIO_PIPELINE_FRAME_ADVANCE * sizeof(int32_t));   // Store the interference cancelled audio in the first reference channel
 #endif
+    bool reference_active = float_s32_gt(frame_data->max_ref_energy,
+                                         f32_to_float_s32(0.000001f));
+    bool echo_dominated = float_s32_gt(frame_data->aec_corr_factor,
+                                       f32_to_float_s32(0.97f));
+    doa_estimator_publish_frame(&direction, speech_present, reference_active,
+                                echo_dominated,
+                                (uint32_t)xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
 static void stage_ns(frame_data_t *frame_data)
@@ -139,6 +169,7 @@ static void stage_agc(frame_data_t *frame_data)
 
 static void initialize_pipeline_stages(void)
 {
+    doa_estimator_reset();
     ic_init(&ic_stage_state.state);
 
     ns_init(&ns_stage_state.state);

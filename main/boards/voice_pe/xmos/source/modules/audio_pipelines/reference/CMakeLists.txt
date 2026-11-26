@@ -5,6 +5,8 @@
 ##******************************************
 
 add_library(fixed_delay_aec_ic_ns_agc_2mic_2ref INTERFACE)
+target_compile_definitions(fixed_delay_aec_ic_ns_agc_2mic_2ref
+    INTERFACE appconfVOICEPE_POST_AEC_TRACKING=1)
 target_sources(fixed_delay_aec_ic_ns_agc_2mic_2ref
     INTERFACE
         ${CMAKE_CURRENT_LIST_DIR}/fixed_delay/audio_pipeline_t0.c

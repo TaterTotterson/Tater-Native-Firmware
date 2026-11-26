@@ -17,7 +17,7 @@
 #define APP_VERSION_MINOR   3
 #endif
 #ifndef APP_VERSION_PATCH
-#define APP_VERSION_PATCH   2
+#define APP_VERSION_PATCH   4
 #endif
 
 /* Intertile port settings */
@@ -43,6 +43,10 @@
 #define appconfAUDIO_PIPELINE_CHANNELS          MIC_ARRAY_CONFIG_MIC_COUNT
 /* If in channel sample format, appconfAUDIO_PIPELINE_FRAME_ADVANCE == MIC_ARRAY_CONFIG_SAMPLES_PER_FRAME*/
 #define appconfAUDIO_PIPELINE_FRAME_ADVANCE     MIC_ARRAY_CONFIG_SAMPLES_PER_FRAME
+
+#ifndef appconfVOICEPE_POST_AEC_TRACKING
+#define appconfVOICEPE_POST_AEC_TRACKING 0
+#endif
 
 /**
  * A positive delay will delay mics

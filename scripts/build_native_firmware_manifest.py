@@ -44,9 +44,10 @@ BOARDS: dict[str, dict[str, Any]] = {
         "header": FIRMWARE_ROOT / "main" / "boards" / "voice_pe" / "board_voice_pe.h",
         "flash_size": "16MB",
         "xmos_firmware": {
-            "version": "1.3.2",
-            "source": FIRMWARE_ROOT / "main" / "boards" / "voice_pe" / "xmos" / "ffva_v1.3.2-vod_upgrade.bin",
-            "repo_path": "main/boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin",
+            "version": "1.3.4",
+            "source": FIRMWARE_ROOT / "main" / "boards" / "voice_pe" / "xmos" / "ffva_v1.3.4-vod_upgrade.bin",
+            "repo_path": "main/boards/voice_pe/xmos/ffva_v1.3.4-vod_upgrade.bin",
+            "embedded_asset": FIRMWARE_ROOT / "main" / "boards" / "voice_pe" / "xmos" / "ffva_v1.3.4-vod_upgrade.bin.zlib",
         },
     },
     "respeaker_xvf3800": {
@@ -276,7 +277,7 @@ def main() -> int:
             if embedded_asset:
                 compressed = embedded_asset.read_bytes()
                 if zlib.decompress(compressed) != xmos_source.read_bytes() or ota_bytes.count(compressed) != 1:
-                    raise SystemExit("Sat1's embedded XMOS payload does not match its release metadata.")
+                    raise SystemExit(f"{board['label']}'s embedded XMOS payload does not match its release metadata.")
             xmos_payload = {
                 "included": True,
                 "version": xmos["version"],

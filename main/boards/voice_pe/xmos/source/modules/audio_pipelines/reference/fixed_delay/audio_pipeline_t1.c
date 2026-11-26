@@ -20,7 +20,6 @@
 #include "app_conf.h"
 #include "audio_pipeline.h"
 #include "audio_pipeline_dsp.h"
-#include "doa/doa_estimator.h"
 
 #if appconfAUDIO_PIPELINE_FRAME_ADVANCE != 240
 #error This pipeline is only configured for 240 frame advance
@@ -46,10 +45,6 @@ static void *audio_pipeline_input_i(void *input_app_data)
                        appconfAUDIO_PIPELINE_FRAME_ADVANCE);
 
     frame_data->vnr_pred_flag = 0;
-
-    doa_estimator_process_frame(frame_data->mic_samples_passthrough[0],
-                                frame_data->mic_samples_passthrough[1],
-                                appconfAUDIO_PIPELINE_FRAME_ADVANCE);
 
     memcpy(frame_data->samples, frame_data->mic_samples_passthrough, sizeof(frame_data->samples));
 

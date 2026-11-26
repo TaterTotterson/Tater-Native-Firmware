@@ -1,7 +1,10 @@
 #pragma once
+#include "voicepe_audio_protocol.h"
 
 typedef enum {
     DOA_SERVICER_CMD_READ_STATE = 0,
+    DOA_SERVICER_CMD_READ_CAPABILITIES = VOICEPE_DOA_READ_CAPABILITIES,
+    DOA_SERVICER_CMD_SET_HINTS = VOICEPE_DOA_SET_HINTS,
     NUM_DOA_SERVICER_CMDS
 } doa_servicer_cmd_id_t;
 

@@ -421,7 +421,7 @@ void startup_task(void *arg)
     );
 #endif
 
-#if appconfI2C_DFU_ENABLED && ON_TILE(MICARRAY_TILE_NO)
+#if appconfI2C_DFU_ENABLED && ((appconfVOICEPE_POST_AEC_TRACKING && ON_TILE(0)) || (!appconfVOICEPE_POST_AEC_TRACKING && ON_TILE(MICARRAY_TILE_NO)))
     servicer_t servicer_doa;
     doa_servicer_init(&servicer_doa);
 

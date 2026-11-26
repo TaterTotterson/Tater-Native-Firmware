@@ -30,8 +30,6 @@ if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
   "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 fi
 
-"${VENV_DIR}/bin/pip" install -r "${ROOT_DIR}/requirements.txt"
-
 export XMOS_TOOL_PATH="${XTC_DIR}"
 export XMOS_HOME="${XMOS_HOME:-${HOME}/.xmos}"
 export PATH="${VENV_DIR}/bin:${XTC_DIR}/bin:${XTC_DIR}/libexec:${PATH}"

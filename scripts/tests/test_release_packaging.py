@@ -56,8 +56,8 @@ class ReleasePackagingTest(unittest.TestCase):
                 xmos = board["xmos_firmware"]
                 xmos["source"] = self.root / f"{key}-dsp.bin"
                 xmos["source"].write_bytes(zlib.decompress(self.blob))
-                if key == "satellite1":
-                    xmos["embedded_asset"] = self.root / "dsp.zlib"
+                if "embedded_asset" in xmos:
+                    xmos["embedded_asset"] = self.root / f"{key}-dsp.zlib"
                     xmos["embedded_asset"].write_bytes(self.blob)
             version = f"native-{key}-0.7.0" + ("-r3" if key == "satellite1" else "")
             row = {
@@ -127,7 +127,8 @@ class ReleasePackagingTest(unittest.TestCase):
         for key, board in self.boards.items():
             if key != "satellite1":
                 build = self.root / ".pio" / "build" / board["build_dir"]
-                (build / "firmware.bin").write_bytes(package.read_version(board).encode() + b"\0app")
+                payload = self.blob if "embedded_asset" in board.get("xmos_firmware", {}) else b"app"
+                (build / "firmware.bin").write_bytes(package.read_version(board).encode() + b"\0" + payload)
                 (build / "firmware.factory.bin").write_bytes(b"factory")
         self.assertEqual(self.invoke(board="all", baseline=False), 0)
         self.assertEqual(len(list((self.root / "release").glob("*.bin"))), 8)
@@ -167,6 +168,17 @@ class ReleasePackagingTest(unittest.TestCase):
         self.ota.write_bytes(b"native-satellite1-0.7.0-r3\0" + self.blob)
         with self.assertRaisesRegex(SystemExit, "board firmware version"):
             self.invoke()
+
+    def test_voicepe_requires_the_matching_embedded_dsp(self):
+        board = self.boards["voicepe"]
+        build = self.root / ".pio" / "build" / board["build_dir"]
+        prefix = package.read_version(board).encode() + b"\0"
+        (build / "firmware.factory.bin").write_bytes(b"factory")
+        (build / "firmware.bin").write_bytes(prefix + b"old Voice PE DSP")
+        with self.assertRaisesRegex(SystemExit, "Voice PE's embedded XMOS"):
+            self.invoke(board="voicepe", public=False, baseline=False)
+        (build / "firmware.bin").write_bytes(prefix + self.blob)
+        self.assertEqual(self.invoke(board="voicepe", public=False, baseline=False), 0)
 
 
 if __name__ == "__main__":

@@ -4,8 +4,13 @@
 #include "device_control.h"
 #include "cmd_map.h"
 
-#define NUM_TILE_0_SERVICERS            (2) // DFU servicer and configuration servicer
-#define NUM_TILE_1_SERVICERS            (1) // DoA servicer
+#if appconfVOICEPE_POST_AEC_TRACKING
+#define NUM_TILE_0_SERVICERS            (3) // DFU, configuration and post-AEC DoA
+#define NUM_TILE_1_SERVICERS            (0)
+#else
+#define NUM_TILE_0_SERVICERS            (2) // DFU and configuration
+#define NUM_TILE_1_SERVICERS            (1) // Raw-microphone DoA
+#endif
 
 extern device_control_t *device_control_i2c_ctx;
 extern device_control_t *device_control_ctxs[1];

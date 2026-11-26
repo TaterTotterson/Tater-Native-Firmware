@@ -24,6 +24,7 @@
 #include "tater_protocol.h"
 #include "wake_engine.h"
 #include "xmos_update.h"
+#include "voicepe_audio_hints.h"
 
 #if TATER_BOARD_VOICE_PE
 
@@ -44,6 +45,10 @@ static portMUX_TYPE s_doa_lock = portMUX_INITIALIZER_UNLOCKED;
 static tater_audio_doa_t s_doa;
 static int64_t s_doa_update_us;
 static uint32_t s_doa_failed_reads;
+static voicepe_audio_hints_t s_audio_hints;
+#ifndef TATER_VOICEPE_AUDIO_HINTS
+#define TATER_VOICEPE_AUDIO_HINTS 1
+#endif
 static tater_doa_activity_gate_t s_mic_activity_gate;
 static bool s_mic_signal_active;
 static uint32_t s_mic_mean_abs;
@@ -53,12 +58,12 @@ static portMUX_TYPE s_xmos_status_lock = portMUX_INITIALIZER_UNLOCKED;
 static tater_audio_xmos_status_t s_xmos_status = {
     .target_major = 1,
     .target_minor = 3,
-    .target_patch = 2,
+    .target_patch = 4,
     .update_state = TATER_XMOS_UPDATE_IDLE,
 };
 
-extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_start[] asm("_binary_ffva_v1_3_2_vod_upgrade_bin_zlib_start");
-extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_end[] asm("_binary_ffva_v1_3_2_vod_upgrade_bin_zlib_end");
+extern const uint8_t _binary_ffva_v1_3_4_vod_upgrade_bin_zlib_start[] asm("_binary_ffva_v1_3_4_vod_upgrade_bin_zlib_start");
+extern const uint8_t _binary_ffva_v1_3_4_vod_upgrade_bin_zlib_end[] asm("_binary_ffva_v1_3_4_vod_upgrade_bin_zlib_end");
 
 #define TATER_I2C_PORT I2C_NUM_0
 #define AIC3204_I2C_ADDR 0x18
@@ -84,7 +89,7 @@ extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_end[] asm("_binary
 #define XMOS_VERSION_RETRY_DELAY_MS 250
 #define XMOS_TARGET_VERSION_MAJOR 1
 #define XMOS_TARGET_VERSION_MINOR 3
-#define XMOS_TARGET_VERSION_PATCH 2
+#define XMOS_TARGET_VERSION_PATCH 4
 #define XMOS_TARGET_IMAGE_SIZE 282624U
 #define VOICE_PE_XMOS_PROCESSED_CHANNEL 0
 #define CONFIGURATION_SERVICER_RESID_CHANNEL_0_PIPELINE_STAGE 0x30
@@ -92,11 +97,9 @@ extern const uint8_t _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_end[] asm("_binary
 #define PIPELINE_STAGE_NS 3
 #define PIPELINE_STAGE_AGC 4
 #define CTRL_DONE 0
-#define DOA_RESOURCE_ID 231
-#define DOA_CMD_READ_STATE 0x80
-#define DOA_STATE_PAYLOAD_LEN 12
+#define DOA_STATE_PAYLOAD_LEN VOICEPE_DOA_STATE_BYTES
 #define DOA_STATE_RESPONSE_LEN (DOA_STATE_PAYLOAD_LEN + 1)
-#define DOA_FLAG_VALID (1u << 0)
+#define DOA_FLAG_VALID VOICEPE_DOA_FLAG_VALID
 #define VOICE_PE_DOA_ACTIVITY_FRESH_US 250000
 
 #define AIC3204_PAGE_CTRL 0x00
@@ -151,7 +154,7 @@ static esp_err_t xmos_reset_boot(void)
 
 static size_t xmos_target_compressed_size(void)
 {
-    return (size_t)(_binary_ffva_v1_3_2_vod_upgrade_bin_zlib_end - _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_start);
+    return (size_t)(_binary_ffva_v1_3_4_vod_upgrade_bin_zlib_end - _binary_ffva_v1_3_4_vod_upgrade_bin_zlib_start);
 }
 
 static esp_err_t speaker_session_take(void)
@@ -660,7 +663,7 @@ static esp_err_t xmos_dfu_update_to_target(void)
 {
     uint8_t *image = NULL;
     esp_err_t err = tater_compressed_asset_expand(
-        _binary_ffva_v1_3_2_vod_upgrade_bin_zlib_start,
+        _binary_ffva_v1_3_4_vod_upgrade_bin_zlib_start,
         xmos_target_compressed_size(),
         XMOS_TARGET_IMAGE_SIZE,
         &image
@@ -715,6 +718,55 @@ static esp_err_t voice_kit_write_stage(uint8_t reg, uint8_t stage)
     return locked_i2c_write(VOICE_KIT_I2C_ADDR, req, sizeof(req), pdMS_TO_TICKS(100));
 }
 
+/* Keep the XMOS request and response together. Codec writes and status reads
+ * must not split a control transaction. This task never owns the audio path. */
+static esp_err_t voicepe_control_read(uint8_t command, uint8_t *response, size_t length)
+{
+    const uint8_t request[] = {VOICEPE_DOA_RESOURCE,
+                               (uint8_t)(command | DFU_COMMAND_READ_BIT),
+                               (uint8_t)length};
+    if (s_i2c_mutex && xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(50)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    esp_err_t err = i2c_master_write_to_device(TATER_I2C_PORT, VOICE_KIT_I2C_ADDR,
+        request, sizeof(request), pdMS_TO_TICKS(25));
+    if (err == ESP_OK) {
+        err = i2c_master_read_from_device(TATER_I2C_PORT, VOICE_KIT_I2C_ADDR,
+            response, length, pdMS_TO_TICKS(25));
+    }
+    if (s_i2c_mutex) xSemaphoreGive(s_i2c_mutex);
+    if (err == ESP_OK && response[0] != CTRL_DONE) return ESP_FAIL;
+    return err;
+}
+
+static void voicepe_probe_audio_hints(void)
+{
+#if TATER_VOICEPE_AUDIO_HINTS
+    uint8_t response[VOICEPE_DOA_CAPABILITY_BYTES + 1] = {0};
+    esp_err_t err = voicepe_control_read(VOICEPE_DOA_READ_CAPABILITIES,
+                                        response, sizeof(response));
+    voicepe_audio_hints_init(&s_audio_hints, err == ESP_OK ? response + 1 : NULL);
+    if (s_audio_hints.supported) {
+        ESP_LOGI(TAG, "xmos post-AEC direction and expiring audio hints supported");
+    }
+#endif
+}
+
+static esp_err_t voicepe_sync_audio_hints(uint32_t now_ms)
+{
+    uint8_t flags = 0;
+    if (tater_audio_speaker_level() >= 0.012f) flags |= VOICEPE_DOA_HINT_PLAYBACK;
+    if (tater_protocol_voice_active()) flags |= VOICEPE_DOA_HINT_LISTENING;
+    if (!voicepe_audio_hints_due(&s_audio_hints, flags, now_ms)) return ESP_OK;
+    uint8_t request[] = {VOICEPE_DOA_RESOURCE, VOICEPE_DOA_SET_HINTS, 1, flags};
+    if (s_i2c_mutex && xSemaphoreTake(s_i2c_mutex, pdMS_TO_TICKS(25)) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    esp_err_t err = i2c_master_write_to_device(TATER_I2C_PORT, VOICE_KIT_I2C_ADDR,
+        request, sizeof(request), pdMS_TO_TICKS(25));
+    if (s_i2c_mutex) xSemaphoreGive(s_i2c_mutex);
+    if (err == ESP_OK) voicepe_audio_hints_sent(&s_audio_hints, flags, now_ms);
+    return err;
+}
+
 static esp_err_t voice_kit_configure_pipeline(void)
 {
     ESP_RETURN_ON_ERROR(xmos_ensure_target_firmware(), TAG, "xmos target firmware check failed");
@@ -729,6 +781,7 @@ static esp_err_t voice_kit_configure_pipeline(void)
         "xmos channel 1 stage failed"
     );
     ESP_LOGI(TAG, "xmos pipeline configured channel0=AEC+IC+NS+AGC channel1=AEC+IC+NS");
+    voicepe_probe_audio_hints();
     return ESP_OK;
 }
 
@@ -740,24 +793,18 @@ static uint32_t read_u32_le(const uint8_t *payload)
         | ((uint32_t)payload[3] << 24);
 }
 
-static esp_err_t xmos_read_doa(tater_audio_doa_t *out)
+static esp_err_t xmos_read_doa(tater_audio_doa_t *out, uint8_t *tracking_flags)
 {
-    const uint8_t req[] = {DOA_RESOURCE_ID, DOA_CMD_READ_STATE, DOA_STATE_RESPONSE_LEN};
     uint8_t resp[DOA_STATE_RESPONSE_LEN] = {0};
-
     ESP_RETURN_ON_ERROR(
-        locked_i2c_write(VOICE_KIT_I2C_ADDR, req, sizeof(req), pdMS_TO_TICKS(100)),
-        TAG,
-        "xmos doa request failed"
-    );
-    ESP_RETURN_ON_ERROR(
-        locked_i2c_read(VOICE_KIT_I2C_ADDR, resp, sizeof(resp), pdMS_TO_TICKS(100)),
+        voicepe_control_read(VOICEPE_DOA_READ_STATE, resp, sizeof(resp)),
         TAG,
         "xmos doa read failed"
     );
     ESP_RETURN_ON_FALSE(resp[0] == CTRL_DONE, ESP_FAIL, TAG, "xmos doa response not ready");
 
     const uint8_t *payload = &resp[1];
+    if (tracking_flags) *tracking_flags = payload[3];
     bool signal_active = false;
     uint32_t mic_mean_abs = 0;
     uint32_t noise_floor = 0;
@@ -802,22 +849,44 @@ static void store_doa_snapshot(const tater_audio_doa_t *snapshot)
 static void doa_task(void *arg)
 {
     (void)arg;
+    uint32_t last_probe_ms = 0;
+    uint32_t hint_failures = 0;
+    uint32_t last_log_ms = 0;
     while (true) {
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!s_audio_hints.supported && (uint32_t)(now_ms - last_probe_ms) >= 5000) {
+            voicepe_probe_audio_hints();
+            last_probe_ms = now_ms;
+        }
+        esp_err_t hint_err = voicepe_sync_audio_hints(now_ms);
+        if (hint_err != ESP_OK) {
+            if (++hint_failures == 1 || hint_failures % 50 == 0)
+                ESP_LOGW(TAG, "xmos audio hint write failed: %s", esp_err_to_name(hint_err));
+        } else {
+            hint_failures = 0;
+        }
         tater_audio_doa_t snapshot = {0};
-        esp_err_t err = xmos_read_doa(&snapshot);
+        uint8_t tracking_flags = 0;
+        esp_err_t err = xmos_read_doa(&snapshot, &tracking_flags);
         if (err == ESP_OK) {
             if (s_doa_failed_reads > 0) {
                 ESP_LOGI(TAG, "xmos doa recovered");
             }
             s_doa_failed_reads = 0;
             store_doa_snapshot(&snapshot);
+            if (tater_protocol_voice_active() && (uint32_t)(now_ms - last_log_ms) >= 1000) {
+                last_log_ms = now_ms;
+                ESP_LOGI(TAG, "voicepe doa valid=%u delay=%d conf=%u frame=%" PRIu32 " flags=0x%02x hints=%u",
+                    snapshot.valid, snapshot.sample_delay, snapshot.confidence,
+                    snapshot.frame_counter, tracking_flags, s_audio_hints.supported);
+            }
         } else {
             s_doa_failed_reads++;
             if (s_doa_failed_reads == 1 || (s_doa_failed_reads % 50) == 0) {
                 ESP_LOGW(TAG, "xmos doa read failed count=%lu err=%s", (unsigned long)s_doa_failed_reads, esp_err_to_name(err));
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 

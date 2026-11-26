@@ -1430,6 +1430,8 @@ static void led_task(void *arg)
         } else if (s_state == TATER_STATE_LISTENING) {
 #if TATER_BOARD_SAT1
             delay_ms = 30;
+#elif TATER_BOARD_VOICE_PE
+            delay_ms = 25;
 #else
             delay_ms = 50;
 #endif

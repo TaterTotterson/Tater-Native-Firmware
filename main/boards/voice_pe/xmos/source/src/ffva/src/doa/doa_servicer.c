@@ -6,6 +6,8 @@
 #include <xassert.h>
 
 #include "FreeRTOS.h"
+#include "task.h"
+#include "app_conf.h"
 
 #include "doa_cmds.h"
 #include "doa_estimator.h"
@@ -14,6 +16,8 @@
 
 static control_cmd_info_t doa_servicer_cmd_map[] = {
     { DOA_SERVICER_CMD_READ_STATE, DOA_SERVICER_STATE_NUM_VALUES, sizeof(uint8_t), CMD_READ_ONLY },
+    { DOA_SERVICER_CMD_READ_CAPABILITIES, VOICEPE_DOA_CAPABILITY_BYTES, sizeof(uint8_t), CMD_READ_ONLY },
+    { DOA_SERVICER_CMD_SET_HINTS, 1, sizeof(uint8_t), CMD_WRITE_ONLY },
 };
 
 static void store_u16_le(uint8_t *dst, uint16_t value)
@@ -54,6 +58,14 @@ static control_ret_t doa_servicer_read_cmd(control_resid_t resid,
     }
 
     switch (CONTROL_CMD_CLEAR_READ(cmd)) {
+    case DOA_SERVICER_CMD_READ_CAPABILITIES:
+        payload_ptr[0] = 'V';
+        payload_ptr[1] = 'P';
+        payload_ptr[2] = VOICEPE_DOA_PROTOCOL_VERSION;
+        payload_ptr[3] = appconfVOICEPE_POST_AEC_TRACKING ?
+            VOICEPE_DOA_CAP_POST_AEC | VOICEPE_DOA_CAP_HOST_HINTS : 0;
+        payload[0] = CONTROL_SUCCESS;
+        return CONTROL_SUCCESS;
     case DOA_SERVICER_CMD_READ_STATE:
     {
         doa_estimator_state_t state;
@@ -82,6 +94,19 @@ static control_ret_t doa_servicer_write_cmd(control_resid_t resid,
                                             size_t payload_len,
                                             void *app_data)
 {
+    servicer_t *servicer = (servicer_t *)app_data;
+    control_resource_info_t *resource = get_res_info(resid, servicer);
+    control_cmd_info_t *command;
+    if (resource == NULL) return CONTROL_BAD_COMMAND;
+    control_ret_t ret = validate_cmd(&command, resource, cmd, payload, payload_len);
+    if (ret != CONTROL_SUCCESS) return ret;
+    if (CONTROL_CMD_CLEAR_READ(cmd) == DOA_SERVICER_CMD_SET_HINTS &&
+        appconfVOICEPE_POST_AEC_TRACKING && payload_len == 1 &&
+        (payload[0] & ~VOICEPE_DOA_HINT_MASK) == 0) {
+        doa_estimator_set_host_hints(payload[0],
+            (uint32_t)xTaskGetTickCount() * portTICK_PERIOD_MS);
+        return CONTROL_SUCCESS;
+    }
     return CONTROL_BAD_COMMAND;
 }
 

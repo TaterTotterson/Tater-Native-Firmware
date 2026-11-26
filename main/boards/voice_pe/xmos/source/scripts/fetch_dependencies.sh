@@ -22,7 +22,8 @@ clone_checkout() {
   fi
 
   git -C "${dest}" checkout --detach "${commit}"
-  git -C "${dest}" submodule update --init --recursive
+  git -c url.https://github.com/.insteadOf=git@github.com: \
+    -C "${dest}" submodule update --init --recursive
 }
 
 apply_patch_if_needed() {

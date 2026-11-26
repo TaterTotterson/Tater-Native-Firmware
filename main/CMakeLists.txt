@@ -10,6 +10,7 @@ idf_component_register(
         "ble_scanner.c"
         "ble_proxy.c"
         "boards/voice_pe/audio_voice_pe.c"
+        "boards/voice_pe/voicepe_audio_hints.c"
         "boards/sat1/audio_sat1.c"
         "boards/sat1/sat1_control_protocol.c"
         "boards/sat1/sat1_pd_policy.c"
@@ -81,7 +82,7 @@ target_add_binary_data(${COMPONENT_LIB} "models/hey_tater.tflite" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "models/hey_tater.boundary.tflite" BINARY)
 target_add_binary_data(${COMPONENT_LIB} "models/stop.tflite" BINARY)
 if(TATER_NATIVE_BUILD_ENV STREQUAL "voicepe")
-    target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin.zlib" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.4-vod_upgrade.bin.zlib" BINARY)
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "sat1")
     if(TATER_SAT1_AUDIO_BENCH AND NOT TATER_SAT1_XMOS_VARIANT)
         message(FATAL_ERROR "Audio bench requires an explicit TATER_SAT1_XMOS_VARIANT")
@@ -115,7 +116,7 @@ elseif(TATER_NATIVE_BUILD_ENV STREQUAL "respeaker_xvf3800")
 elseif(TATER_NATIVE_BUILD_ENV STREQUAL "s3_box")
     message(STATUS "Building S3 Box target without XMOS firmware payload")
 else()
-    target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin.zlib" BINARY)
+    target_add_binary_data(${COMPONENT_LIB} "boards/voice_pe/xmos/ffva_v1.3.4-vod_upgrade.bin.zlib" BINARY)
     target_add_binary_data(${COMPONENT_LIB} "boards/sat1/xmos/candidates/sat1_xmos_aec4_track.bin.zlib" BINARY)
     target_add_binary_data(${COMPONENT_LIB} "boards/respeaker_xvf3800/xmos/xvf3800_i2s_1_0_7.bin.zlib" BINARY)
 endif()
