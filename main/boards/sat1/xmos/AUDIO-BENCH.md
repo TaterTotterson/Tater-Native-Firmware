@@ -251,6 +251,12 @@ establish HomePod parity or resolve issue #129.
 
 Host regression command: `bash main/scripts/test_sat1_audio_bench_host.sh`.
 
+The harness uses Clang for its address/undefined-behavior sanitizer checks;
+`CC` can select its executable. The transport tests also need the XMOS RTOS
+sources under `source/modules/rtos`. Release CI checks out the same pinned
+`xmos/fwk_rtos` revision used by the tested firmware,
+`6d5a6fb75f41d65e84e66e4467b898cd02080463`, before running these tests.
+
 ## Software verification, November 25, 2026
 
 - Twenty-two host tests pass, including the actual C snapshot/packing code,

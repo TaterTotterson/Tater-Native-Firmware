@@ -1,4 +1,4 @@
-"""Exercise the actual C capture/packing code and reject damaged lab recordings."""
+"""Exercise C capture/transport code with Clang and reject damaged recordings."""
 import importlib.util
 from contextlib import redirect_stdout
 import io
@@ -28,9 +28,10 @@ class AudioBenchTest(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.directory = Path(cls.tmp.name)
-        compiler = shutil.which("cc")
+        compiler = shutil.which(os.environ.get("CC", "cc"))
         if not compiler:
             raise RuntimeError("A host C compiler is required")
+        cls.compiler = compiler
         # Boundary stubs let the production snapshot implementation run on host.
         stubs = {
             "app_conf.h": "#pragma once\n#define appconfSAT1_AUDIO_BENCH 1\n#define appconfSAT1_BENCH_PROFILE 1\n#define APP_VERSION_COUNTER 9\n#define THIS_XCORE_TILE 1\n#define ON_TILE(n) ((n) == THIS_XCORE_TILE)\n",
@@ -188,7 +189,7 @@ int main(void) {
                 source = config + "\n" + "\n".join(
                     re.sub(r'^#include .*$', '', (pipelines / layout / f"audio_pipeline_t{tile}.c").read_text(), flags=re.M)
                     for tile in (0, 1))
-                result = subprocess.run([shutil.which("cc"), "-E", "-P", "-x", "c",
+                result = subprocess.run([self.compiler, "-E", "-P", "-x", "c",
                     f"-DappconfSAT1_AUDIO_BENCH={enabled}", "-DON_TILE(n)=1",
                     "-DMIC_ARRAY_CONFIG_MIC_COUNT=4", "-DMIC_ARRAY_CONFIG_SAMPLES_PER_FRAME=240", "-"], input=source,
                     text=True, capture_output=True, check=True)
@@ -237,7 +238,7 @@ int main(void) {
         for microphones in (2, 4):
             for rate_factor in (1, 3):
                 binary = self.directory / f"speaker_channels_{microphones}_{rate_factor}"
-                subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+                subprocess.run([self.compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
                     "-fsanitize=address,undefined", f"-DappconfAUDIO_PIPELINE_CHANNELS={microphones}",
                     f"-DRATE_FACTOR={rate_factor}", str(harness), "-o", str(binary)], check=True)
                 subprocess.run([str(binary)], check=True, timeout=10)
@@ -258,13 +259,13 @@ int main(void) {
         for layout in ("fixed_delay", "fixed_delay4"):
             pipeline = (SRC.parent / f"audio_pipelines/reference/{layout}/audio_pipeline_t1.c").read_text()
             callback = function(pipeline, "static int audio_pipeline_output_i(")
-            expanded = subprocess.run([shutil.which("cc"), "-E", "-P", "-x", "c",
+            expanded = subprocess.run([self.compiler, "-E", "-P", "-x", "c",
                 "-DappconfSAT1_AUDIO_BENCH=0", "-DON_TILE(n)=1",
                 "-DMIC_ARRAY_CONFIG_MIC_COUNT=4", "-DMIC_ARRAY_CONFIG_SAMPLES_PER_FRAME=240", "-"],
                 input=config + "\n" + callback, text=True, capture_output=True, check=True).stdout
             (self.directory / "sat1_audio_rpc_callbacks.inc").write_text(tx + "\n" + expanded)
             binary = self.directory / f"audio_rpc_{layout}"
-            subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+            subprocess.run([self.compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
                 "-Wno-unused-parameter", "-pthread", "-fsanitize=address,undefined",
                 "-D_POSIX_C_SOURCE=200809L", "-I", str(self.directory),
                 str(ROOT / "main/tests/test_sat1_audio_rpc_progress_host.c"), "-o", str(binary)], check=True)
@@ -277,7 +278,7 @@ int main(void) {
             re.sub(r'^#include .*$', '', generic + "\n" + speaker, flags=re.M))
         for factor in (1, 3):
             binary = self.directory / f"speaker_backpressure_{factor}"
-            subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+            subprocess.run([self.compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
                 "-pthread", "-fsanitize=address,undefined", "-fno-sanitize=function",
                 "-D_POSIX_C_SOURCE=200809L", f"-DRATE_FACTOR={factor}", "-I", str(self.directory),
                 str(ROOT / "main/tests/test_sat1_speaker_backpressure_host.c"), "-o", str(binary)], check=True)
@@ -299,7 +300,7 @@ int main(void) {
             function("static size_t receive_mic_array_frame(") + "\n" +
             function("void sat1_post_aec_beam("))
         binary = self.directory / "beam_lock"
-        subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+        subprocess.run([self.compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
             "-pthread", "-fsanitize=address,undefined", "-I", str(self.directory), "-I", str(SRC),
             str(ROOT / "main/tests/test_sat1_beam_lock_host.c"), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True, timeout=10)
@@ -320,7 +321,7 @@ int main(void) {
             function("int cdc_printf(") + "\n" +
             function("void rtos_cdc_rpc_client_init("))
         binary = self.directory / "cdc_lock"
-        subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+        subprocess.run([self.compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
             "-pthread", "-fsanitize=address,undefined", "-I", str(self.directory),
             str(ROOT / "main/tests/test_sat1_cdc_lock_host.c"), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True, timeout=10)
@@ -345,7 +346,7 @@ int main(void) {
         for tile in (0, 1):
             for cdc in (0, 1):
                 for usb_audio in (0, 1):
-                    result = subprocess.run([shutil.which("cc"), "-E", "-P", "-x", "c",
+                    result = subprocess.run([self.compiler, "-E", "-P", "-x", "c",
                         "-DUSB_TILE_NO=0", f"-DTILE_UNDER_TEST={tile}",
                         "-DON_TILE(n)=((n)==TILE_UNDER_TEST)",
                         f"-DappconfUSB_CDC_ENABLED={cdc}",
@@ -361,7 +362,7 @@ int main(void) {
                     self.assertEqual(compact.count("rtos_intertile_init(intertile_usb_audio_ctx,"), usb_audio)
                     self.assertEqual(compact.count("rtos_intertile_start(intertile_usb_audio_ctx)"), usb_audio)
                     # The capture-only bench uses a local USB stream buffer.
-                    bench_result = subprocess.run([shutil.which("cc"), "-E", "-P", "-x", "c",
+                    bench_result = subprocess.run([self.compiler, "-E", "-P", "-x", "c",
                         "-DUSB_TILE_NO=0", f"-DTILE_UNDER_TEST={tile}",
                         "-DON_TILE(n)=((n)==TILE_UNDER_TEST)", "-DappconfSAT1_AUDIO_BENCH=1",
                         f"-DappconfUSB_CDC_ENABLED={cdc}",
@@ -521,7 +522,7 @@ int main(void) {
 }
 ''')
         binary = self.directory / "usb_read"
-        subprocess.run([shutil.which("cc"), "-std=c11", "-Wall", "-Wextra", "-Werror",
+        subprocess.run([self.compiler, "-std=c11", "-Wall", "-Wextra", "-Werror",
                         "-fsanitize=address,undefined", str(harness), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True, timeout=20)
 

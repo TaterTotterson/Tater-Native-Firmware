@@ -62,6 +62,14 @@ jobs:
             platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
           fi
 
+      - name: Check out XMOS RTOS sources for host regressions
+        uses: actions/checkout@v4
+        with:
+          repository: xmos/fwk_rtos
+          ref: 6d5a6fb75f41d65e84e66e4467b898cd02080463
+          path: main/boards/sat1/xmos/source/modules/rtos
+          persist-credentials: false
+
       - name: Run host regressions
         env:
           IDF_PATH: ${{ github.workspace }}/.platformio/packages/framework-espidf
@@ -106,14 +114,17 @@ jobs:
             exit 1
           fi
 
-          RELEASE_MANIFEST="$(ls "${RELEASE_DIR}"/*-manifest.json | head -n 1)"
+          RELEASE_MANIFESTS=("${RELEASE_DIR}"/*-manifest.json)
+          RELEASE_MANIFEST="${RELEASE_MANIFESTS[0]}"
           ./scripts/render_release_notes.py \
             "$RELEASE_MANIFEST" \
             "${RELEASE_DIR}/RELEASE_NOTES.md"
 
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "display_version=${DISPLAY_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "release_dir=${RELEASE_DIR}" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=${VERSION}"
+            echo "display_version=${DISPLAY_VERSION}"
+            echo "release_dir=${RELEASE_DIR}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
