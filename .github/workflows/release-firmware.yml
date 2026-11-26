@@ -48,6 +48,8 @@ jobs:
         run: |
           if [[ "$TAG" == native-satellite1-* ]]; then
             echo "board=satellite1" >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG" == native-voicepe-* ]]; then
+            echo "board=voicepe" >> "$GITHUB_OUTPUT"
           else
             echo "board=all" >> "$GITHUB_OUTPUT"
           fi
@@ -58,6 +60,8 @@ jobs:
         run: |
           if [ "$RELEASE_BOARD" = satellite1 ]; then
             platformio run -e sat1
+          elif [ "$RELEASE_BOARD" = voicepe ]; then
+            platformio run -e voicepe
           else
             platformio run -e voicepe -e sat1 -e respeaker_xvf3800 -e s3_box
           fi
@@ -146,6 +150,8 @@ jobs:
           TITLE="Tater Firmware ${DISPLAY_VERSION}"
           if [ "$RELEASE_BOARD" = satellite1 ]; then
             TITLE="Satellite1 Firmware ${DISPLAY_VERSION}"
+          elif [ "$RELEASE_BOARD" = voicepe ]; then
+            TITLE="Voice PE Firmware ${DISPLAY_VERSION}"
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${RELEASE_DIR}"/* --clobber

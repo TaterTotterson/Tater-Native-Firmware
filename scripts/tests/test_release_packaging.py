@@ -43,7 +43,8 @@ class ReleasePackagingTest(unittest.TestCase):
         }
         for key, board in self.boards.items():
             board["header"] = self.root / f"{key}.h"
-            version = f"native-{key}-0.7.0" + ("-r4" if key == "satellite1" else "")
+            revision = "-r4" if key == "satellite1" else "-r1" if key == "voicepe" else ""
+            version = f"native-{key}-0.7.0{revision}"
             board["header"].write_text(f'#define TATER_FIRMWARE_VERSION "{version}"\n')
             build = self.root / ".pio" / "build" / board["build_dir"]
             build.mkdir(parents=True)
@@ -75,7 +76,8 @@ class ReleasePackagingTest(unittest.TestCase):
     def invoke(self, board="satellite1", public=True, baseline=True):
         args = ["package", "--board", board, "--skip-build", "--release-dir", str(self.root / "release")]
         if public:
-            args += ["--release-repo", "owner/repo", "--release-tag", "native-satellite1-0.7.0-r4"]
+            tag = package.read_version(self.boards[board]) if board != "all" else "native-0.7.0"
+            args += ["--release-repo", "owner/repo", "--release-tag", tag]
         if baseline:
             for name, data in (("latest", self.old_latest), ("manifest", self.old_manifest)):
                 path = self.root / f"old-{name}.json"
@@ -179,6 +181,43 @@ class ReleasePackagingTest(unittest.TestCase):
             self.invoke(board="voicepe", public=False, baseline=False)
         (build / "firmware.bin").write_bytes(prefix + self.blob)
         self.assertEqual(self.invoke(board="voicepe", public=False, baseline=False), 0)
+
+    def test_voicepe_only_keeps_sat1_r4_and_all_other_published_artifacts(self):
+        for row in self.old_manifest["devices"]:
+            if row["key"] == "satellite1":
+                row["firmware_version"] = "native-satellite1-0.7.0-r4"
+                self.old_latest["boards"]["satellite1"]["version"] = row["firmware_version"]
+        for key, board in self.boards.items():
+            build = self.root / ".pio" / "build" / board["build_dir"]
+            if key == "voicepe":
+                (build / "firmware.bin").write_bytes(package.read_version(board).encode() + b"\0" + self.blob)
+                (build / "firmware.factory.bin").write_bytes(b"factory")
+            else:
+                for path in build.glob("*.bin"):
+                    path.unlink()
+        self.assertEqual(self.invoke(board="voicepe"), 0)
+        release = self.root / "release"
+        manifest_path = next(release.glob("*-manifest.json"))
+        manifest = json.loads(manifest_path.read_text())
+        latest = json.loads((release / "latest.json").read_text())
+        self.assertEqual(manifest["updated_boards"], ["voicepe"])
+        self.assertEqual(latest["version"], "native-voicepe-0.7.0-r1")
+        self.assertEqual(len(list(release.glob("*.bin"))), 2)
+        rows = {row["key"]: row for row in manifest["devices"]}
+        for old in self.old_manifest["devices"]:
+            key = old["key"]
+            if key != "voicepe":
+                self.assertEqual(rows[key], old)
+                self.assertEqual(latest["boards"][key], self.old_latest["boards"][key])
+        self.assertEqual(rows["voicepe"]["firmware_version"], "native-voicepe-0.7.0-r1")
+        self.assertIn("/native-voicepe-0.7.0-r1/", rows["voicepe"]["artifacts"]["ota"]["path"])
+        with patch.object(notes, "RELEASE_HIGHLIGHTS_PATH", self.root / "none"), patch.object(sys, "argv", ["notes", str(manifest_path), str(release / "notes.md")]):
+            notes.main()
+        rendered = (release / "notes.md").read_text()
+        self.assertIn("# Voice PE Firmware 0.7.0-r1", rendered)
+        self.assertIn("Updates only Voice PE", rendered)
+        self.assertIn("native-satellite1-0.7.0-r4", rendered)
+        self.assertEqual(rendered.count("| `ota` |"), 1)
 
 
 if __name__ == "__main__":

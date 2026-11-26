@@ -62,10 +62,11 @@ negotiation and a safe 5V amplifier fallback.
 
 ### USB Ethernet and PoE
 
-Satellite1 **0.7.0-r1** adds the tested XMOS 1.2.0-dev.1 pipeline and GPIO
-diagnostic cleanup. Its calibrated four-microphone beam remains before AEC,
-with stereo echo references. Voice PE, ReSpeaker XVF3800, and ESP32-S3-BOX-3
-retain **0.7.0**; Tater compares each board's version independently.
+Voice PE **0.7.0-r1** includes XMOS **1.3.4**, speech-aware direction tracking
+after echo cancellation, expiring playback/listening hints and smoother
+listening LEDs. Satellite1 retains **0.7.0-r4** with XMOS **1.2.0-dev.13**;
+ReSpeaker XVF3800 and ESP32-S3-BOX-3 retain **0.7.0**. Tater compares each
+board's version independently.
 
 Native firmware **0.7.0** includes USB Ethernet in all four standard images:
 **SAT1**, **Voice PE**, **ReSpeaker XVF3800**, and **ESP32-S3-BOX-3**.
@@ -581,8 +582,9 @@ After a successful build:
 Use `--board voicepe`, `--board satellite1`, `--board respeaker_xvf3800`, or
 `--board s3_box` to package a single board.
 
-For a public Satellite1-only release, use a `native-satellite1-*` tag. The release
-workflow builds only `sat1` and carries forward the other boards' published
+For a public single-board release, use a `native-satellite1-*` tag for Satellite1
+or a `native-voicepe-*` tag for Voice PE. The release workflow builds only the
+matching `sat1` or `voicepe` target and carries forward the other boards' published
 versions, URLs and checksums into the combined manifest. Other `native-*` tags
 build all boards. A tag push publishes the GitHub release and updates `latest`.
 The normal `sat1` target in 0.7.0-r4 includes XMOS 1.2.0-dev.13; capture/bench
@@ -593,11 +595,11 @@ To prepare the same scoped assets locally, download the currently published
 
 ```sh
 ./scripts/build_native_firmware_manifest.py \
-  --board satellite1 --skip-build \
+  --board voicepe --skip-build \
   --release-repo TaterTotterson/Tater-Native-Firmware \
-  --release-tag native-satellite1-0.7.0-r4 \
+  --release-tag native-voicepe-0.7.0-r1 \
   --previous-latest /path/to/published/latest.json \
-  --previous-manifest /path/to/published/native-0.7.0-r3-manifest.json
+  --previous-manifest /path/to/published/native-satellite1-0.7.0-r4-manifest.json
 ```
 
 Public single-board packaging requires both previous files so an update cannot
@@ -619,7 +621,7 @@ directly to the USB flash script.
 The embedded Voice PE XMOS update image lives at:
 
 ```text
-main/boards/voice_pe/xmos/ffva_v1.3.2-vod_upgrade.bin
+main/boards/voice_pe/xmos/ffva_v1.3.4-vod_upgrade.bin
 ```
 
 The editable source used to build that image is included at:

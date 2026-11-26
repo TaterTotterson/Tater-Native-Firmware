@@ -1,7 +1,7 @@
-- **Satellite1 only: 0.7.0-r4**, including XMOS **1.2.0-dev.13**.
-- Cancels speaker echo on all four microphones before combining them into a calibrated directional beam. The playback echo reference is mixed to mono.
-- Tracks speech direction after echo cancellation and keeps the direction LEDs responsive while listening over music.
-- Adds speech-aware interference cancellation and residual echo cleanup, with limits to protect the talker's voice. Supplies speech evidence to the existing noise suppression and gain control pipeline.
-- Fixes DSP communication and audio-frame ownership problems that could stall startup or playback, and reduces beamforming processing time.
-- Preserves the processed microphone path and unity ESP32 microphone gain from 0.7.0-r3.
-- Voice PE, ReSpeaker XVF3800, and ESP32-S3-BOX-3 stay on **0.7.0**, using their existing published binaries and checksums.
+- **Voice PE only: 0.7.0-r1**, including XMOS **1.3.4**.
+- Tracks speech direction using both echo-cancelled microphones, with speech evidence and echo checks to help follow the talker during music playback.
+- Removes the slow speech-score delay from direction updates and improves confidence for broad speech peaks and microphone gain differences.
+- Adds playback/listening hints that refresh automatically and expire if the host stops sending them. Unsupported XMOS images receive no hint writes.
+- Refreshes direction observations at 20 Hz and renders Voice PE's listening animation at 40 FPS for prompt, smoother LEDs.
+- Keeps existing echo cancellation, interference cancellation, noise suppression, gain control and voice endpointing settings unchanged.
+- Satellite1 stays on **0.7.0-r4**; ReSpeaker XVF3800 and ESP32-S3-BOX-3 stay on **0.7.0**, using their existing published binaries and checksums.
